@@ -1,2 +1,0 @@
-/home/jeff/Projects/crucible_helper/android/app/.cxx/RelWithDebInfo/p3i5v5s2/x86/CMakeFiles/edit_cache.dir
-/home/jeff/Projects/crucible_helper/android/app/.cxx/RelWithDebInfo/p3i5v5s2/x86/CMakeFiles/rebuild_cache.dir

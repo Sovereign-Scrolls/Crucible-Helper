@@ -1,1 +1,0 @@
-/home/jeff/Projects/crucible_helper/build/app/intermediates/cxx/RelWithDebInfo/p3i5v5s2/obj/x86
