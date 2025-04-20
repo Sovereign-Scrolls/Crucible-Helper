@@ -1,0 +1,2 @@
+/home/jeff/Projects/DeathTimer/death_timer/android/app/.cxx/Debug/24222h3z/x86_64/CMakeFiles/edit_cache.dir
+/home/jeff/Projects/DeathTimer/death_timer/android/app/.cxx/Debug/24222h3z/x86_64/CMakeFiles/rebuild_cache.dir
