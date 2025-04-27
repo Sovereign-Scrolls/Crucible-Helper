@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "999937639575",
+    "project_id": "crucible-helper",
+    "storage_bucket": "crucible-helper.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:999937639575:android:bb7540584cd638ecf2d5d2",
+        "android_client_info": {
+          "package_name": "com.example.crucible_helper"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyA_7E8uzMu9Qm-Jynx8iys7dud3I2I00Rk"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

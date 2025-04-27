@@ -1,0 +1,209 @@
+{
+  "playerName": "Eli Gross",
+  "characterName": "‭Efreet‬",
+  "characterNumber": 4,
+  "race": "‭Efreet‬",
+  "freeAffinity": "‭Fate",
+  "cultivationTier": true,
+  "buildTotal": 40,
+  "extraHitPoints": "Iron",
+  "skills": [
+    {
+      "name": "Block",
+      "type": "Body",
+      "level": 4,
+      "frequency": "Encounter"
+    },
+    {
+      "name": "Change Destiny",
+      "type": "‭Fate",
+      "level": 1,
+      "frequency": "Bell"
+    },
+    {
+      "name": "Dodge",
+      "type": "Body",
+      "level": 4,
+      "frequency": "Bell"
+    },
+    {
+      "name": "‭Examination‬",
+      "type": "Common",
+      "level": 1,
+      "frequency": ""
+    },
+    {
+      "name": "Grant a Magic Shield",
+      "type": "‭Fate",
+      "level": 1,
+      "frequency": "Daily"
+    },
+    {
+      "name": "Grant Invulnerability",
+      "type": "‭Fate",
+      "level": 1,
+      "frequency": "Bell"
+    },
+    {
+      "name": "Heat of the Desert",
+      "type": "‭Efreet‬",
+      "level": 1,
+      "frequency": ""
+    },
+    {
+      "name": "Karmic Backlash",
+      "type": "‭Fate",
+      "level": 4,
+      "frequency": "Encounter"
+    },
+    {
+      "name": "Karmic Beam",
+      "type": "‭Fate",
+      "level": 4,
+      "frequency": "Encounter"
+    },
+    {
+      "name": "Karmic Protection",
+      "type": "‭Fate",
+      "level": 1,
+      "frequency": "Encounter"
+    },
+    {
+      "name": "Karmic Ray",
+      "type": "‭Fate",
+      "level": 4,
+      "frequency": "Bell"
+    },
+    {
+      "name": "Karmic Renewal",
+      "type": "‭Fate",
+      "level": 1,
+      "frequency": "Daily"
+    },
+    {
+      "name": "Knockback",
+      "type": "Earth",
+      "level": 1,
+      "frequency": "Encounter"
+    },
+    {
+      "name": "‭Literacy‬",
+      "type": "Common",
+      "level": 1,
+      "frequency": ""
+    },
+    {
+      "name": "Mote of Fate",
+      "type": "‭Fate",
+      "level": 1,
+      "frequency": "At Will"
+    },
+    {
+      "name": "Path Not Taken",
+      "type": "‭Fate",
+      "level": 2,
+      "frequency": "Weekend"
+    },
+    {
+      "name": "Paths of Fate",
+      "type": "‭Efreet‬",
+      "level": 1,
+      "frequency": ""
+    },
+    {
+      "name": "Portent of the Stars",
+      "type": "‭Efreet‬",
+      "level": 1,
+      "frequency": ""
+    },
+    {
+      "name": "Silence",
+      "type": "Water",
+      "level": 1,
+      "frequency": "Bell"
+    }
+  ],
+  "tiers": {
+    "Iron": {
+      "affinityPointsTotal": -88,
+      "affinities": [
+        {
+          "name": "Body",
+          "level": 3,
+          "affinityPointCost": -12
+        },
+        {
+          "name": "Earth",
+          "level": 4,
+          "affinityPointCost": -10
+        },
+        {
+          "name": "‭Fate",
+          "level": 6,
+          "affinityPointCost": -54
+        },
+        {
+          "name": "Fate",
+          "level": 1,
+          "affinityPointCost": ""
+        },
+        {
+          "name": "Metal",
+          "level": 4,
+          "affinityPointCost": -10
+        },
+        {
+          "name": "Water",
+          "level": 1,
+          "affinityPointCost": -1
+        },
+        {
+          "name": "‭Wood",
+          "level": 1,
+          "affinityPointCost": -1
+        }
+      ]
+    },
+    "Silver": {
+      "affinityPointsTotal": -24,
+      "affinities": [
+        {
+          "name": "Body",
+          "level": 1,
+          "affinityPointCost": -2
+        },
+        {
+          "name": "Earth",
+          "level": 1,
+          "affinityPointCost": -1
+        },
+        {
+          "name": "‭Fate",
+          "level": 4,
+          "affinityPointCost": -20
+        },
+        {
+          "name": "Metal",
+          "level": 1,
+          "affinityPointCost": -1
+        }
+      ]
+    },
+    "Gold": {
+      "affinityPointsTotal": 0,
+      "affinities": []
+    },
+    "Jade": {
+      "affinityPointsTotal": 0,
+      "affinities": []
+    },
+    "Saint": {
+      "affinityPointsTotal": 0,
+      "affinities": []
+    },
+    "Sovereign": {
+      "affinityPointsTotal": 0,
+      "affinities": []
+    }
+  }
+}
