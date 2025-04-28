@@ -60,6 +60,12 @@ class _LoginPageState extends State<LoginPage> {
     return Scaffold(
       appBar: AppBar(
         title: Text('Login'),
+        leading: Navigator.canPop(context)
+          ? IconButton(
+            icon: Icon(Icons.arrow_back),
+            onPressed: () => Navigator.pop(context),
+          )
+          : null,
       ),
       body: Center(
         child: user == null

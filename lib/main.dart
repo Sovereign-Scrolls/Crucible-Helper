@@ -349,11 +349,36 @@ class _DeathTimerPageState extends State<DeathTimerPage> {
 }
 
 class ProfilePage extends StatelessWidget {
+  final FirebaseAuth _auth = FirebaseAuth.instance;
+
+  Future<void> signOut(BuildContext context) async {
+    await _auth.signOut();
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(builder: (_) => LoginPage()),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final user = _auth.currentUser;
+
     return Scaffold(
       appBar: AppBar(title: Text('Profile')),
-      body: Center(child: Text('Profile Page Coming Soon!')),
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Text('Signed in as ${user?.email ?? "Unknown"}', style: TextStyle(fontSize: 18)),
+            SizedBox(height: 20),
+            ElevatedButton(
+              onPressed: () => signOut(context),
+              child: Text('Sign Out'),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
+
