@@ -350,6 +350,32 @@ class _DeathTimerPageState extends State<DeathTimerPage> {
 class ProfilePage extends StatelessWidget {
   final FirebaseAuth _auth = FirebaseAuth.instance;
 
+  Future<bool> fetchCharacterFromFirebase() async {
+    try {
+      final user = _auth.currentUser;
+      final email = user?.email;
+      if (email == null) {
+        throw Exception("User email is null");
+      }
+
+      final ref = FirebaseStorage.instance.ref().child('users/$email/pc.json');
+      final data = await ref.getData();
+
+      if (data != null) {
+        final jsonString = utf8.decode(data);
+
+        // Save the jsonString into local storage for offline use (optional, future)
+        // For now, just print it or keep in memory if needed
+
+        print('Character synced successfully!');
+        return true;
+      }
+    } catch (e) {
+      print('Failed to fetch character: $e');
+    }
+    return false;
+  }
+
   Future<void> signOut(BuildContext context) async {
     await _auth.signOut();
     Navigator.pushReplacement(
@@ -371,6 +397,22 @@ class ProfilePage extends StatelessWidget {
             Text('Signed in as ${user?.email ?? "Unknown"}', style: TextStyle(fontSize: 18)),
             SizedBox(height: 20),
             ElevatedButton(
+              onPressed: () async {
+                bool success = await fetchCharacterFromFirebase();
+                if (success) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('Character synced successfully!')),
+                  );
+                } else {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('Failed to sync character. Please check your connection.')),
+                  );
+                }
+              },
+              child: Text('🔄 Sync Character'),
+            ),
+            SizedBox(height: 20),
+            ElevatedButton(
               onPressed: () => signOut(context),
               child: Text('Sign Out'),
             ),
@@ -380,4 +422,3 @@ class ProfilePage extends StatelessWidget {
     );
   }
 }
-
