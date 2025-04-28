@@ -1,6 +1,6 @@
 {
-    "name": "death_timer",
-    "short_name": "death_timer",
+    "name": "crucible_helper",
+    "short_name": "crucible_helper",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",

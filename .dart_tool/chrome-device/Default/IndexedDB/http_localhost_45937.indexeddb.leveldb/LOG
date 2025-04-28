@@ -1,0 +1,3 @@
+2025/04/27-15:58:57.519 becfa Creating DB /tmp/flutter_tools.HTOZCQ/flutter_tools_chrome_device.EIQTNF/Default/IndexedDB/http_localhost_45937.indexeddb.leveldb since it was missing.
+2025/04/27-15:58:57.531 becfa Reusing MANIFEST /tmp/flutter_tools.HTOZCQ/flutter_tools_chrome_device.EIQTNF/Default/IndexedDB/http_localhost_45937.indexeddb.leveldb/MANIFEST-000001
+2025/04/27-15:58:57.535 becfb Manual compaction at level-0 from '\x00\x01\x00\x00\x00' @ 72057594037927935 : 1 .. '\x00\x02\x00\x00\x00' @ 0 : 0; will stop at (end)
