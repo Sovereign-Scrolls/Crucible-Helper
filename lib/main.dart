@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'dart:async';
 import 'dart:convert';
-import 'package:flutter/services.dart' show rootBundle;
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
@@ -176,58 +175,276 @@ class _HomeButton extends StatelessWidget {
   }
 }
 
-class CharacterSheetPage extends StatelessWidget {
+class CharacterSheetPage extends StatefulWidget {
   final Character character;
-  
-  CharacterSheetPage({required this.character});
+  const CharacterSheetPage({required this.character});
 
   @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: Text('My Character')),
-      body: ListView(
-        padding: const EdgeInsets.all(16.0),
-        children: [
-          Text('Player: ${character.playerName}', style: TextStyle(fontSize: 20)),
-          SizedBox(height: 8),
-          Text('Character: ${character.characterName}', style: TextStyle(fontSize: 20)),
-          SizedBox(height: 8),
-          Text('Race: ${character.race}', style: TextStyle(fontSize: 20)),
-          SizedBox(height: 8),
-          Text('Build Total: ${character.buildTotal}', style: TextStyle(fontSize: 20)),
-          SizedBox(height: 8),
-          Text('Hit Points: ${character.hitPoints}', style: TextStyle(fontSize: 20)),
-          SizedBox(height: 8),
-          Text('Cultivation: ${character.cultivationTier}', style: TextStyle(fontSize: 20)),
-          SizedBox(height: 8),
-          Divider(height: 32),
-          ExpansionTile(
-            title: Text('Skills', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-            children: character.skills.map((skill) {
-              return ListTile(
-                title: Text(skill.name),
-                subtitle: Text('${skill.type} • Level ${skill.level} • ${skill.frequency}'),
-              );
-            }).toList(),
-          ),
-          Divider(height: 32),
-          ExpansionTile(
-            title: Text('Tiers & Affinities', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-            children: character.tiers.entries.map((tierEntry) {
-              return ExpansionTile(
-                title: Text(tierEntry.key),
-                children: tierEntry.value.map((affinity) {
-                  return ListTile(
-                    title: Text(affinity.name),
-                    subtitle: Text('Level ${affinity.level}'),
-                  );
-                }).toList(),
-              );
-            }).toList(),
+  State<CharacterSheetPage> createState() => _CharacterSheetPageState();
+}
+
+class _CharacterSheetPageState extends State<CharacterSheetPage> {
+  late int currentHP;
+  String _selectedSkillSort = 'Alphabetical';
+  final List<String> _skillSortOptions = ['Alphabetical', 'Type', 'Frequency'];
+
+  @override
+  void initState() {
+    super.initState();
+    currentHP = widget.character.hitPoints['total'];
+  }
+
+  void _showHitPointInfo() {
+    final hp = widget.character.hitPoints;
+    final buffer = StringBuffer();
+
+    buffer.writeln('Base: ${hp['base']}');
+    buffer.writeln('Extra: ${hp['extra']}');
+
+    // Calculate Body Total
+    const tiers = ['Iron', 'Silver', 'Gold', 'Jade', 'Saint', 'Sovereign'];
+    int bodyTotal = 0;
+    final tierDetails = <String>[];
+
+    for (final tier in tiers) {
+      final key = 'body$tier';
+      final dynamic raw = hp[key] ?? 0;
+      final int value = raw is int ? raw : (raw as num).toInt();
+
+      if (value > 0) {
+        bodyTotal += value;
+        tierDetails.add('  • $tier: $value');
+      }
+    }
+
+    if (bodyTotal > 0) {
+      buffer.writeln('Body Total: $bodyTotal');
+      tierDetails.forEach(buffer.writeln);
+    }
+
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text('How Hit Points Are Calculated'),
+        content: Text(buffer.toString()),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text('Close'),
           ),
         ],
       ),
     );
+  }
+
+  void _editCurrentHP() async {
+    final result = await showDialog<int>(
+      context: context,
+
+      builder: (context) {
+        int temp = currentHP;
+
+        return StatefulBuilder(
+          builder: (context, setState) {
+            return AlertDialog(
+              title: Text('Adjust Current HP'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Slider(
+                    min: 0,
+                    max: widget.character.hitPoints['total'].toDouble(),
+                    divisions: widget.character.hitPoints['total'],
+                    value: temp.toDouble(),
+                    label: "$temp",
+                    onChanged: (value) {
+                      setState(() => temp = value.round());
+                    },
+                  ),
+                  Text('$temp / ${widget.character.hitPoints['total']}'),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: Text('Cancel'),
+                ),
+                ElevatedButton(
+                  onPressed: () => Navigator.pop(context, temp),
+                  child: Text('Set'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    if (result != null && result != currentHP) {
+      setState(() {
+        currentHP = result;
+      });
+
+      if (currentHP == 0) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Current HP is 0. Start death timer?'),
+        ));
+      }
+    }
+  }
+
+  void _showBuildInfo(BuildContext context) {
+    final build = widget.character.build;
+    final buffer = StringBuffer();
+
+    buffer.writeln('Starting Build: ${build.starting.amount} (${build.starting.date})');
+    buffer.writeln('');
+
+    if (build.gains.isNotEmpty) {
+      buffer.writeln('Gains:');
+      for (var gain in build.gains) {
+        buffer.writeln('• +${gain.amount} on ${gain.date}');
+        if (gain.reason.isNotEmpty) buffer.writeln('  Reason: ${gain.reason}');
+        if (gain.note.isNotEmpty) buffer.writeln('  Note: ${gain.note}');
+        buffer.writeln('');
+      }
+    }
+
+    // Optional: Confirm total
+    final calculatedTotal = build.starting.amount +
+        build.gains.fold<int>(0, (sum, g) => sum + g.amount);
+    buffer.writeln('Calculated Total: $calculatedTotal');
+    buffer.writeln('Recorded Total: ${build.total}');
+
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text('Build Total Details'),
+        content: SingleChildScrollView(child: Text(buffer.toString())),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text('Close'),
+          )
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final character = widget.character;
+    return Scaffold(
+      appBar: AppBar(title: Text('My Character')),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // ✅ Character header
+            Center(
+              child: Text(
+                character.characterName,
+                style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold),
+                textAlign: TextAlign.center,
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // ✅ Race + Cultivation + Build Total + HP UI
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // ... (your left-side column)
+                // ... (your right-side HP box)
+              ],
+            ),
+
+            Divider(height: 32),
+
+            // ✅ Skills header + dropdown
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text('Skills', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                DropdownButton<String>(
+                  value: _selectedSkillSort,
+                  onChanged: (value) {
+                    setState(() {
+                      _selectedSkillSort = value!;
+                    });
+                  },
+                  items: _skillSortOptions.map((String value) {
+                    return DropdownMenuItem<String>(
+                      value: value,
+                      child: Text(value),
+                    );
+                  }).toList(),
+                ),
+              ],
+            ),
+
+            // ✅ Skills list (scrollable within the scroll view)
+            ListView(
+              shrinkWrap: true,
+              physics: NeverScrollableScrollPhysics(),
+              children: _sortedSkills(character.skills).map((skill) {
+                return ListTile(
+                  title: Text(skill.name),
+                  subtitle: Text('${skill.type} • Level ${skill.level} • ${skill.frequency}'),
+                );
+              }).toList(),
+            ),
+
+            Divider(height: 32),
+
+            // ✅ Tiers & Affinities
+            ExpansionTile(
+              title: Text('Tiers & Affinities', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              children: character.tiers.entries.map((tierEntry) {
+                return ExpansionTile(
+                  title: Text(tierEntry.key),
+                  children: tierEntry.value.map((affinity) {
+                    return ListTile(
+                      title: Text(affinity.name),
+                      subtitle: Text('Level ${affinity.level}'),
+                    );
+                  }).toList(),
+                );
+              }).toList(),
+            ),
+          ],
+        ),
+      ),
+
+
+
+    );
+  }
+
+  List<Skill> _sortedSkills(List<Skill> skills) {
+    switch (_selectedSkillSort) {
+      case 'Type':
+        return [...skills]..sort((a, b) => a.type.compareTo(b.type));
+      case 'Frequency':
+        return [...skills]..sort((a, b) => a.frequency.compareTo(b.frequency));
+      default:
+        return [...skills]..sort((a, b) => a.name.compareTo(b.name));
+    }
+  }
+
+
+
+  Color _getCultivationColor(String tier) {
+    switch (tier.toLowerCase()) {
+      case 'iron': return Colors.grey;
+      case 'silver': return Colors.white;
+      case 'gold': return Colors.yellow.shade600;
+      case 'jade': return Colors.green.shade400;
+      case 'saint': return Colors.red;
+      case 'sovereign': return Colors.purple;
+      default: return Colors.blueGrey;
+    }
   }
 }
 
@@ -386,24 +603,23 @@ class ProfilePage extends StatelessWidget {
       serviceWorker.getRegistration().then((registration) {
         registration?.update(); // Ask the service worker to check for updates
 
-        registration?.onUpdateFound.listen((event) {
+        registration?.addEventListener('updatefound', (event) {
           final newWorker = registration.installing;
 
-          newWorker?.onStateChange.listen((stateEvent) {
+          newWorker?.addEventListener('statechange', (stateEvent) {
             if (newWorker.state == 'installed') {
-              // If there's already a controller, it's an update
-              if (html.window.navigator.serviceWorker.controller != null) {
-                // New content is available, show a dialog or just reload
+              if (html.window.navigator.serviceWorker?.controller != null) {
                 ScaffoldMessenger.of(context).showSnackBar(SnackBar(
                   content: Text('Update found! Reloading...'),
                 ));
                 Future.delayed(Duration(seconds: 1), () {
-                  html.window.location.reload(); // Reload the page
+                  html.window.location.reload();
                 });
               }
             }
           });
         });
+
       });
     } else {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(

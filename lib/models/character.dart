@@ -3,9 +3,9 @@ class Character {
   final String characterName;
   final int characterNumber;
   final String race;
-  final int buildTotal;
-  final int hitPoints;
-  final bool cultivationTier;
+  final Build build;
+  final Map<String, dynamic> hitPoints; 
+  final String cultivationTier;
   final List<Skill> skills;
   final Map<String, List<Affinity>> tiers;
 
@@ -14,7 +14,7 @@ class Character {
     required this.characterName,
     required this.characterNumber,
     required this.race,
-    required this.buildTotal,
+    required this.build,
     required this.hitPoints,
     required this.cultivationTier,
     required this.skills,
@@ -38,9 +38,9 @@ class Character {
       characterName: json['characterName'],
       characterNumber: json['characterNumber'],
       race: json['race'],
-      buildTotal: json['buildTotal'],
+      build: Build.fromJson(json['build']),
       hitPoints: json['hitPoints'],
-      cultivationTier: json['cultivationTier'] ?? false,
+      cultivationTier: json['cultivationTier'],
       skills: (json['skills'] as List<dynamic>)
           .map((skill) => Skill.fromJson(skill))
           .toList(),
@@ -88,6 +88,59 @@ class Affinity {
       name: json['name'],
       level: json['level'],
       affinityPointCost: json['affinityPointCost'],
+    );
+  }
+}
+
+class Build {
+  final int total;
+  final StartingBuild starting;
+  final List<BuildGain> gains;
+
+  Build({required this.total, required this.starting, required this.gains});
+
+  factory Build.fromJson(Map<String, dynamic> json) {
+    return Build(
+      total: json['total'],
+      starting: StartingBuild.fromJson(json['starting']),
+      gains: (json['gains'] as List).map((e) => BuildGain.fromJson(e)).toList(),
+    );
+  }
+}
+
+class StartingBuild {
+  final int amount;
+  final String date;
+
+  StartingBuild({required this.amount, required this.date});
+
+  factory StartingBuild.fromJson(Map<String, dynamic> json) {
+    return StartingBuild(
+      amount: json['amount'],
+      date: json['date'],
+    );
+  }
+}
+
+class BuildGain {
+  final int amount;
+  final String reason;
+  final String note;
+  final String date;
+
+  BuildGain({
+    required this.amount,
+    required this.reason,
+    required this.note,
+    required this.date,
+  });
+
+  factory BuildGain.fromJson(Map<String, dynamic> json) {
+    return BuildGain(
+      amount: json['amount'],
+      reason: json['reason'],
+      note: json['note'],
+      date: json['date'],
     );
   }
 }

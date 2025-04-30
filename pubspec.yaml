@@ -30,3 +30,9 @@ flutter:
 
   assets:
     - assets/logo.png
+
+
+fonts:
+  - family: Cinzel
+    fonts:
+      - asset: assets/fonts/Cinzel-Regular.ttf
