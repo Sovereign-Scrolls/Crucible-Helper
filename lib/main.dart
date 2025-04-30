@@ -10,6 +10,8 @@ import 'firebase_options.dart';
 import 'models/character.dart'; 
 import 'pages/login_page.dart';
 
+Character? cachedCharacter;
+
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -19,8 +21,6 @@ void main() async {
   runApp(const CrucibleHelperApp());
 
 }
-
-
 
 class CrucibleHelperApp extends StatelessWidget {
   const CrucibleHelperApp({Key? key}) : super(key: key);
@@ -177,7 +177,7 @@ class _HomeButton extends StatelessWidget {
 
 class CharacterSheetPage extends StatelessWidget {
   final Character character;
-
+  
   CharacterSheetPage({required this.character});
 
   @override
@@ -193,17 +193,12 @@ class CharacterSheetPage extends StatelessWidget {
           SizedBox(height: 8),
           Text('Race: ${character.race}', style: TextStyle(fontSize: 20)),
           SizedBox(height: 8),
-          Text('Free Affinity: ${character.freeAffinity}', style: TextStyle(fontSize: 20)),
-          SizedBox(height: 8),
           Text('Build Total: ${character.buildTotal}', style: TextStyle(fontSize: 20)),
           SizedBox(height: 8),
-          Text('Extra HP: ${character.extraHitPoints}', style: TextStyle(fontSize: 20)),
+          Text('Hit Points: ${character.hitPoints}', style: TextStyle(fontSize: 20)),
           SizedBox(height: 8),
-          if (character.cultivationTier)
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 8.0),
-              child: Chip(label: Text('Cultivation Tier', style: TextStyle(fontWeight: FontWeight.bold))),
-            ),
+          Text('Cultivation: ${character.cultivationTier ? "Yes" : "No"}', style: TextStyle(fontSize: 20)),
+          SizedBox(height: 8),
           Divider(height: 32),
           ExpansionTile(
             title: Text('Skills', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
@@ -358,24 +353,20 @@ class ProfilePage extends StatelessWidget {
     try {
       final user = _auth.currentUser;
       final email = user?.email;
-      if (email == null) {
-        throw Exception("User email is null");
-      }
+      if (email == null) return false;
 
       final ref = FirebaseStorage.instance.ref().child('users/$email/pc.json');
       final data = await ref.getData();
 
       if (data != null) {
         final jsonString = utf8.decode(data);
-
-        // Save the jsonString into local storage for offline use (optional, future)
-        // For now, just print it or keep in memory if needed
-
-        print('Character synced successfully!');
+        final jsonMap = json.decode(jsonString);
+        cachedCharacter = Character.fromJson(jsonMap);
+        print('✅ Character updated');
         return true;
       }
     } catch (e) {
-      print('Failed to fetch character: $e');
+      print('❌ Failed to sync character: $e');
     }
     return false;
   }
@@ -403,15 +394,13 @@ class ProfilePage extends StatelessWidget {
             ElevatedButton(
               onPressed: () async {
                 bool success = await fetchCharacterFromFirebase();
-                if (success) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text('Character synced successfully!')),
-                  );
-                } else {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text('Failed to sync character. Please check your connection.')),
-                  );
-                }
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text(success
+                        ? 'Character synced successfully!'
+                        : 'Failed to sync character.'),
+                  ),
+                );
               },
               child: Text('🔄 Sync Character'),
             ),

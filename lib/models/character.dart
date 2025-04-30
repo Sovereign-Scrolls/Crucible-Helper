@@ -3,9 +3,8 @@ class Character {
   final String characterName;
   final int characterNumber;
   final String race;
-  final String freeAffinity;
   final int buildTotal;
-  final String extraHitPoints;
+  final int hitPoints;
   final bool cultivationTier;
   final List<Skill> skills;
   final Map<String, List<Affinity>> tiers;
@@ -15,9 +14,8 @@ class Character {
     required this.characterName,
     required this.characterNumber,
     required this.race,
-    required this.freeAffinity,
     required this.buildTotal,
-    required this.extraHitPoints,
+    required this.hitPoints,
     required this.cultivationTier,
     required this.skills,
     required this.tiers,
@@ -40,9 +38,8 @@ class Character {
       characterName: json['characterName'],
       characterNumber: json['characterNumber'],
       race: json['race'],
-      freeAffinity: json['freeAffinity'],
       buildTotal: json['buildTotal'],
-      extraHitPoints: json['extraHitPoints'],
+      hitPoints: json['hitPoints'],
       cultivationTier: json['cultivationTier'] ?? false,
       skills: (json['skills'] as List<dynamic>)
           .map((skill) => Skill.fromJson(skill))
