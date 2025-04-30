@@ -9,6 +9,7 @@ import 'firebase_options.dart';
 
 import 'models/character.dart'; 
 import 'pages/login_page.dart';
+import 'dart:html' as html;
 
 Character? cachedCharacter;
 
@@ -378,6 +379,39 @@ class ProfilePage extends StatelessWidget {
       MaterialPageRoute(builder: (_) => LoginPage()),
     );
   }
+  void checkForAppUpdate(BuildContext context) {
+    final serviceWorker = html.window.navigator.serviceWorker;
+
+    if (serviceWorker != null) {
+      serviceWorker.getRegistration().then((registration) {
+        registration?.update(); // Ask the service worker to check for updates
+
+        registration?.onUpdateFound.listen((event) {
+          final newWorker = registration.installing;
+
+          newWorker?.onStateChange.listen((stateEvent) {
+            if (newWorker.state == 'installed') {
+              // If there's already a controller, it's an update
+              if (html.window.navigator.serviceWorker.controller != null) {
+                // New content is available, show a dialog or just reload
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                  content: Text('Update found! Reloading...'),
+                ));
+                Future.delayed(Duration(seconds: 1), () {
+                  html.window.location.reload(); // Reload the page
+                });
+              }
+            }
+          });
+        });
+      });
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('No Service Worker detected (not a PWA build?)'),
+      ));
+    }
+  }
+
 
   @override
   Widget build(BuildContext context) {
@@ -404,6 +438,11 @@ class ProfilePage extends StatelessWidget {
               },
               child: Text('🔄 Sync Character'),
             ),
+            ElevatedButton(
+              onPressed: () => checkForAppUpdate(context),
+              child: Text('🛠 Check for App Update'),
+            ),
+
             SizedBox(height: 20),
             ElevatedButton(
               onPressed: () => signOut(context),
@@ -414,4 +453,6 @@ class ProfilePage extends StatelessWidget {
       ),
     );
   }
+
+
 }
