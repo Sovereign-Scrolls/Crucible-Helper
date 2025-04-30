@@ -36290,22 +36290,16 @@ A.nZ.prototype={
 O(a){var s=null,r=this.d
 return A.oJ(A.c([A.aw4(B.dO,A.ahM(this.c,s,28),s,r,s,!1,this.e),A.d1(s,8,s),A.bI(r,A.dz(s,s,s,s,s,s,s,s,s,s,s,12,s,s,s,s,s,!0,s,s,s,s,s,s,s,s))],t.F),B.ad,B.aV,B.ei)}}
 A.oz.prototype={
-O(a1){var s,r,q,p,o,n,m=null,l=A.C2(m,A.bI("My Character",m)),k=this.c,j=A.bI("Player: "+k.a,A.dz(m,m,m,m,m,m,m,m,m,m,m,20,m,m,m,m,m,!0,m,m,m,m,m,m,m,m)),i=A.d1(m,8,m),h=A.bI("Character: "+k.b,A.dz(m,m,m,m,m,m,m,m,m,m,m,20,m,m,m,m,m,!0,m,m,m,m,m,m,m,m)),g=A.d1(m,8,m),f=A.bI("Race: "+k.d,A.dz(m,m,m,m,m,m,m,m,m,m,m,20,m,m,m,m,m,!0,m,m,m,m,m,m,m,m)),e=A.d1(m,8,m),d=A.bI("Build Total: "+k.e,A.dz(m,m,m,m,m,m,m,m,m,m,m,20,m,m,m,m,m,!0,m,m,m,m,m,m,m,m)),c=A.d1(m,8,m),b=A.bI("Hit Points: "+k.f,A.dz(m,m,m,m,m,m,m,m,m,m,m,20,m,m,m,m,m,!0,m,m,m,m,m,m,m,m)),a=A.d1(m,8,m),a0=k.r?"Yes":"No"
-a0=A.bI("Cultivation: "+a0,A.dz(m,m,m,m,m,m,m,m,m,m,m,20,m,m,m,m,m,!0,m,m,m,m,m,m,m,m))
-s=A.d1(m,8,m)
-r=A.alk(32)
-q=A.bI("Skills",A.dz(m,m,m,m,m,m,m,m,m,m,m,18,m,m,B.be,m,m,!0,m,m,m,m,m,m,m,m))
-p=k.w
-o=A.Z(p).i("ad<1,i4>")
-q=A.aho(A.V(new A.ad(p,new A.Su(),o),!0,o.i("aj.E")),q)
-o=A.alk(32)
-p=A.bI("Tiers & Affinities",A.dz(m,m,m,m,m,m,m,m,m,m,m,18,m,m,B.be,m,m,!0,m,m,m,m,m,m,m,m))
-k=k.x
-n=A.j(k).i("d6<1,2>")
-n=A.hc(new A.d6(k,n),new A.Sv(),n.i("o.E"),t.Pv)
-p=A.c([j,i,h,g,f,e,d,c,b,a,a0,s,r,q,o,A.aho(A.V(n,!0,A.j(n).i("o.E")),p)],t.F)
-n=A.aw([null,0],t.LO,t.S)
-return A.wK(l,m,new A.Fe(new A.a66(!0,!0,!0,p,n),B.zV,B.bt,!1,m,m,B.wg,!1,m,16,B.aS,B.GH,m,B.a4,B.ag,m))}}
+O(a1){var s,r=null,q=A.C2(r,A.bI("My Character",r)),p=this.c,o=A.bI("Player: "+p.a,A.dz(r,r,r,r,r,r,r,r,r,r,r,20,r,r,r,r,r,!0,r,r,r,r,r,r,r,r)),n=A.d1(r,8,r),m=A.bI("Character: "+p.b,A.dz(r,r,r,r,r,r,r,r,r,r,r,20,r,r,r,r,r,!0,r,r,r,r,r,r,r,r)),l=A.d1(r,8,r),k=A.bI("Race: "+p.d,A.dz(r,r,r,r,r,r,r,r,r,r,r,20,r,r,r,r,r,!0,r,r,r,r,r,r,r,r)),j=A.d1(r,8,r),i=A.bI("Build Total: "+p.e,A.dz(r,r,r,r,r,r,r,r,r,r,r,20,r,r,r,r,r,!0,r,r,r,r,r,r,r,r)),h=A.d1(r,8,r),g=A.bI("Hit Points: "+p.f,A.dz(r,r,r,r,r,r,r,r,r,r,r,20,r,r,r,r,r,!0,r,r,r,r,r,r,r,r)),f=A.d1(r,8,r),e=A.bI("Cultivation: "+p.r,A.dz(r,r,r,r,r,r,r,r,r,r,r,20,r,r,r,r,r,!0,r,r,r,r,r,r,r,r)),d=A.d1(r,8,r),c=A.alk(32),b=A.bI("Skills",A.dz(r,r,r,r,r,r,r,r,r,r,r,18,r,r,B.be,r,r,!0,r,r,r,r,r,r,r,r)),a=p.w,a0=A.Z(a).i("ad<1,i4>")
+b=A.aho(A.V(new A.ad(a,new A.Su(),a0),!0,a0.i("aj.E")),b)
+a0=A.alk(32)
+a=A.bI("Tiers & Affinities",A.dz(r,r,r,r,r,r,r,r,r,r,r,18,r,r,B.be,r,r,!0,r,r,r,r,r,r,r,r))
+p=p.x
+s=A.j(p).i("d6<1,2>")
+s=A.hc(new A.d6(p,s),new A.Sv(),s.i("o.E"),t.Pv)
+a=A.c([o,n,m,l,k,j,i,h,g,f,e,d,c,b,a0,A.aho(A.V(s,!0,A.j(s).i("o.E")),a)],t.F)
+s=A.aw([null,0],t.LO,t.S)
+return A.wK(q,r,new A.Fe(new A.a66(!0,!0,!0,a,s),B.zV,B.bt,!1,r,r,B.wg,!1,r,16,B.aS,B.GH,r,B.a4,B.ag,r))}}
 A.Su.prototype={
 $1(a){var s=null,r=A.bI(a.a,s)
 return A.ahX(s,s,s,!0,!0,s,s,s,A.bI(a.b+" \u2022 Level "+a.c+" \u2022 "+a.d,s),r,s,s)},
