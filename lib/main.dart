@@ -197,7 +197,7 @@ class CharacterSheetPage extends StatelessWidget {
           SizedBox(height: 8),
           Text('Hit Points: ${character.hitPoints}', style: TextStyle(fontSize: 20)),
           SizedBox(height: 8),
-          Text('Cultivation: ${character.cultivationTier ? "Yes" : "No"}', style: TextStyle(fontSize: 20)),
+          Text('Cultivation: ${character.cultivationTier}', style: TextStyle(fontSize: 20)),
           SizedBox(height: 8),
           Divider(height: 32),
           ExpansionTile(
