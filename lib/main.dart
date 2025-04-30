@@ -201,7 +201,6 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
     buffer.writeln('Base: ${hp['base']}');
     buffer.writeln('Extra: ${hp['extra']}');
 
-    // Calculate Body Total
     const tiers = ['Iron', 'Silver', 'Gold', 'Jade', 'Saint', 'Sovereign'];
     int bodyTotal = 0;
     final tierDetails = <String>[];
@@ -240,7 +239,6 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
   void _editCurrentHP() async {
     final result = await showDialog<int>(
       context: context,
-
       builder: (context) {
         int temp = currentHP;
 
@@ -297,8 +295,7 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
     final build = widget.character.build;
     final buffer = StringBuffer();
 
-    buffer.writeln('Starting Build: ${build.starting.amount} (${build.starting.date})');
-    buffer.writeln('');
+    buffer.writeln('Starting Build: ${build.starting.amount} (${build.starting.date})\n');
 
     if (build.gains.isNotEmpty) {
       buffer.writeln('Gains:');
@@ -310,7 +307,6 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
       }
     }
 
-    // Optional: Confirm total
     final calculatedTotal = build.starting.amount +
         build.gains.fold<int>(0, (sum, g) => sum + g.amount);
     buffer.writeln('Calculated Total: $calculatedTotal');
@@ -331,9 +327,34 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
     );
   }
 
+  List<Skill> _sortedSkills(List<Skill> skills) {
+    switch (_selectedSkillSort) {
+      case 'Type':
+        return List.from(skills)..sort((a, b) => a.type.compareTo(b.type));
+      case 'Frequency':
+        return List.from(skills)..sort((a, b) => a.frequency.compareTo(b.frequency));
+      case 'Alphabetical':
+      default:
+        return List.from(skills)..sort((a, b) => a.name.compareTo(b.name));
+    }
+  }
+
+  Color _getCultivationColor(String tier) {
+    switch (tier.toLowerCase()) {
+      case 'iron': return Colors.grey;
+      case 'silver': return Colors.white;
+      case 'gold': return Colors.yellow.shade600;
+      case 'jade': return Colors.green.shade400;
+      case 'saint': return Colors.red;
+      case 'sovereign': return Colors.purple;
+      default: return Colors.blueGrey;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final character = widget.character;
+
     return Scaffold(
       appBar: AppBar(title: Text('My Character')),
       body: SingleChildScrollView(
@@ -341,7 +362,6 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // ✅ Character header
             Center(
               child: Text(
                 character.characterName,
@@ -351,18 +371,73 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
             ),
             const SizedBox(height: 16),
 
-            // ✅ Race + Cultivation + Build Total + HP UI
+            // Race / Cultivation / Build Total + HP box
             Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // ... (your left-side column)
-                // ... (your right-side HP box)
+                // Left: Race, Cultivation, Build
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('Race: ${character.race}', style: TextStyle(fontSize: 18)),
+                      Text(
+                        'Cultivation: ${character.cultivationTier}',
+                        style: TextStyle(
+                          fontSize: 18,
+                          color: _getCultivationColor(character.cultivationTier),
+                        ),
+                      ),
+                      Row(
+                        children: [
+                          Text('Build Total: ${character.build.total}', style: TextStyle(fontSize: 18)),
+                          SizedBox(width: 4),
+                          GestureDetector(
+                            onTap: () => _showBuildInfo(context),
+                            child: Icon(Icons.info_outline, size: 18, color: Colors.grey[300]),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+
+                // Right: Hit Points Box
+                GestureDetector(
+                  onTap: _editCurrentHP,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text('Hit Points', style: TextStyle(fontSize: 16)),
+                          IconButton(
+                            icon: Icon(Icons.info_outline, size: 16),
+                            onPressed: _showHitPointInfo,
+                          ),
+                        ],
+                      ),
+                      Container(
+                        padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                        decoration: BoxDecoration(
+                          border: Border.all(color: Colors.white),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Text(
+                          '$currentHP / ${character.hitPoints['total']}',
+                          style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               ],
             ),
 
-            Divider(height: 32),
+            const Divider(height: 32),
 
-            // ✅ Skills header + dropdown
+            // Skills Section
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
@@ -383,8 +458,6 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
                 ),
               ],
             ),
-
-            // ✅ Skills list (scrollable within the scroll view)
             ListView(
               shrinkWrap: true,
               physics: NeverScrollableScrollPhysics(),
@@ -396,9 +469,9 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
               }).toList(),
             ),
 
-            Divider(height: 32),
+            const Divider(height: 32),
 
-            // ✅ Tiers & Affinities
+            // Affinities Section
             ExpansionTile(
               title: Text('Tiers & Affinities', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
               children: character.tiers.entries.map((tierEntry) {
@@ -416,35 +489,7 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
           ],
         ),
       ),
-
-
-
     );
-  }
-
-  List<Skill> _sortedSkills(List<Skill> skills) {
-    switch (_selectedSkillSort) {
-      case 'Type':
-        return [...skills]..sort((a, b) => a.type.compareTo(b.type));
-      case 'Frequency':
-        return [...skills]..sort((a, b) => a.frequency.compareTo(b.frequency));
-      default:
-        return [...skills]..sort((a, b) => a.name.compareTo(b.name));
-    }
-  }
-
-
-
-  Color _getCultivationColor(String tier) {
-    switch (tier.toLowerCase()) {
-      case 'iron': return Colors.grey;
-      case 'silver': return Colors.white;
-      case 'gold': return Colors.yellow.shade600;
-      case 'jade': return Colors.green.shade400;
-      case 'saint': return Colors.red;
-      case 'sovereign': return Colors.purple;
-      default: return Colors.blueGrey;
-    }
   }
 }
 
