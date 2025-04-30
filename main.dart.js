@@ -7366,7 +7366,7 @@ a.h(0,"characterNumber")
 q=a.h(0,"race")
 p=a.h(0,"freeAffinity")
 o=a.h(0,"buildTotal")
-n=a.h(0,"extraHitPoints")
+n=a.h(0,"hitPoints")
 m=a.h(0,"cultivationTier")
 if(m==null)m=!1
 l=J.k9(t.j.a(a.h(0,"skills")),new A.SS(),t.gv)
@@ -36525,7 +36525,7 @@ A.o3.prototype={
 O(a){var s=null,r=this.d
 return A.oQ(A.c([A.awL(B.dV,A.ail(this.c,s,28),s,r,s,!1,this.e),A.d5(s,8,s),A.bD(r,A.di(s,s,s,s,s,s,s,s,s,s,s,12,s,s,s,s,s,!0,s,s,s,s,s,s,s,s))],t.F),B.ag,B.b_,B.ep)}}
 A.oF.prototype={
-O(a){var s,r,q,p=null,o=A.Cf(p,A.bD("My Character",p)),n=this.c,m=A.c([A.bD("Player: "+n.a,A.di(p,p,p,p,p,p,p,p,p,p,p,20,p,p,p,p,p,!0,p,p,p,p,p,p,p,p)),A.d5(p,8,p),A.bD("Character: "+n.b,A.di(p,p,p,p,p,p,p,p,p,p,p,20,p,p,p,p,p,!0,p,p,p,p,p,p,p,p)),A.d5(p,8,p),A.bD("Race: "+n.d,A.di(p,p,p,p,p,p,p,p,p,p,p,20,p,p,p,p,p,!0,p,p,p,p,p,p,p,p)),A.d5(p,8,p),A.bD("Free Affinity: "+n.e,A.di(p,p,p,p,p,p,p,p,p,p,p,20,p,p,p,p,p,!0,p,p,p,p,p,p,p,p)),A.d5(p,8,p),A.bD("Build Total: "+n.f,A.di(p,p,p,p,p,p,p,p,p,p,p,20,p,p,p,p,p,!0,p,p,p,p,p,p,p,p)),A.d5(p,8,p),A.bD("Extra HP: "+n.r,A.di(p,p,p,p,p,p,p,p,p,p,p,20,p,p,p,p,p,!0,p,p,p,p,p,p,p,p)),A.d5(p,8,p)],t.F)
+O(a){var s,r,q,p=null,o=A.Cf(p,A.bD("My Character",p)),n=this.c,m=A.c([A.bD("Player: "+n.a,A.di(p,p,p,p,p,p,p,p,p,p,p,20,p,p,p,p,p,!0,p,p,p,p,p,p,p,p)),A.d5(p,8,p),A.bD("Character: "+n.b,A.di(p,p,p,p,p,p,p,p,p,p,p,20,p,p,p,p,p,!0,p,p,p,p,p,p,p,p)),A.d5(p,8,p),A.bD("Race: "+n.d,A.di(p,p,p,p,p,p,p,p,p,p,p,20,p,p,p,p,p,!0,p,p,p,p,p,p,p,p)),A.d5(p,8,p),A.bD("Free Affinity: "+n.e,A.di(p,p,p,p,p,p,p,p,p,p,p,20,p,p,p,p,p,!0,p,p,p,p,p,p,p,p)),A.d5(p,8,p),A.bD("Build Total: "+n.f,A.di(p,p,p,p,p,p,p,p,p,p,p,20,p,p,p,p,p,!0,p,p,p,p,p,p,p,p)),A.d5(p,8,p),A.bD("Hit Points: "+n.r,A.di(p,p,p,p,p,p,p,p,p,p,p,20,p,p,p,p,p,!0,p,p,p,p,p,p,p,p)),A.d5(p,8,p)],t.F)
 if(n.w)m.push(new A.d3(B.A3,new A.CQ(A.bD("Cultivation Tier",A.di(p,p,p,p,p,p,p,p,p,p,p,p,p,p,B.aY,p,p,!0,p,p,p,p,p,p,p,p)),p),p))
 m.push(A.alT(32))
 s=A.bD("Skills",A.di(p,p,p,p,p,p,p,p,p,p,p,18,p,p,B.aY,p,p,!0,p,p,p,p,p,p,p,p))
