@@ -1,0 +1,15 @@
+# Go to your gh-pages project folder
+cd ~/Projects/gh-pages-crucible-helper/
+
+# Clear old files (careful! This is the right branch)
+rm -rf *
+
+# Copy built web files from Flutter project
+cp -r ../Crucible\ Helper/crucible_helper/build/web/* .
+
+# Commit changes
+git add .
+git commit -m "Deploy updated Crucible Helper web build"
+
+# Push to GitHub
+git push origin gh-pages

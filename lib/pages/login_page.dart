@@ -1,8 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_sign_in/google_sign_in.dart';
-import 'dart:convert';
-import 'package:firebase_storage/firebase_storage.dart';
 import '../main.dart';
 
 class LoginPage extends StatefulWidget {
@@ -12,6 +10,23 @@ class LoginPage extends StatefulWidget {
 
 class _LoginPageState extends State<LoginPage> {
   final FirebaseAuth _auth = FirebaseAuth.instance;
+  late final Stream<User?> _authStateChanges;
+
+  @override
+  void initState() {
+    super.initState();
+    _authStateChanges = _auth.authStateChanges();
+
+    _authStateChanges.listen((user) {
+      if (user != null) {
+        // User is signed in – navigate to HomePage
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (_) => HomePage()),
+        );
+      }
+    });
+  }
 
   Future<void> signInWithGoogle() async {
     try {
@@ -21,9 +36,7 @@ class _LoginPageState extends State<LoginPage> {
       );
 
       final GoogleSignInAccount? googleUser = await googleSignIn.signIn();
-      if (googleUser == null) {
-        return; // User canceled
-      }
+      if (googleUser == null) return; // user canceled
 
       final GoogleSignInAuthentication googleAuth = await googleUser.authentication;
       final credential = GoogleAuthProvider.credential(
@@ -31,13 +44,7 @@ class _LoginPageState extends State<LoginPage> {
         accessToken: googleAuth.accessToken,
       );
 
-      await FirebaseAuth.instance.signInWithCredential(credential);
-
-      // 🚀 Navigate to home or character screen after login:
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (_) => HomePage()),
-      );
+      await _auth.signInWithCredential(credential);
     } catch (e, stack) {
       print('Sign-In Error: $e');
       print('Stacktrace: $stack');
@@ -46,7 +53,6 @@ class _LoginPageState extends State<LoginPage> {
       ));
     }
   }
-
 
   Future<void> signOut() async {
     await GoogleSignIn().signOut();
@@ -61,11 +67,11 @@ class _LoginPageState extends State<LoginPage> {
       appBar: AppBar(
         title: Text('Login'),
         leading: Navigator.canPop(context)
-          ? IconButton(
-            icon: Icon(Icons.arrow_back),
-            onPressed: () => Navigator.pop(context),
-          )
-          : null,
+            ? IconButton(
+                icon: Icon(Icons.arrow_back),
+                onPressed: () => Navigator.pop(context),
+              )
+            : null,
       ),
       body: Center(
         child: user == null

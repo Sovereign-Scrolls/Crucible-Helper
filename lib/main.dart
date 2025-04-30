@@ -10,13 +10,17 @@ import 'firebase_options.dart';
 import 'models/character.dart'; 
 import 'pages/login_page.dart';
 
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp(
     options: DefaultFirebaseOptions.currentPlatform,
   );
   runApp(const CrucibleHelperApp());
+
 }
+
+
 
 class CrucibleHelperApp extends StatelessWidget {
   const CrucibleHelperApp({Key? key}) : super(key: key);
