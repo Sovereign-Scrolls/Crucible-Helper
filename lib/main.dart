@@ -4,10 +4,17 @@ import 'dart:convert';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'firebase_options.dart';
+import 'shared/rules_service.dart';
+
+
 
 import 'models/character.dart'; 
 import 'pages/login_page.dart';
+import 'utils/skill_lookup.dart';
+
+
 import 'dart:html' as html;
 
 Character? cachedCharacter;
@@ -18,9 +25,17 @@ void main() async {
   await Firebase.initializeApp(
     options: DefaultFirebaseOptions.currentPlatform,
   );
-  runApp(const CrucibleHelperApp());
 
+  try {
+    await RulesService.fetchAndCacheRules();
+    print('✅ rules.json successfully cached.');
+  } catch (e) {
+    print('❌ Error caching rules.json: $e');
+  }
+
+  runApp(const CrucibleHelperApp());
 }
+
 
 class CrucibleHelperApp extends StatelessWidget {
   const CrucibleHelperApp({Key? key}) : super(key: key);
@@ -187,12 +202,35 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
   late int currentHP;
   String _selectedSkillSort = 'Alphabetical';
   final List<String> _skillSortOptions = ['Alphabetical', 'Type', 'Frequency'];
+  Map<String, dynamic>? rulesJson;
 
   @override
   void initState() {
     super.initState();
     currentHP = widget.character.hitPoints['total'];
+
+    RulesService.loadCachedRules().then((cached) {
+      if (cached == null) {
+        print('⚠️ No cached rules. Trying to download...');
+        RulesService.fetchAndCacheRules().then((_) {
+          RulesService.loadCachedRules().then((downloaded) {
+            if (downloaded != null) {
+              setState(() {
+                rulesJson = json.decode(downloaded);
+              });
+            } else {
+              print('❌ Still failed to load rules.json');
+            }
+          });
+        });
+      } else {
+        setState(() {
+          rulesJson = json.decode(cached);
+        });
+      }
+    });
   }
+
 
   void _showHitPointInfo() {
     final hp = widget.character.hitPoints;
@@ -327,6 +365,111 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
     );
   }
 
+  void _showAffinityDetails(BuildContext context, String name, AffinityDetail detail) {
+    final buffer = StringBuffer();
+    detail.tiers.forEach((tier, value) {
+      buffer.writeln('$tier: $value');
+    });
+
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text('$name Affinity Details'),
+        content: Text(buffer.toString()),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text('Close'),
+          )
+        ],
+      ),
+    );
+  }
+
+  void _showAffinityPointInfo(BuildContext context) {
+    final points = widget.character.affinityPoints;
+    final buffer = StringBuffer()
+      ..writeln('Affinity Points Total: ${points['affinityPointsTotal']}')
+      ..writeln('Affinity Points Max: ${points['affinityPointsMax']}')
+      ..writeln('Unspent Affinity Points: ${points['affinityPointUnspend']}')
+      ..writeln('')
+      ..writeln('Tier Points Total: ${points['affinityTierPointsTotal']}')
+      ..writeln('Tier Points Max: ${points['affinityTierPointsMax']}')
+      ..writeln('Unspent Tier Points: ${points['affinityTierPointUnspend']}')
+      ..writeln('Unslotted Tier Points: ${points['affinityTierPointsUnslotted']}');
+
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text('Affinity Point Details'),
+        content: SingleChildScrollView(child: Text(buffer.toString())),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showSkillDetails(BuildContext context, Skill skill) async {
+    final details = await getSkillDetailsFromRules(skill.name, skill.type);
+
+    if (details == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('No details found for ${skill.name}')),
+      );
+      return;
+    }
+
+    final hasVerbal = details['verbal'] != null && details['verbal']!.isNotEmpty;
+    final tabs = <Tab>[Tab(text: 'Rules')];
+    final views = <Widget>[
+      Padding(
+        padding: const EdgeInsets.all(8.0),
+        child: Text(details['rules'] ?? 'No rules found.'),
+      ),
+    ];
+
+    if (hasVerbal) {
+      tabs.insert(0, Tab(text: 'Verbal'));
+      views.insert(0, Padding(
+        padding: const EdgeInsets.all(8.0),
+        child: Text(details['verbal']!),
+      ));
+    }
+
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text(skill.name),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: DefaultTabController(
+            length: tabs.length,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TabBar(
+                  labelColor: Theme.of(context).colorScheme.secondary,
+                  tabs: tabs,
+                ),
+                SizedBox(height: 150, child: TabBarView(children: views)),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
   List<Skill> _sortedSkills(List<Skill> skills) {
     switch (_selectedSkillSort) {
       case 'Type':
@@ -353,6 +496,12 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
 
   @override
   Widget build(BuildContext context) {
+    if (rulesJson == null) {
+    return Scaffold(
+        appBar: AppBar(title: Text('My Character')),
+        body: Center(child: CircularProgressIndicator()), // Loading indicator
+      );
+    }
     final character = widget.character;
 
     return Scaffold(
@@ -398,6 +547,17 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
                           ),
                         ],
                       ),
+                      Row(
+                        children: [
+                          Text('Affinity Points: ${character.affinityPoints['affinityPointsTotal']}', style: TextStyle(fontSize: 18)),
+                          SizedBox(width: 4),
+                          GestureDetector(
+                            onTap: () => _showAffinityPointInfo(context),
+                            child: Icon(Icons.info_outline, size: 18, color: Colors.grey[300]),
+                          ),
+                        ],
+                      ),
+
                     ],
                   ),
                 ),
@@ -436,6 +596,28 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
             ),
 
             const Divider(height: 32),
+            // Affinities Section
+            ExpansionTile(
+              title: Text('Affinities', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              children: widget.character.affinities.entries.map((entry) {
+                final name = entry.key;
+                final detail = entry.value;
+
+                return ListTile(
+                  title: Row(
+                    children: [
+                      Text('$name: ${detail.effectLevel}'),
+                      SizedBox(width: 6),
+                      GestureDetector(
+                        onTap: () => _showAffinityDetails(context, name, detail),
+                        child: Icon(Icons.info_outline, size: 18, color: Colors.grey[300]),
+                      ),
+                    ],
+                  ),
+                );
+              }).toList(),
+            ),
+            const Divider(height: 32),
 
             // Skills Section
             Row(
@@ -462,27 +644,34 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
               shrinkWrap: true,
               physics: NeverScrollableScrollPhysics(),
               children: _sortedSkills(character.skills).map((skill) {
-                return ListTile(
-                  title: Text(skill.name),
-                  subtitle: Text('${skill.type} • Level ${skill.level} • ${skill.frequency}'),
-                );
-              }).toList(),
-            ),
-
-            const Divider(height: 32),
-
-            // Affinities Section
-            ExpansionTile(
-              title: Text('Tiers & Affinities', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-              children: character.tiers.entries.map((tierEntry) {
-                return ExpansionTile(
-                  title: Text(tierEntry.key),
-                  children: tierEntry.value.map((affinity) {
-                    return ListTile(
-                      title: Text(affinity.name),
-                      subtitle: Text('Level ${affinity.level}'),
-                    );
-                  }).toList(),
+                return InkWell(
+                  onTap: () {
+                    if (rulesJson != null) {
+                      _showSkillDetails(context, skill);
+                    } else {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text('Rules not loaded yet.')),
+                      );
+                    }
+                  },
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 6.0),
+                    child: RichText(
+                      text: TextSpan(
+                        style: Theme.of(context).textTheme.bodyMedium!.copyWith(color: Colors.white, decoration: TextDecoration.none),
+                        children: [
+                          TextSpan(
+                            text: skill.name,
+                            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                          ),
+                          TextSpan(
+                            text: ' (${skill.type} • Level ${skill.level} • ${skill.frequency})',
+                            style: TextStyle(fontSize: 14),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
                 );
               }).toList(),
             ),

@@ -4,10 +4,11 @@ class Character {
   final int characterNumber;
   final String race;
   final Build build;
+  final Map<String, dynamic> affinityPoints;
   final Map<String, dynamic> hitPoints; 
   final String cultivationTier;
   final List<Skill> skills;
-  final Map<String, List<Affinity>> tiers;
+  final Map<String, AffinityDetail> affinities;
 
   Character({
     required this.playerName,
@@ -15,23 +16,14 @@ class Character {
     required this.characterNumber,
     required this.race,
     required this.build,
+    required this.affinityPoints,
     required this.hitPoints,
     required this.cultivationTier,
     required this.skills,
-    required this.tiers,
+    required this.affinities,
   });
 
   factory Character.fromJson(Map<String, dynamic> json) {
-    Map<String, dynamic> tiersRaw = json['tiers'];
-    Map<String, List<Affinity>> parsedTiers = {};
-
-    tiersRaw.forEach((tierName, tierData) {
-      if (tierData != null && tierData['affinities'] != null) {
-        parsedTiers[tierName] = List<Affinity>.from(
-          tierData['affinities'].map((aff) => Affinity.fromJson(aff)),
-        );
-      }
-    });
 
     return Character(
       playerName: json['playerName'],
@@ -39,14 +31,21 @@ class Character {
       characterNumber: json['characterNumber'],
       race: json['race'],
       build: Build.fromJson(json['build']),
+      affinityPoints: json['affinityPoints'] ?? {},
       hitPoints: json['hitPoints'],
       cultivationTier: json['cultivationTier'],
       skills: (json['skills'] as List<dynamic>)
           .map((skill) => Skill.fromJson(skill))
           .toList(),
-      tiers: parsedTiers,
+      affinities: (json['affinities'] as Map<String, dynamic>).map(
+        (key, value) => MapEntry(
+          key,
+          AffinityDetail.fromJson(value as Map<String, dynamic>),
+        ),
+      ),
     );
   }
+
 }
 
 class Skill {
@@ -72,22 +71,24 @@ class Skill {
   }
 }
 
-class Affinity {
-  final String name;
-  final int level;
-  final dynamic affinityPointCost; // sometimes blank, sometimes a number
+class AffinityDetail {
+  final int effectLevel;
+  final Map<String, int> tiers;
 
-  Affinity({
-    required this.name,
-    required this.level,
-    required this.affinityPointCost,
-  });
+  AffinityDetail({required this.effectLevel, required this.tiers});
 
-  factory Affinity.fromJson(Map<String, dynamic> json) {
-    return Affinity(
-      name: json['name'],
-      level: json['level'],
-      affinityPointCost: json['affinityPointCost'],
+  factory AffinityDetail.fromJson(Map<String, dynamic> json) {
+    final tiers = <String, int>{};
+
+    for (final key in json.keys) {
+      if (key != 'effectLevel') {
+        tiers[key] = json[key];
+      }
+    }
+
+    return AffinityDetail(
+      effectLevel: json['effectLevel'],
+      tiers: tiers,
     );
   }
 }
