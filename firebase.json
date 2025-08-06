@@ -1,1 +1,41 @@
-{"flutter":{"platforms":{"android":{"default":{"projectId":"crucible-helper","appId":"1:999937639575:android:bb7540584cd638ecf2d5d2","fileOutput":"android/app/google-services.json"}},"dart":{"lib/firebase_options.dart":{"projectId":"crucible-helper","configurations":{"android":"1:999937639575:android:bb7540584cd638ecf2d5d2","ios":"1:999937639575:ios:a2d47d0ec7dee32ff2d5d2","macos":"1:999937639575:ios:a2d47d0ec7dee32ff2d5d2","web":"1:999937639575:web:266479fe5ae4dbc2f2d5d2","windows":"1:999937639575:web:48a9b5296da2f7cef2d5d2"}}}}}}
+{
+  "flutter": {
+    "platforms": {
+      "android": {
+        "default": {
+          "projectId": "crucible-helper",
+          "appId": "1:999937639575:android:bb7540584cd638ecf2d5d2",
+          "fileOutput": "android/app/google-services.json"
+        }
+      },
+      "dart": {
+        "lib/firebase_options.dart": {
+          "projectId": "crucible-helper",
+          "configurations": {
+            "android": "1:999937639575:android:bb7540584cd638ecf2d5d2",
+            "ios": "1:999937639575:ios:a2d47d0ec7dee32ff2d5d2",
+            "macos": "1:999937639575:ios:a2d47d0ec7dee32ff2d5d2",
+            "web": "1:999937639575:web:266479fe5ae4dbc2f2d5d2",
+            "windows": "1:999937639575:web:48a9b5296da2f7cef2d5d2"
+          }
+        }
+      }
+    }
+  },
+  "functions": [
+    {
+      "source": "functions",
+      "codebase": "default",
+      "ignore": [
+        "node_modules",
+        ".git",
+        "firebase-debug.log",
+        "firebase-debug.*.log",
+        "*.local"
+      ]//,
+      //"predeploy": [
+      //  "npm --prefix \"$RESOURCE_DIR\" run lint"
+      //]
+    }
+  ]
+}

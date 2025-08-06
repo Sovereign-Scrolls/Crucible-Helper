@@ -1,55 +1,69 @@
-import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:convert';
 import '../shared/rules_service.dart';
 
-Future<Map<String, String>?> getSkillDetailsFromRules(String name, String type) async {
+Future<Map<String, String>?> getSkillDetailsFromRules(String name, String type, String characterRace) async {
   final cachedJson = await RulesService.loadCachedRules();
   if (cachedJson == null) return null;
 
   final rules = json.decode(cachedJson);
 
-  // ✅ Check Common skills (as a list)
+  // Search Common Skills
   if (type == 'Common') {
-    final commonList = rules['Common Skills'] as List<dynamic>? ?? [];
-    final skill = commonList
-        .cast<Map<String, dynamic>>()
-        .firstWhere((s) => s['Name'] == name, orElse: () => {});
-    if (skill.isNotEmpty) {
+    final skills = rules['Common Skills'] as List<dynamic>? ?? [];
+    final skill = skills.firstWhere(
+      (s) => s['Name'] == name,
+      orElse: () => null,
+    );
+    if (skill != null) {
       return {
-        'verbal': '', // Common skills do not have verbals
-        'rules': skill['Description'] ?? 'No description provided.',
+        'verbal': skill['Verbal'] ?? '',
+        'rules': skill['Description'] ?? 'No rules provided.',
       };
     }
   }
 
-  // ✅ Determine if it's a race skill
+  // Search Race Skills
   final races = rules['Races'] as List<dynamic>? ?? [];
-  if (races.contains(type)) {
-    final raceSkills = rules['Race Skills'] as List<dynamic>? ?? [];
-    final skill = raceSkills
-        .cast<Map<String, dynamic>>()
-        .firstWhere((s) => s['Race'] == type && s['Name'] == name, orElse: () => {});
-    if (skill.isNotEmpty) {
+  print('Looking for characterRace: $characterRace');
+  print('Available races: ${races.map((r) => r['Name']).join(', ')}');
+
+  final race = races.firstWhere(
+    (r) => r['Name'] == characterRace,
+    orElse: () {
+      print('❌ Race "$characterRace" not found.');
+      return null;
+    },
+  );
+
+  if (race != null && race['Race Skills'] != null) {
+    final skills = race['Race Skills'] as List<dynamic>;
+    print('Looking for skill: $name in race: ${race['Name']}');
+    final skill = skills.firstWhere(
+      (s) => s['Name'] == name,
+      orElse: () {
+        print('❌ Skill "$name" not found in ${race['Name']} Race Skills.');
+        return null;
+      },
+    );
+    if (skill != null) {
       return {
-        'verbal': skill['Verbal'] ?? 'No verbal provided.',
-        'rules': skill['Rules'] ?? 'No rules provided.',
+        'verbal': '',
+        'rules': skill['Description'] ?? 'No description.',
       };
     }
   }
 
-  // ✅ Determine if it's an affinity skill
-  final affinities = rules['Affinities'] as List<dynamic>? ?? [];
-  if (affinities.contains(type)) {
-    final affinitySkills = rules['Affinity Skills'] as List<dynamic>? ?? [];
-    final skill = affinitySkills
-        .cast<Map<String, dynamic>>()
-        .firstWhere((s) => s['Affinity'] == type && s['Name'] == name, orElse: () => {});
-    if (skill.isNotEmpty) {
-      return {
-        'verbal': skill['Verbal'] ?? 'No verbal provided.',
-        'rules': skill['Rules'] ?? 'No rules provided.',
-      };
-    }
+  // Search Affinity Skills
+  final affinitySkills = rules['Affinity Skills'] as List<dynamic>? ?? [];
+  final affinitySkill = affinitySkills.firstWhere(
+    (s) => s['Name'] == name && s['Affinity'] == type,
+    orElse: () => null,
+  );
+  if (affinitySkill != null) {
+    return {
+      'verbal': affinitySkill['Verbal'] ?? '',
+      'rules': affinitySkill['Description'] ?? 'No rules provided.',
+    };
   }
 
   return null;

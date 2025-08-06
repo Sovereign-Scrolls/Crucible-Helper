@@ -1,3 +1,6 @@
+# Build the project
+flutter build web --base-href=/Crucible-Helper/
+
 # Go to your gh-pages project folder
 cd ~/Projects/gh-pages-crucible-helper/
 

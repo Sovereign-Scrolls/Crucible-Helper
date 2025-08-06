@@ -6,6 +6,7 @@ class Character {
   final Build build;
   final Map<String, dynamic> affinityPoints;
   final Map<String, dynamic> hitPoints; 
+  final Map<String, dynamic> dr;
   final String cultivationTier;
   final List<Skill> skills;
   final Map<String, AffinityDetail> affinities;
@@ -18,10 +19,14 @@ class Character {
     required this.build,
     required this.affinityPoints,
     required this.hitPoints,
+    required this.dr,
     required this.cultivationTier,
     required this.skills,
     required this.affinities,
   });
+
+  int get totalAffinityPoints => affinityPoints['affinityPointsTotal'] ?? 0;
+  int get unspentAffinityPoints => affinityPoints['affinityTierPointUnspent'] ?? 0;
 
   factory Character.fromJson(Map<String, dynamic> json) {
 
@@ -31,6 +36,7 @@ class Character {
       characterNumber: json['characterNumber'],
       race: json['race'],
       build: Build.fromJson(json['build']),
+      dr: Map<String, dynamic>.from(json['dr'] ?? {}),
       affinityPoints: json['affinityPoints'] ?? {},
       hitPoints: json['hitPoints'],
       cultivationTier: json['cultivationTier'],
@@ -53,12 +59,18 @@ class Skill {
   final String type;
   final int level;
   final String frequency;
+  final String? verbal;
+  final String? description;
+  final String? delivery;
 
   Skill({
     required this.name,
     required this.type,
     required this.level,
     required this.frequency,
+    this.verbal,
+    this.description,
+    this.delivery,
   });
 
   factory Skill.fromJson(Map<String, dynamic> json) {
@@ -67,9 +79,25 @@ class Skill {
       type: json['type'],
       level: json['level'],
       frequency: json['frequency'],
+      verbal: json['verbal'],
+      description: json['description'],
+      delivery: json['delivery'],
     );
   }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'name': name,
+      'type': type,
+      'level': level,
+      'frequency': frequency,
+      if (verbal != null) 'verbal': verbal,
+      if (description != null) 'description': description,
+      if (delivery != null) 'delivery': delivery,
+    };
+  }
 }
+
 
 class AffinityDetail {
   final int effectLevel;
@@ -95,19 +123,32 @@ class AffinityDetail {
 
 class Build {
   final int total;
+  final int unspent;
+  final int needToAscend;
   final StartingBuild starting;
   final List<BuildGain> gains;
 
-  Build({required this.total, required this.starting, required this.gains});
+  Build({
+    required this.total,
+    required this.unspent,
+    required this.needToAscend,
+    required this.starting,
+    required this.gains,
+  });
 
   factory Build.fromJson(Map<String, dynamic> json) {
     return Build(
-      total: json['total'],
+      total: json['total'] ?? 0,
+      unspent: json['unspent'] ?? 0,
+      needToAscend: json['needToAscend'] ?? 0,
       starting: StartingBuild.fromJson(json['starting']),
-      gains: (json['gains'] as List).map((e) => BuildGain.fromJson(e)).toList(),
+      gains: (json['gains'] as List<dynamic>? ?? [])
+          .map((gain) => BuildGain.fromJson(gain))
+          .toList(),
     );
   }
 }
+
 
 class StartingBuild {
   final int amount;

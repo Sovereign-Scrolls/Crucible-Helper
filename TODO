@@ -1,0 +1,27 @@
+-= UI improvements =-
+For build total, affinity, etc in the first part of the character screen. We should center the box with the title words and the (i) should be use to center. I think. I'll ask Becky
+Need a build like interface for Affinity Points
+Skill without verbal should not have a verbal tab
+
+-= Features =-
+Add arrows on ether side of hit point adjustment
+Skill uses need to be remembered
+   - Allow skills uses to be cleared based on the time they should renew. Have a profile override.
+Remember user choice for skills sorting. - I think this is working, but not remembered between sessions. Need to test
+Have a rules lookup section to be able to look up any rule
+If the character has unspent build or affinty points, have a button at the top appear to allow character improvements.
+Add affinity point cost to the affinty detail modal
+For verkin, maybe have on the character screen whatever race they claim to be. If it's clicked 3 times, it will display the correct name.
+
+
+-= Bugs =-
+Affinity points are not calulating correctly.
+Cost tab is not displaying the correct cost.
+Passive and at will skills should not show a useage.
+Race Skills are still looking up rules.json. Need to move it over to just using pc.json
+When clickong on More Of Fire, I'm getting the following log. Why is it looking up the race skill? might be related to the "Race Skills are still looking up rules.json. Need to move it over to just using pc.json" bug
+    Looking for characterRace: Human
+    Available races: Amalgam, Celestial, Deadborn, Drakeling, Dryad/Arborkin, Efreet, Half-Giant, Human, Imp, Kijin/Ork, Kitsune, Quicksilver, Veilkin
+    Looking for skill: Mote of Fire in race: Human
+    ❌ Skill "Mote of Fire" not found in Human Race Skills.
+
