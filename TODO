@@ -1,7 +1,18 @@
+✅ RESOLVED: Hardcoded secrets in functions/index.js
+   - STATUS: Consolidated to single GAME_SECRET using cryptographically secure random string
+   - ACTION TAKEN: Updated code to use GAME_SECRET for both QR codes and monster cores
+   - SECURITY: Using 256-bit random secret instead of predictable strings
+
+✅ COMPLETED: QR Code Regeneration
+   - STATUS: Successfully regenerated QR codes for all 31 users
+   - ACTION TAKEN: Updated pc.json files to trigger generateQRCode function with new secret
+   - RESULT: All user profile QR codes now use the new secure secret
+
 -= UI improvements =-
 For build total, affinity, etc in the first part of the character screen. We should center the box with the title words and the (i) should be use to center. I think. I'll ask Becky
 Need a build like interface for Affinity Points
 Skill without verbal should not have a verbal tab
+Storage scanning looks different than other qr scanning operations. Probably need to create one fucntion to do any qr scanning.
 
 -= Features =-
 Add arrows on ether side of hit point adjustment
@@ -16,6 +27,7 @@ For verkin, maybe have on the character screen whatever race they claim to be. I
 
 -= Bugs =-
 Affinity points are not calulating correctly.
+It appears that the profile page also downloads the pc.json file instead of using the downlaoded version. Fix that. Also look at what the character page is doing. Might do the same thing.
 Cost tab is not displaying the correct cost.
 Passive and at will skills should not show a useage.
 Race Skills are still looking up rules.json. Need to move it over to just using pc.json
@@ -24,4 +36,46 @@ When clickong on More Of Fire, I'm getting the following log. Why is it looking 
     Available races: Amalgam, Celestial, Deadborn, Drakeling, Dryad/Arborkin, Efreet, Half-Giant, Human, Imp, Kijin/Ork, Kitsune, Quicksilver, Veilkin
     Looking for skill: Mote of Fire in race: Human
     ❌ Skill "Mote of Fire" not found in Human Race Skills.
+
+-= SECURITY ISSUES (CRITICAL - FIX IMMEDIATELY) =-
+
+-= SECURITY IMPROVEMENTS NEEDED =-
+MEDIUM: Client-side validation can be bypassed
+   - Add server-side validation for all form inputs in Firebase Functions
+   - Validate NPC shift requirements, cleanup shifts, pay options on server
+   - Users can modify app or make direct API calls to bypass client validation
+
+MEDIUM: No rate limiting implemented
+   - Add rate limiting to all API endpoints
+   - Implement proper throttling for authentication attempts
+   - Add request logging for security monitoring
+
+MEDIUM: CORS allows all origins (*)
+   - Restrict CORS to specific domains
+   - Implement proper origin validation
+
+LOW: Missing files in .gitignore
+   - Add functions/service-account-key.json
+   - Add functions/config.json
+   - Add functions/.env files
+   - Add IDE files (.vscode/, .idea/)
+   - Add *.local files
+
+-= SECURITY TODO =-
+[ ] Revoke exposed service account key (URGENT)
+[ ] Regenerate Discord bot token (URGENT)
+[ ] Remove sensitive files from git history
+[ ] Update .gitignore with missing entries
+[ ] Move all secrets to Firebase Secrets
+[ ] Add server-side validation for all client-side checks
+[ ] Implement rate limiting for API endpoints
+[ ] Add input sanitization for user inputs
+[ ] Review and test Firestore security rules
+[ ] Add security monitoring and logging
+[ ] Document security procedures
+[ ] Add CORS restrictions
+[ ] Implement proper error handling (no sensitive info leaks)
+[ ] Add rate limiting to all user functions (prevent abuse)
+[ ] Add capacity limits to event registration (prevent overflow)
+[ ] Implement comprehensive input validation (sanitize all inputs)
 
