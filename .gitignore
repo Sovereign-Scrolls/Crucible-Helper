@@ -50,3 +50,23 @@ build/
 .pub-cache/
 .packages
 flutter_*.png
+
+# SECURITY: Sensitive files that should never be committed
+functions/service-account-key.json
+functions/config.json
+functions/.env
+functions/.env.local
+*.local
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment files
+.env
+.env.local
+.env.production
+.env.development

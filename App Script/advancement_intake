@@ -1,0 +1,250 @@
+/*******************************
+ * CONFIG
+ *******************************/
+const CONFIG = {
+  // If your Flutter PWA uses Google Sign-In on Web (GIS):
+  WEB_CLIENT_ID: '',
+
+  // If your Flutter PWA uses Firebase Auth (web):
+  FIREBASE: {
+    API_KEY: 'AIzaSyD6pJb56UjgUI2Pk5fFoHYTazY843Xciho', // Your Firebase API key
+    PROJECT_ID: 'crucible-helper' // Your Firebase project ID
+  },
+
+  SHEETS: {
+    AFFINITY: 'Affinity Changes', // Email | Time Stamp | Affinity Name | Change
+    SKILL:    'Skill Changes',    // Email | Time Stamp | Skill Name | Type | Change
+    ESSENCE:  'Essence Changes'   // Email | Time Stamp | Change
+  },
+
+  // Optional fallback if this project is ever converted to standalone:
+  SPREADSHEET_ID: ''
+};
+
+/*******************************
+ * HTTP HANDLERS
+ *******************************/
+function doGet(e) {
+  const response = { ok: true, message: 'Crucible intake endpoint is alive.' };
+  return ContentService.createTextOutput(JSON.stringify(response))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+function doPost(e) {
+  // Handle CORS preflight requests
+  if (e.parameter.callback) {
+    // JSONP request - return as JSONP
+    const response = { ok: true, message: 'CORS handled via JSONP' };
+    return ContentService.createTextOutput(
+      e.parameter.callback + '(' + JSON.stringify(response) + ')'
+    ).setMimeType(ContentService.MimeType.JAVASCRIPT);
+  }
+  
+  try {
+    const bodyText = (e && e.postData && e.postData.contents) ? e.postData.contents : '';
+    if (!bodyText) return _badRequest('Empty body');
+
+    let payload;
+    try {
+      payload = JSON.parse(bodyText);
+    } catch (err) {
+      return _badRequest('Invalid JSON: ' + err);
+    }
+
+    // ID token can be in JSON body or as a query param: ?authorization=Bearer+XYZ
+    const idToken = payload.idToken || _extractBearerToken(e);
+    if (!idToken) return _unauthorized('Missing idToken');
+
+    // Verify token (supports either Google Sign-In Web or Firebase Auth Web)
+    const verified = _verifyIdTokenFlexible(idToken);
+    if (verified.error) return _unauthorized(verified.error);
+    if (!verified.email || !verified.emailVerified) return _unauthorized('Email not verified');
+    const email = verified.email;
+
+    // Arrays are optional; skip if missing
+    const affinity = Array.isArray(payload.affinityChanges) ? payload.affinityChanges : [];
+    const skill    = Array.isArray(payload.skillChanges)    ? payload.skillChanges    : [];
+    const essence  = Array.isArray(payload.essenceChanges)  ? payload.essenceChanges  : [];
+
+    // Build rows
+    const affinityRows = affinity.map(a => [
+      email,
+      _asDate(a.timestamp),
+      String(a.affinityName ?? ''),
+      Number(a.levelChange ?? 0)
+    ]);
+
+    const skillRows = skill.map(s => [
+      email,
+      _asDate(s.timestamp),
+      String(s.skillName ?? ''),
+      String(s.skillType ?? ''),
+      Number(s.levelChange ?? 0)
+    ]);
+
+    const essenceRows = essence.map(x => [
+      email,
+      _asDate(x.timestamp),
+      Number(x.essenceAdjustment ?? 0)
+    ]);
+
+    // Append under a lock
+    const lock = LockService.getScriptLock();
+    const gotLock = lock.tryLock(30000);
+    if (!gotLock) throw new Error('Could not acquire lock');
+    try {
+      const ss = _getSpreadsheet(); // container-bound
+      if (affinityRows.length) _appendRows(ss, CONFIG.SHEETS.AFFINITY, affinityRows, 4);
+      if (skillRows.length)    _appendRows(ss, CONFIG.SHEETS.SKILL,    skillRows,    5);
+      if (essenceRows.length)  _appendRows(ss, CONFIG.SHEETS.ESSENCE,  essenceRows,  3);
+    } finally {
+      if (gotLock) lock.releaseLock();
+    }
+
+    const response = {
+      ok: true,
+      email,
+      counts: {
+        affinityChanges: affinityRows.length,
+        skillChanges:    skillRows.length,
+        essenceChanges:  essenceRows.length
+      }
+    };
+
+    return ContentService.createTextOutput(JSON.stringify(response))
+      .setMimeType(ContentService.MimeType.JSON);
+
+  } catch (err) {
+    const errorResponse = {
+      ok: false,
+      error: 'server_error',
+      message: String(err && err.stack ? err.stack : err)
+    };
+    
+    return ContentService.createTextOutput(JSON.stringify(errorResponse))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
+function doOptions(e) {
+  // Handle preflight CORS requests
+  return ContentService.createTextOutput('')
+    .setMimeType(ContentService.MimeType.TEXT);
+}
+
+/*******************************
+ * TOKEN VERIFICATION
+ *******************************/
+function _verifyIdTokenFlexible(idToken) {
+  // 1) Google Sign-In on Web (GIS) — verify via tokeninfo
+  if (CONFIG.WEB_CLIENT_ID) {
+    const g = _verifyGoogleIdToken(idToken);
+    if (g && !g.error && (g.iss === 'accounts.google.com' || g.iss === 'https://accounts.google.com')) {
+      if (g.aud === CONFIG.WEB_CLIENT_ID && !_isExpired(g.exp)) {
+        return {
+          email: g.email,
+          emailVerified: g.email_verified === true || g.email_verified === 'true'
+        };
+      }
+    }
+  }
+
+  // 2) Firebase Auth Web — verify via Identity Toolkit
+  if (CONFIG.FIREBASE && CONFIG.FIREBASE.API_KEY) {
+    const f = _verifyFirebaseIdToken(idToken, CONFIG.FIREBASE.API_KEY);
+    if (f && !f.error) {
+      const u = f.users && f.users[0];
+      if (u) {
+        return {
+          email: u.email,
+          emailVerified: !!u.emailVerified
+        };
+      }
+    }
+  }
+
+  return { error: 'Token not valid for configured client(s).' };
+}
+
+function _verifyGoogleIdToken(idToken) {
+  // GET https://oauth2.googleapis.com/tokeninfo?id_token=XYZ
+  try {
+    const url = 'https://oauth2.googleapis.com/tokeninfo?id_token=' + encodeURIComponent(idToken);
+    const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+    if (res.getResponseCode() !== 200) {
+      return { error: 'tokeninfo ' + res.getResponseCode() + ': ' + res.getContentText() };
+    }
+    return JSON.parse(res.getContentText());
+  } catch (e) {
+    return { error: String(e) };
+  }
+}
+
+function _verifyFirebaseIdToken(idToken, apiKey) {
+  // POST https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=API_KEY  {"idToken":"..."}
+  try {
+    const url = 'https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=' + encodeURIComponent(apiKey);
+    const res = UrlFetchApp.fetch(url, {
+      method: 'post',
+      contentType: 'application/json',
+      payload: JSON.stringify({ idToken }),
+      muteHttpExceptions: true
+    });
+    if (res.getResponseCode() !== 200) {
+      return { error: 'firebase ' + res.getResponseCode() + ': ' + res.getContentText() };
+    }
+    return JSON.parse(res.getContentText()); // { users: [ { email, emailVerified, ... } ] }
+  } catch (e) {
+    return { error: String(e) };
+  }
+}
+
+/*******************************
+ * SHEETS + UTIL
+ *******************************/
+function _getSpreadsheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet(); // container-bound
+  if (ss) return ss;
+  if (CONFIG.SPREADSHEET_ID) return SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+  throw new Error('No container-bound spreadsheet. Bind the script or set CONFIG.SPREADSHEET_ID.');
+}
+
+function _appendRows(ss, sheetName, rows, expectedCols) {
+  const sh = ss.getSheetByName(sheetName);
+  if (!sh) throw new Error('Missing sheet/tab: ' + sheetName);
+  const safeRows = rows.map(r => {
+    if (r.length !== expectedCols) throw new Error(`Row for ${sheetName} had ${r.length} cols; expected ${expectedCols}`);
+    return r;
+  });
+  const startRow = sh.getLastRow() + 1;
+  sh.getRange(startRow, 1, safeRows.length, expectedCols).setValues(safeRows);
+}
+
+function _extractBearerToken(e) {
+  const params = (e && e.parameter) ? e.parameter : {};
+  if (params.authorization && /^Bearer\s+/i.test(params.authorization)) {
+    return params.authorization.replace(/^Bearer\s+/i, '').trim();
+  }
+  return null;
+}
+
+function _asDate(ts) {
+  const d = ts ? new Date(ts) : new Date();
+  return isNaN(d.getTime()) ? new Date() : d;
+}
+
+function _isExpired(expSeconds) {
+  if (!expSeconds) return false;
+  return Math.floor(Date.now() / 1000) > Number(expSeconds);
+}
+
+/*******************************
+ * RESPONSE HELPERS
+ *******************************/
+function _json(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+function _badRequest(msg) { return _json({ ok: false, error: 'bad_request', message: msg }); }
+function _unauthorized(msg){ return _json({ ok: false, error: 'unauthorized', message: msg }); }
+function _serverError(msg){ return _json({ ok: false, error: 'server_error', message: msg }); }

@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'firebase_options.dart';
 import 'shared/rules_service.dart';
@@ -15,6 +17,7 @@ import 'package:path_provider/path_provider.dart';
 import 'dart:io';
 
 import 'models/character.dart'; 
+import 'models/stored_core.dart';
 import 'pages/login_page.dart';
 import 'pages/events_page.dart';
 import 'config/app_config.dart';
@@ -202,6 +205,7 @@ class _HomePageState extends State<HomePage> {
     super.initState();
     fetchCharacter();
     fetchActiveEvents();
+    _initializeUserStructure();
   }
 
   Future<void> fetchCharacter() async {
@@ -217,9 +221,14 @@ class _HomePageState extends State<HomePage> {
       if (data != null) {
         final jsonString = utf8.decode(data);
         final jsonMap = json.decode(jsonString);
+        final fetchedCharacter = Character.fromJson(jsonMap);
         setState(() {
-          character = Character.fromJson(jsonMap);
+          character = fetchedCharacter;
         });
+        
+        // Set the global cachedCharacter so other pages can access it
+        cachedCharacter = fetchedCharacter;
+        print('✅ Character cached globally from HomePage');
         
         // Also try to download QR code (don't fail if it doesn't exist)
         _downloadQRCode(email);
@@ -241,6 +250,43 @@ class _HomePageState extends State<HomePage> {
       print('⚠️ QR code not available: $e');
     }
     return null;
+  }
+
+  Future<void> _initializeUserStructure() async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) {
+        print('⚠️ User not authenticated, skipping user structure initialization');
+        return;
+      }
+
+      print('🚀 Initializing user structure after login...');
+      final idToken = await user.getIdToken();
+      
+      final response = await http.post(
+        Uri.parse(AppConfig.initializeUserStructureUrl),
+        headers: {
+          'Authorization': 'Bearer $idToken',
+          'Content-Type': 'application/json',
+        },
+      );
+
+      if (response.statusCode == 200) {
+        final responseData = json.decode(response.body);
+        if (responseData['ok'] == true) {
+          print('✅ User structure initialized successfully');
+          print('📋 Summary: ${responseData['summary']}');
+          print('🎯 Character number: ${responseData['characterNumber']}');
+          print('📍 Path: ${responseData['path']}');
+        } else {
+          print('❌ User structure initialization failed: ${responseData['error']}');
+        }
+      } else {
+        print('❌ User structure initialization HTTP error: ${response.statusCode}');
+      }
+    } catch (error) {
+      print('❌ Error initializing user structure: $error');
+    }
   }
 
   Future<void> fetchActiveEvents() async {
@@ -499,7 +545,7 @@ class _HomePageState extends State<HomePage> {
             ),
           ),
           SizedBox(height: 8),
-          Container(
+          SizedBox(
             height: 160, // Increased height to accommodate status indicators
             child: ListView.builder(
               scrollDirection: Axis.horizontal,
@@ -996,6 +1042,22 @@ class _QRScannerPageState extends State<QRScannerPage> {
                       child: Text('Slot for Affinity Points'),
                     ),
                   ),
+                  SizedBox(height: 8),
+                  
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton(
+                      onPressed: () {
+                        Navigator.of(context).pop();
+                        _showStoreCoreOption(data);
+                      },
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.green,
+                        foregroundColor: Colors.white,
+                      ),
+                      child: Text('Store Core'),
+                    ),
+                  ),
                 ],
               ],
             ),
@@ -1105,6 +1167,270 @@ class _QRScannerPageState extends State<QRScannerPage> {
     );
   }
 
+  void _showStoreCoreOption(Map<String, dynamic> coreData) {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Text('Store Core'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.inventory, color: Colors.green, size: 48),
+              SizedBox(height: 16),
+              Text(
+                'This will store the core in your character\'s inventory for later use or trading.',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 16),
+              ),
+              SizedBox(height: 8),
+              Text(
+                'Core: ${coreData['tier']} Tier',
+                style: TextStyle(fontSize: 14, color: Colors.grey),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.of(context).pop();
+                _selectCharacterForStorage(coreData);
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.green,
+                foregroundColor: Colors.white,
+              ),
+              child: Text('Store Core'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  void _selectCharacterForStorage(Map<String, dynamic> coreData) async {
+    try {
+      // Show loading dialog
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (BuildContext context) {
+          return AlertDialog(
+            title: Text('Loading Characters...'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(height: 16),
+                Text('Getting your characters...'),
+              ],
+            ),
+          );
+        },
+      );
+
+      // Get user's characters
+      final user = _auth.currentUser;
+      if (user == null) {
+        if (mounted && Navigator.of(context).canPop()) {
+          Navigator.of(context).pop();
+        }
+        _showError('User not authenticated');
+        return;
+      }
+
+      final idToken = await user.getIdToken();
+      final charactersResponse = await http.get(
+        Uri.parse(AppConfig.getCharactersUrl),
+        headers: {
+          'Authorization': 'Bearer $idToken',
+          'Content-Type': 'application/json',
+        },
+      );
+
+      // Close loading dialog
+      if (mounted && Navigator.of(context).canPop()) {
+        Navigator.of(context).pop();
+      }
+
+      if (charactersResponse.statusCode == 200) {
+        final charactersData = json.decode(charactersResponse.body);
+        if (charactersData['ok'] == true) {
+          final characters = charactersData['characters'] as List<dynamic>;
+          
+          if (characters.isEmpty) {
+            final debug = charactersData['debug'];
+            final debugInfo = debug != null 
+                ? 'Searched for UID: ${debug['searchedForUid']}, Player exists: ${debug['playerExists']}, Characters count: ${debug['charactersCount']}, Message: ${debug['message']}'
+                : 'No debug info';
+            print('🔍 Character loading debug info: $debugInfo');
+            _showError('No characters found. Debug: $debugInfo');
+            return;
+          }
+
+          // Go straight to storing the core
+          _storeCore(coreData);
+        } else {
+          _showError('Error loading characters: ${charactersData['error']}');
+        }
+      } else {
+        _showError('Error loading characters: HTTP ${charactersResponse.statusCode}');
+      }
+
+    } catch (error) {
+      // Close loading dialog if still open
+      if (mounted && Navigator.of(context).canPop()) {
+        Navigator.of(context).pop();
+      }
+      print('Error loading characters: $error');
+      _showError('Error loading characters: $error');
+    }
+  }
+
+  void _storeCore(Map<String, dynamic> coreData) async {
+    try {
+      // Show loading dialog
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (BuildContext context) {
+          return AlertDialog(
+            title: Text('Storing Core...'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(height: 16),
+                Text('Storing core in character inventory...'),
+              ],
+            ),
+          );
+        },
+      );
+
+      final user = _auth.currentUser;
+      if (user == null) {
+        if (mounted && Navigator.of(context).canPop()) {
+          Navigator.of(context).pop();
+        }
+        _showError('User not authenticated');
+        return;
+      }
+
+      final idToken = await user.getIdToken();
+      final coreId = coreData['id'];
+
+      // Call the storeMonsterCore Firebase function
+      final response = await http.post(
+        Uri.parse(AppConfig.storeMonsterCoreUrl),
+        headers: {
+          'Authorization': 'Bearer $idToken',
+          'Content-Type': 'application/json',
+        },
+        body: json.encode({
+          'coreId': coreId,
+          'characterNumber': cachedCharacter?.characterNumber?.toString() ?? 'main',
+        }),
+      );
+
+      // Close loading dialog
+      if (mounted && Navigator.of(context).canPop()) {
+        Navigator.of(context).pop();
+      }
+
+      if (response.statusCode == 200) {
+        final responseData = json.decode(response.body);
+        print('🔍 Store core response: $responseData');
+        if (responseData['ok'] == true) {
+          _showStorageSuccess(responseData);
+        } else {
+          print('❌ Store core error: ${responseData['error']}');
+          _showError('Error: ${responseData['error']}');
+        }
+      } else {
+        final errorBody = response.body;
+        print('❌ Store core HTTP error ${response.statusCode}: $errorBody');
+        _showError('Error storing core: HTTP ${response.statusCode}');
+      }
+
+    } catch (error) {
+      // Close loading dialog if still open
+      if (mounted && Navigator.of(context).canPop()) {
+        Navigator.of(context).pop();
+      }
+      print('Error storing core: $error');
+      _showError('Error storing core: $error');
+    }
+  }
+
+
+
+
+
+  void _showStorageSuccess(Map<String, dynamic> responseData) {
+    final action = responseData['action'] ?? 'stored';
+    final newCount = responseData['newCount'] ?? 1;
+    final message = responseData['message'] ?? 'Core stored successfully';
+    
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Row(
+            children: [
+              Icon(Icons.check_circle, color: Colors.green),
+              SizedBox(width: 8),
+              Text('Core Stored Successfully'),
+            ],
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(message),
+              SizedBox(height: 16),
+              Container(
+                padding: EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.green.shade50,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.green.shade200),
+                ),
+                child: Row(
+                  children: [
+                    Icon(Icons.inventory, color: Colors.green, size: 20),
+                    SizedBox(width: 8),
+                                          Text(
+                        'You now have $newCount ${responseData['tier'] ?? 'Iron'} core${newCount == 1 ? '' : 's'} in storage',
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          color: Colors.green.shade700,
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            ElevatedButton(
+              onPressed: () => Navigator.of(context).pop(),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.green,
+                foregroundColor: Colors.white,
+              ),
+              child: Text('OK'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   void _processConsumption(Map<String, dynamic> coreData, String action) async {
     try {
       // Show loading dialog
@@ -1167,7 +1493,6 @@ class _QRScannerPageState extends State<QRScannerPage> {
       } else {
         _showError('Error processing consumption: HTTP ${response.statusCode}');
       }
-
     } catch (error) {
       // Close loading dialog if still open
       if (mounted && Navigator.of(context).canPop()) {
@@ -1746,6 +2071,7 @@ class _QRScannerPageState extends State<QRScannerPage> {
 
   void _showError(String message) {
     if (!mounted) return;
+    print('❌ ERROR in QR Scanner: $message');
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(message),
@@ -2066,6 +2392,95 @@ class _CameraScannerPageState extends State<_CameraScannerPage> {
   }
 }
 
+// Trade Scanner Page
+class _TradeScannerPage extends StatefulWidget {
+  final Function(String) onQRCodeScanned;
+
+  const _TradeScannerPage({required this.onQRCodeScanned});
+
+  @override
+  _TradeScannerPageState createState() => _TradeScannerPageState();
+}
+
+class _TradeScannerPageState extends State<_TradeScannerPage> {
+  final GlobalKey qrKey = GlobalKey(debugLabel: 'QR');
+  QRViewController? controller;
+
+  @override
+  void dispose() {
+    controller?.dispose();
+    super.dispose();
+  }
+
+  void _onQRViewCreated(QRViewController controller) {
+    this.controller = controller;
+    controller.scannedDataStream.listen((scanData) {
+      _onQRCodeScanned(scanData.code ?? '');
+    });
+  }
+
+  void _onQRCodeScanned(String qrCode) {
+    // Vibrate on scan
+    HapticFeedback.lightImpact();
+    
+    // Stop the scanner
+    controller?.pauseCamera();
+    
+    // Call the callback to pass the QR code back to the character page
+    widget.onQRCodeScanned(qrCode);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        title: Text('Trade Scanner'),
+        backgroundColor: Colors.black,
+        actions: [
+          IconButton(
+            icon: Icon(Icons.flash_on),
+            onPressed: () async {
+              await controller?.toggleFlash();
+            },
+          ),
+          IconButton(
+            icon: Icon(Icons.flip_camera_ios),
+            onPressed: () async {
+              await controller?.flipCamera();
+            },
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          Padding(
+            padding: EdgeInsets.all(16.0),
+            child: Text(
+              'Scan a player\'s profile QR code to trade your core',
+              style: TextStyle(color: Colors.white, fontSize: 16),
+              textAlign: TextAlign.center,
+            ),
+          ),
+          Expanded(
+            child: QRView(
+              key: qrKey,
+              onQRViewCreated: _onQRViewCreated,
+              overlay: QrScannerOverlayShape(
+                borderColor: Colors.purple,
+                borderRadius: 10,
+                borderLength: 30,
+                borderWidth: 10,
+                cutOutSize: 250,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 // Character Sheet Page
 class CharacterSheetPage extends StatefulWidget {
   final Character character;
@@ -2194,6 +2609,1295 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
   Future<String?> _getLastSubmissionTimestamp() async {
     final prefs = await SharedPreferences.getInstance();
     return prefs.getString('last_submission_timestamp');
+  }
+
+  void _showStoredCores() async {
+    try {
+      // Show loading dialog
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (BuildContext context) {
+          return AlertDialog(
+            title: Text('Loading Stored Cores...'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(height: 16),
+                Text('Getting stored cores...'),
+              ],
+            ),
+          );
+        },
+      );
+
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) {
+        if (mounted && Navigator.of(context).canPop()) {
+          Navigator.of(context).pop();
+        }
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('User not authenticated')),
+        );
+        return;
+      }
+
+      final idToken = await user.getIdToken();
+      final characterNumber = widget.character.characterNumber?.toString() ?? 'main';
+      
+      // Use the Firebase Function to get stored cores
+      final response = await http.get(
+        Uri.parse('${AppConfig.getStoredCoresUrl}?characterId=${user.uid}_$characterNumber'),
+        headers: {
+          'Authorization': 'Bearer $idToken',
+          'Content-Type': 'application/json',
+        },
+      );
+
+      if (response.statusCode == 200) {
+        final responseData = json.decode(response.body);
+        if (responseData['ok'] == true) {
+          final coresByTier = responseData['coresByTier'] as Map<String, dynamic>;
+          
+          // Close loading dialog
+          if (mounted && Navigator.of(context).canPop()) {
+            Navigator.of(context).pop();
+          }
+          
+          _showStoredCoresDialog(coresByTier);
+        } else {
+          // Close loading dialog
+          if (mounted && Navigator.of(context).canPop()) {
+            Navigator.of(context).pop();
+          }
+          
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Error: ${responseData['error']}')),
+          );
+        }
+      } else {
+        // Close loading dialog
+        if (mounted && Navigator.of(context).canPop()) {
+          Navigator.of(context).pop();
+        }
+        
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error loading stored cores: HTTP ${response.statusCode}')),
+        );
+      }
+
+    } catch (error) {
+      // Close loading dialog if still open
+      if (mounted && Navigator.of(context).canPop()) {
+        Navigator.of(context).pop();
+      }
+      print('Error loading stored cores: $error');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error loading stored cores: $error')),
+      );
+    }
+  }
+
+  String _getTierNumber(String collectionName) {
+    switch (collectionName) {
+      case 'coreIron': return '1';
+      case 'coreSilver': return '2';
+      case 'coreGold': return '3';
+      case 'coreJade': return '4';
+      case 'coreSaint': return '5';
+      case 'coreSovereign': return '6';
+      default: return '1';
+    }
+  }
+
+  void _showStoredCoresDialog(Map<String, dynamic> coresByTier) {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Row(
+            children: [
+              Icon(Icons.inventory, color: Colors.orange),
+              SizedBox(width: 8),
+              Text('Stored Cores'),
+            ],
+          ),
+          content: SizedBox(
+            width: double.maxFinite,
+            height: 400,
+            child: coresByTier.isEmpty
+                ? Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(Icons.inventory_2_outlined, size: 64, color: Colors.grey),
+                        SizedBox(height: 16),
+                        Text('No stored cores found'),
+                        SizedBox(height: 8),
+                        Text(
+                          'Scan monster cores and select "Store Core" to build your inventory.',
+                          style: TextStyle(fontSize: 12, color: Colors.grey),
+                          textAlign: TextAlign.center,
+                        ),
+                      ],
+                    ),
+                  )
+                : ListView(
+                    children: _buildCoresByTierList(coresByTier),
+                  ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: Text('Close'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  List<Widget> _buildCoresByTierList(Map<String, dynamic> coresByTier) {
+    final List<Widget> widgets = [];
+    
+    // Sort tiers by tier level (Iron=1, Silver=2, etc.)
+    final tierOrder = ['Iron', 'Silver', 'Gold', 'Jade', 'Saint', 'Sovereign'];
+    final tierLevels = {
+      'Iron': 1,
+      'Silver': 2, 
+      'Gold': 3,
+      'Jade': 4,
+      'Saint': 5,
+      'Sovereign': 6
+    };
+
+    for (final tierName in tierOrder) {
+      final cores = coresByTier[tierName] as List<dynamic>?;
+      
+      if (cores != null && cores.isNotEmpty) {
+        final tierLevel = tierLevels[tierName] ?? 1;
+        
+        // Tier header
+        widgets.add(
+          Padding(
+            padding: EdgeInsets.symmetric(vertical: 8.0),
+            child: Text(
+              '$tierName Tier (${cores.length})',
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
+                color: _getTierColor(tierLevel),
+              ),
+            ),
+          ),
+        );
+
+        // Core card
+        widgets.add(
+          Card(
+            child: ListTile(
+              leading: Icon(
+                Icons.circle,
+                color: _getTierColor(tierLevel),
+                size: 32,
+              ),
+              title: Text('$tierName Monster Cores'),
+              subtitle: Text('${cores.length} cores available'),
+              trailing: Icon(Icons.arrow_forward_ios),
+              onTap: () {
+                Navigator.of(context).pop();
+                _showTierCores(tierName, cores, tierLevel);
+              },
+            ),
+          ),
+        );
+      }
+    }
+
+    if (widgets.isEmpty) {
+      widgets.add(
+        Center(
+          child: Text('No cores stored yet'),
+        ),
+      );
+    }
+
+    return widgets;
+  }
+
+  Color _getTierColor(int tier) {
+    switch (tier) {
+      case 1: return Colors.grey;      // Iron
+      case 2: return Colors.white;     // Silver
+      case 3: return Colors.yellow;    // Gold
+      case 4: return Colors.green;     // Jade
+      case 5: return Colors.purple;    // Saint
+      case 6: return Colors.orange;    // Sovereign
+      default: return Colors.white;
+    }
+  }
+
+  // Helper function to check if a core tier can be used by the character
+  bool _canUseCoreTier(String coreTier, String characterTier) {
+    final tierOrder = ['Iron', 'Silver', 'Gold', 'Platinum', 'Diamond', 'Mythic'];
+    final coreTierIndex = tierOrder.indexOf(coreTier);
+    final characterTierIndex = tierOrder.indexOf(characterTier);
+    
+    // Character can use same tier or higher tier cores
+    // Cannot use lower tier cores directly
+    return coreTierIndex >= characterTierIndex;
+  }
+
+  // Helper function to get tier conversion info
+  String _getTierConversionInfo(String coreTier, String characterTier) {
+    final tierOrder = ['Iron', 'Silver', 'Gold', 'Platinum', 'Diamond', 'Mythic'];
+    final coreTierIndex = tierOrder.indexOf(coreTier);
+    final characterTierIndex = tierOrder.indexOf(characterTier);
+    
+    if (coreTierIndex < characterTierIndex) {
+      final tierDifference = characterTierIndex - coreTierIndex;
+      final requiredCount = (10 * tierDifference).toString();
+      return 'You need $requiredCount $coreTier cores to equal 1 $characterTier core, or use a $characterTier core instead.';
+    }
+    return '';
+  }
+
+  void _showConsumeCoreDialog(String tierName, int coreCount) {
+    final characterTier = widget.character.cultivationTier;
+    final canUse = _canUseCoreTier(tierName, characterTier);
+    final conversionInfo = _getTierConversionInfo(tierName, characterTier);
+
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Text('Consume $tierName Core'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (canUse) ...[
+                Text('Consuming a core is only for build points.'),
+                SizedBox(height: 16),
+                ElevatedButton(
+                  onPressed: () {
+                    Navigator.of(context).pop();
+                    _consumeCore(tierName, 'build');
+                  },
+                  child: Text('Consume for Build Points'),
+                ),
+              ] else ...[
+                Icon(Icons.block, color: Colors.red, size: 48),
+                SizedBox(height: 16),
+                Text(
+                  'Cannot Consume $tierName Core',
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.red,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+                SizedBox(height: 8),
+                Text(
+                  'You are $characterTier tier and cannot consume $tierName cores directly.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 14),
+                ),
+                SizedBox(height: 16),
+                Container(
+                  padding: EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Colors.orange.shade50,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: Colors.orange.shade300),
+                  ),
+                  child: Text(
+                    conversionInfo,
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Colors.orange.shade800,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: Text(canUse ? 'Cancel' : 'OK'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Future<void> _consumeCore(String tierName, String usageType) async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('User not authenticated')),
+        );
+        return;
+      }
+
+      // Show loading feedback
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Row(
+            children: [
+              SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                ),
+              ),
+              SizedBox(width: 16),
+              Text('Consuming $tierName core...'),
+            ],
+          ),
+          duration: Duration(seconds: 30), // Long duration in case of delays
+        ),
+      );
+
+      final characterNumber = widget.character.characterNumber?.toString() ?? 'main';
+      final idToken = await user.getIdToken();
+
+      final response = await http.post(
+        Uri.parse(AppConfig.useStoredCoreUrl),
+        headers: {
+          'Authorization': 'Bearer $idToken',
+          'Content-Type': 'application/json',
+        },
+        body: json.encode({
+          'characterNumber': characterNumber,
+          'tier': tierName,
+          'usageType': usageType,
+        }),
+      );
+
+      if (response.statusCode == 200) {
+        final responseData = json.decode(response.body);
+        if (responseData['ok'] == true) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('${tierName} core consumed successfully for ${usageType}!'),
+              backgroundColor: Colors.green,
+            ),
+          );
+          // Refresh the stored cores display
+          _showStoredCores();
+        } else {
+          String errorMessage = responseData['error'] ?? 'Unknown error occurred';
+          
+          // Check if it's a tier validation error and show a helpful message
+          if (errorMessage.contains('Cannot consume') && errorMessage.contains('cores to equal')) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('Tier Mismatch', style: TextStyle(fontWeight: FontWeight.bold)),
+                    SizedBox(height: 4),
+                    Text(errorMessage, style: TextStyle(fontSize: 12)),
+                  ],
+                ),
+                backgroundColor: Colors.orange,
+                duration: Duration(seconds: 8),
+              ),
+            );
+          } else {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('Error: $errorMessage'),
+                backgroundColor: Colors.red,
+              ),
+            );
+          }
+        }
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error consuming core: HTTP ${response.statusCode}'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } catch (error) {
+      print('Error consuming core: $error');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error consuming core: $error'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  void _showSlotCoreDialog(String tierName, int coreCount) {
+    final characterTier = widget.character.cultivationTier;
+    final canUse = _canUseCoreTier(tierName, characterTier);
+    final conversionInfo = _getTierConversionInfo(tierName, characterTier);
+
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Text('Slot $tierName Core'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (canUse) ...[
+                Text('What would you like to slot this core for?'),
+                SizedBox(height: 16),
+                ElevatedButton(
+                  onPressed: () {
+                    Navigator.of(context).pop();
+                    _slotCore(tierName, 'affinity');
+                  },
+                  child: Text('Affinity Points'),
+                ),
+              ] else ...[
+                Icon(Icons.block, color: Colors.red, size: 48),
+                SizedBox(height: 16),
+                Text(
+                  'Cannot Slot $tierName Core',
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.red,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+                SizedBox(height: 8),
+                Text(
+                  'You are $characterTier tier and cannot slot $tierName cores directly.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 14),
+                ),
+                SizedBox(height: 16),
+                Container(
+                  padding: EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Colors.orange.shade50,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: Colors.orange.shade300),
+                  ),
+                  child: Text(
+                    conversionInfo,
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Colors.orange.shade800,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: Text(canUse ? 'Cancel' : 'OK'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+    Future<void> _slotCore(String tierName, String usageType) async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('User not authenticated')),
+        );
+        return;
+      }
+
+      // Show loading feedback
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Row(
+            children: [
+              SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                ),
+              ),
+              SizedBox(width: 16),
+              Text('Slotting $tierName core...'),
+            ],
+          ),
+          duration: Duration(seconds: 30), // Long duration in case of delays
+        ),
+      );
+
+      final characterNumber = widget.character.characterNumber?.toString() ?? 'main';
+      final idToken = await user.getIdToken();
+
+      final response = await http.post(
+        Uri.parse(AppConfig.useStoredCoreUrl),
+        headers: {
+          'Authorization': 'Bearer $idToken',
+          'Content-Type': 'application/json',
+        },
+        body: json.encode({
+          'characterNumber': characterNumber,
+          'tier': tierName,
+          'usageType': usageType,
+        }),
+      );
+
+      if (response.statusCode == 200) {
+        final responseData = json.decode(response.body);
+        if (responseData['ok'] == true) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('${tierName} core slotted successfully for ${usageType}!'),
+              backgroundColor: Colors.green,
+            ),
+          );
+          // Refresh the stored cores display
+          _showStoredCores();
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Error: ${responseData['error']}'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error slotting core: HTTP ${response.statusCode}'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } catch (error) {
+      print('Error slotting core: $error');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error slotting core: $error'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  void _showTradeCoreDialog(String tierName, int coreCount) {
+    final characterTier = widget.character.cultivationTier;
+    final canUse = _canUseCoreTier(tierName, characterTier);
+    final conversionInfo = _getTierConversionInfo(tierName, characterTier);
+
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Text('Trade $tierName Core'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (canUse) ...[
+                Text('You have $coreCount $tierName core(s) available to trade.'),
+                SizedBox(height: 16),
+                Text('To trade this core:'),
+                SizedBox(height: 8),
+                Text('1. Scan the QR code of the player you want to trade with'),
+                Text('2. Select their character'),
+                Text('3. Confirm the trade'),
+                SizedBox(height: 16),
+                ElevatedButton.icon(
+                  onPressed: () {
+                    Navigator.of(context).pop();
+                    _startTradeFlow(tierName, coreCount);
+                  },
+                  icon: Icon(Icons.qr_code_scanner),
+                  label: Text('Start Trade'),
+                ),
+              ] else ...[
+                Icon(Icons.block, color: Colors.red, size: 48),
+                SizedBox(height: 16),
+                Text(
+                  'Cannot Trade $tierName Core',
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.red,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+                SizedBox(height: 8),
+                Text(
+                  'You are $characterTier tier and cannot trade $tierName cores directly.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 14),
+                ),
+                SizedBox(height: 16),
+                Container(
+                  padding: EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Colors.orange.shade50,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: Colors.orange.shade300),
+                  ),
+                  child: Text(
+                    conversionInfo,
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Colors.orange.shade800,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: Text(canUse ? 'Cancel' : 'OK'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  void _showTierCores(String tierName, List<dynamic> cores, int tier) {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Row(
+            children: [
+              Icon(Icons.circle, color: _getTierColor(tier)),
+              SizedBox(width: 8),
+              Text('$tierName Cores'),
+            ],
+          ),
+          content: SizedBox(
+            width: double.maxFinite,
+            height: 400,
+            child: Column(
+              children: [
+                Text(
+                  'You have ${cores.length} $tierName core${cores.length == 1 ? '' : 's'} available',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                  textAlign: TextAlign.center,
+                ),
+                SizedBox(height: 16),
+                Expanded(
+                  child: ListView(
+                    children: [
+                      // Consume Core Option
+                      Card(
+                        child: ListTile(
+                          leading: Icon(Icons.auto_fix_high, color: Colors.orange),
+                          title: Text('Consume Core'),
+                          subtitle: Text('Use core for cultivation or crafting'),
+                          onTap: () {
+                            Navigator.of(context).pop();
+                            _showConsumeCoreDialog(tierName, cores.length);
+                          },
+                        ),
+                      ),
+                      // Slot Core Option
+                      Card(
+                        child: ListTile(
+                          leading: Icon(Icons.settings, color: Colors.blue),
+                          title: Text('Slot Core'),
+                          subtitle: Text('Equip core in equipment or skills'),
+                          onTap: () {
+                            Navigator.of(context).pop();
+                            _showSlotCoreDialog(tierName, cores.length);
+                          },
+                        ),
+                      ),
+                      // Trade Core Option
+                      Card(
+                        child: ListTile(
+                          leading: Icon(Icons.swap_horiz, color: Colors.green),
+                          title: Text('Trade Core'),
+                          subtitle: Text('Trade with another player'),
+                          onTap: () {
+                            Navigator.of(context).pop();
+                            _showTradeCoreDialog(tierName, cores.length);
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: Text('Back'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  void _startTradeFlow(String tierName, int coreCount) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => TradeQRScannerPage(
+          tierName: tierName,
+          coreCount: coreCount,
+          fromCharacter: widget.character,
+        ),
+      ),
+    );
+  }
+
+  void _showCoreOptions(Map<String, dynamic> core, String tierName) {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Text('Core #${core['uniqueNumber']}'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                Icons.circle,
+                color: _getTierColor(core['tier']),
+                size: 48,
+              ),
+              SizedBox(height: 16),
+              Text(
+                '$tierName Tier Monster Core',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              ),
+              SizedBox(height: 8),
+              Text('What would you like to do with this core?'),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.of(context).pop();
+                _useStoredCore(core);
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.blue,
+                foregroundColor: Colors.white,
+              ),
+              child: Text('Use Core'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.of(context).pop();
+                _tradeStoredCore(core);
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.purple,
+                foregroundColor: Colors.white,
+              ),
+              child: Text('Trade Core'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  void _useStoredCore(Map<String, dynamic> core) {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Text('Use Core'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.build, color: Colors.blue, size: 48),
+              SizedBox(height: 16),
+              Text(
+                'How would you like to use this core?',
+                style: TextStyle(fontSize: 16),
+                textAlign: TextAlign.center,
+              ),
+              SizedBox(height: 16),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: () {
+                    Navigator.of(context).pop();
+                    _processStoredCoreUsage(core, 'build');
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.blue,
+                    foregroundColor: Colors.white,
+                  ),
+                  child: Text('Consume for Build'),
+                ),
+              ),
+              SizedBox(height: 8),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: () {
+                    Navigator.of(context).pop();
+                    _processStoredCoreUsage(core, 'affinity');
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.purple,
+                    foregroundColor: Colors.white,
+                  ),
+                  child: Text('Slot for Affinity Points'),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: Text('Cancel'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  void _processStoredCoreUsage(Map<String, dynamic> core, String usageType) async {
+    try {
+      // Show loading dialog
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (BuildContext context) {
+          return AlertDialog(
+            title: Text('Using Core...'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(height: 16),
+                Text('Processing core usage...'),
+              ],
+            ),
+          );
+        },
+      );
+
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) {
+        if (mounted && Navigator.of(context).canPop()) {
+          Navigator.of(context).pop();
+        }
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('User not authenticated')),
+        );
+        return;
+      }
+
+      final idToken = await user.getIdToken();
+      final response = await http.post(
+        Uri.parse(AppConfig.useStoredCoreUrl),
+        headers: {
+          'Authorization': 'Bearer $idToken',
+          'Content-Type': 'application/json',
+        },
+        body: json.encode({
+          'characterId': widget.character.id,
+          'coreId': core['coreId'],
+          'usageType': usageType,
+        }),
+      );
+
+      // Close loading dialog
+      if (mounted && Navigator.of(context).canPop()) {
+        Navigator.of(context).pop();
+      }
+
+      if (response.statusCode == 200) {
+        final responseData = json.decode(response.body);
+        if (responseData['ok'] == true) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(responseData['message']),
+              backgroundColor: Colors.green,
+            ),
+          );
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Error: ${responseData['error']}')),
+          );
+        }
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error using core: HTTP ${response.statusCode}')),
+        );
+      }
+
+    } catch (error) {
+      // Close loading dialog if still open
+      if (mounted && Navigator.of(context).canPop()) {
+        Navigator.of(context).pop();
+      }
+      print('Error using stored core: $error');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error using core: $error')),
+      );
+    }
+  }
+
+  void _tradeStoredCore(Map<String, dynamic> core) {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Text('Trade Core'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.swap_horiz, color: Colors.purple, size: 48),
+              SizedBox(height: 16),
+              Text(
+                'Scan another player\'s QR code to trade this core to them.',
+                style: TextStyle(fontSize: 16),
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.of(context).pop();
+                _startTradeScanner(core);
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.purple,
+                foregroundColor: Colors.white,
+              ),
+              child: Text('Start Scanning'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  void _showError(String message) {
+    print('❌ ERROR in Character Sheet: $message');
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: Colors.red,
+      ),
+    );
+  }
+
+  void _startTradeScanner(Map<String, dynamic> core) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => _TradeScannerPage(
+          onQRCodeScanned: (qrData) => _handleTradeQRCode(qrData, core),
+        ),
+      ),
+    );
+  }
+
+  void _handleTradeQRCode(String qrData, Map<String, dynamic> core) {
+    // Close the scanner
+    Navigator.of(context).pop();
+    
+    // Process the QR code
+    _processTradeQRCode(qrData, core);
+  }
+
+  void _processTradeQRCode(String qrData, Map<String, dynamic> core) async {
+    try {
+      // Parse the QR data to extract user information
+      // User profile QR codes should contain email or player UID
+      String? targetPlayerUid;
+      String? targetPlayerEmail;
+      
+      // Try to parse as JSON first (in case it's a structured QR code)
+      try {
+        final qrJson = json.decode(qrData);
+        targetPlayerUid = qrJson['uid'];
+        targetPlayerEmail = qrJson['email'];
+      } catch (e) {
+        // If not JSON, treat as plain email
+        if (qrData.contains('@')) {
+          targetPlayerEmail = qrData.trim();
+        } else {
+          _showError('Invalid QR code. Please scan a user profile QR code.');
+          return;
+        }
+      }
+
+      // Show loading while we fetch target player's characters
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (BuildContext context) {
+          return AlertDialog(
+            title: Text('Finding Player...'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(height: 16),
+                Text('Looking up player characters...'),
+              ],
+            ),
+          );
+        },
+      );
+
+      // Get the target player's characters
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) {
+        if (mounted && Navigator.of(context).canPop()) {
+          Navigator.of(context).pop();
+        }
+        _showError('User not authenticated');
+        return;
+      }
+
+      final idToken = await user.getIdToken();
+      
+      // Call a Firebase function to get target player's characters
+      final response = await http.post(
+        Uri.parse(AppConfig.getPlayerCharactersUrl),
+        headers: {
+          'Authorization': 'Bearer $idToken',
+          'Content-Type': 'application/json',
+        },
+        body: json.encode({
+          'targetPlayerEmail': targetPlayerEmail,
+          'targetPlayerUid': targetPlayerUid,
+        }),
+      );
+
+      // Close loading dialog
+      if (mounted && Navigator.of(context).canPop()) {
+        Navigator.of(context).pop();
+      }
+
+      if (response.statusCode == 200) {
+        final responseData = json.decode(response.body);
+        if (responseData['ok'] == true) {
+          final targetCharacters = responseData['characters'] as List<dynamic>;
+          final targetPlayerUidResponse = responseData['playerUid'] as String;
+          
+          if (targetCharacters.isEmpty) {
+            _showError('Target player has no characters available for trading.');
+            return;
+          }
+
+          _showTargetCharacterSelection(core, targetCharacters, targetPlayerUidResponse);
+        } else {
+          _showError('Error finding player: ${responseData['error']}');
+        }
+      } else {
+        _showError('Error finding player: HTTP ${response.statusCode}');
+      }
+
+    } catch (error) {
+      // Close loading dialog if still open
+      if (mounted && Navigator.of(context).canPop()) {
+        Navigator.of(context).pop();
+      }
+      print('Error processing trade QR code: $error');
+      _showError('Error processing QR code: $error');
+    }
+  }
+
+  void _showTargetCharacterSelection(Map<String, dynamic> core, List<dynamic> targetCharacters, String targetPlayerUid) {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Text('Select Target Character'),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  'Which character should receive Core #${core['uniqueNumber']}?',
+                  style: TextStyle(fontSize: 14),
+                ),
+                SizedBox(height: 16),
+                SizedBox(
+                  height: 200,
+                  child: ListView.builder(
+                    shrinkWrap: true,
+                    itemCount: targetCharacters.length,
+                    itemBuilder: (context, index) {
+                      final character = targetCharacters[index];
+                      return Card(
+                        child: ListTile(
+                          leading: Icon(Icons.person, color: Colors.purple),
+                          title: Text(character['playerName'] ?? 'Unknown'),
+                          subtitle: Text('Player #${character['playerNumber'] ?? 'Unknown'}'),
+                          onTap: () {
+                            Navigator.of(context).pop();
+                            _executeTrade(core, targetPlayerUid, character['id']);
+                          },
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: Text('Cancel'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  void _executeTrade(Map<String, dynamic> core, String targetPlayerUid, String targetCharacterId) async {
+    try {
+      // Show loading dialog
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (BuildContext context) {
+          return AlertDialog(
+            title: Text('Trading Core...'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(height: 16),
+                Text('Processing trade...'),
+              ],
+            ),
+          );
+        },
+      );
+
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) {
+        if (mounted && Navigator.of(context).canPop()) {
+          Navigator.of(context).pop();
+        }
+        _showError('User not authenticated');
+        return;
+      }
+
+      final idToken = await user.getIdToken();
+      final response = await http.post(
+        Uri.parse(AppConfig.tradeStoredCoreUrl),
+        headers: {
+          'Authorization': 'Bearer $idToken',
+          'Content-Type': 'application/json',
+        },
+        body: json.encode({
+          'fromCharacterId': widget.character.id,
+          'toPlayerUid': targetPlayerUid,
+          'toCharacterId': targetCharacterId,
+          'coreId': core['coreId'],
+        }),
+      );
+
+      // Close loading dialog
+      if (mounted && Navigator.of(context).canPop()) {
+        Navigator.of(context).pop();
+      }
+
+      if (response.statusCode == 200) {
+        final responseData = json.decode(response.body);
+        if (responseData['ok'] == true) {
+          _showTradeSuccess(responseData['message'] ?? 'Trade completed successfully!');
+        } else {
+          _showError('Error: ${responseData['error']}');
+        }
+      } else {
+        _showError('Error executing trade: HTTP ${response.statusCode}');
+      }
+
+    } catch (error) {
+      // Close loading dialog if still open
+      if (mounted && Navigator.of(context).canPop()) {
+        Navigator.of(context).pop();
+      }
+      print('Error executing trade: $error');
+      _showError('Error executing trade: $error');
+    }
+  }
+
+  void _showTradeSuccess(String message) {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Row(
+            children: [
+              Icon(Icons.check_circle, color: Colors.green),
+              SizedBox(width: 8),
+              Text('Trade Successful'),
+            ],
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.swap_horiz, color: Colors.purple, size: 48),
+              SizedBox(height: 16),
+              Text(
+                message,
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 16),
+              ),
+            ],
+          ),
+          actions: [
+            ElevatedButton(
+              onPressed: () => Navigator.of(context).pop(),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.green,
+                foregroundColor: Colors.white,
+              ),
+              child: Text('OK'),
+            ),
+          ],
+        );
+      },
+    );
   }
 
   Future<void> _syncCharacterData() async {
@@ -2373,6 +4077,11 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
           ],
         ),
         actions: [
+          IconButton(
+            icon: Icon(Icons.inventory),
+            onPressed: _showStoredCores,
+            tooltip: 'Stored Cores',
+          ),
           IconButton(
             icon: Icon(Icons.sync),
             onPressed: _syncCharacterData,
@@ -4748,6 +6457,10 @@ class _ProfilePageState extends State<ProfilePage> {
     }
   }
 
+
+
+
+
   @override
   Widget build(BuildContext context) {
     final user = _auth.currentUser;
@@ -4842,6 +6555,7 @@ class _ProfilePageState extends State<ProfilePage> {
               child: Text('🔄 Sync Everything'),
             ),
 
+
             SizedBox(height: 20),
             ElevatedButton(
               onPressed: () => signOut(context),
@@ -4849,6 +6563,497 @@ class _ProfilePageState extends State<ProfilePage> {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class TradeQRScannerPage extends StatefulWidget {
+  final String tierName;
+  final int coreCount;
+  final Character fromCharacter;
+
+  const TradeQRScannerPage({
+    Key? key,
+    required this.tierName,
+    required this.coreCount,
+    required this.fromCharacter,
+  }) : super(key: key);
+
+  @override
+  _TradeQRScannerPageState createState() => _TradeQRScannerPageState();
+}
+
+class _TradeQRScannerPageState extends State<TradeQRScannerPage> {
+  final GlobalKey qrKey = GlobalKey(debugLabel: 'QR');
+  QRViewController? controller;
+  bool isScanning = true;
+  String? scannedData;
+
+  @override
+  void initState() {
+    super.initState();
+    print('TradeQRScannerPage initialized');
+  }
+
+  @override
+  void dispose() {
+    controller?.dispose();
+    super.dispose();
+  }
+
+  void _onQRViewCreated(QRViewController controller) {
+    print('QR View created successfully');
+    this.controller = controller;
+    controller.scannedDataStream.listen((scanData) {
+      print('QR Scanner detected data: ${scanData.code}');
+      if (scanData.code != null && scanData.code!.isNotEmpty) {
+        print('Processing QR code: ${scanData.code}');
+        _handleQRCodeScan(scanData.code!);
+      }
+    });
+  }
+
+  void _handleQRCodeScan(String code) {
+    if (!isScanning) return; // Prevent multiple scans
+    
+    // Prevent processing the same QR code multiple times
+    if (scannedData == code) return;
+    
+    setState(() {
+      isScanning = false;
+      scannedData = code;
+    });
+    
+    _processScannedData(code);
+  }
+
+  void _processScannedData(String data) {
+    try {
+      // Check if the data looks like JSON
+      if (!data.trim().startsWith('{') || !data.trim().endsWith('}')) {
+        _showError('This doesn\'t appear to be a valid player QR code. Please scan a player QR code.');
+        return;
+      }
+
+      // Parse the QR code data
+      final Map<String, dynamic> playerData = json.decode(data);
+      
+      // Handle profile QR code format (from generateQRCode function)
+      if (playerData.containsKey('game') && playerData['game'] == 'Crucible' && playerData.containsKey('playerUid')) {
+        final String uid = playerData['playerUid'];
+        if (uid.isEmpty) {
+          _showError('QR code has empty player ID. Please scan a valid player QR code.');
+          return;
+        }
+        
+        // Fetch the player's characters from the backend
+        _fetchPlayerCharacters(uid, playerData['playerName'] ?? 'Unknown Player');
+        return;
+      }
+      
+      // Handle old format with direct character data
+      if (playerData.containsKey('uid') && playerData.containsKey('characters')) {
+        final String uid = playerData['uid'];
+        if (uid.isEmpty) {
+          _showError('QR code has empty player ID. Please scan a valid player QR code.');
+          return;
+        }
+        
+        // Check if trying to trade with yourself
+        final user = FirebaseAuth.instance.currentUser;
+        if (user != null && user.uid == uid) {
+          _showError('You cannot trade cores with yourself. Please scan another player\'s QR code.');
+          return;
+        }
+        
+        _showCharacterSelection(playerData);
+        return;
+      }
+      
+      _showError('This QR code is not a valid player profile. Please scan a player QR code from the Profile page.');
+    } catch (e) {
+      print('QR Code parsing error: $e');
+      _showError('Invalid QR code format. Please scan a valid player QR code.\n\nError: ${e.toString()}');
+    }
+  }
+
+  void _showCharacterSelection(Map<String, dynamic> playerData) {
+    final String targetPlayerUid = playerData['uid'];
+    final List<dynamic> characters = playerData['characters'] ?? [];
+
+    if (characters.isEmpty) {
+      _showError('This player has no characters available for trading.');
+      return;
+    }
+
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Text('Select Target Character'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text('Choose which character to trade the ${widget.tierName} core to:'),
+              SizedBox(height: 16),
+              ...characters.map<Widget>((character) {
+                return ListTile(
+                  leading: Icon(Icons.person),
+                  title: Text('Character ${character['characterNumber']}'),
+                  subtitle: Text('${character['name'] ?? 'Unknown'} - ${character['cultivationTier'] ?? 'Unknown'}'),
+                  onTap: () {
+                    Navigator.of(context).pop();
+                    _confirmTrade(
+                      targetPlayerUid,
+                      character['characterNumber'].toString(),
+                      character['name'] ?? 'Unknown',
+                    );
+                  },
+                );
+              }).toList(),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.of(context).pop();
+                _resetScanner();
+              },
+              child: Text('Cancel'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  void _confirmTrade(String targetPlayerUid, String targetCharacterNumber, String targetCharacterName) {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Text('Confirm Trade'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text('Trade Details:'),
+              SizedBox(height: 16),
+              Container(
+                padding: EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.blue.shade50,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.blue.shade300),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('From: ${widget.fromCharacter.characterName} (Character ${widget.fromCharacter.characterNumber})'),
+                    Text('To: $targetCharacterName (Character $targetCharacterNumber)'),
+                    Text('Item: 1 ${widget.tierName} Core'),
+                  ],
+                ),
+              ),
+              SizedBox(height: 16),
+              Text('Are you sure you want to proceed with this trade?'),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.of(context).pop();
+                _executeTrade(targetPlayerUid, targetCharacterNumber);
+              },
+              child: Text('Confirm Trade'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  void _executeTrade(String targetPlayerUid, String targetCharacterNumber) async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) {
+        _showError('You must be logged in to trade cores.');
+        return;
+      }
+
+      final idToken = await user.getIdToken();
+      final response = await http.post(
+        Uri.parse('${AppConfig.tradeMonsterCoreUrl}'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $idToken',
+        },
+        body: json.encode({
+          'tier': widget.tierName,
+          'fromCharacterNumber': widget.fromCharacter.characterNumber,
+          'toPlayerUid': targetPlayerUid,
+          'toCharacterNumber': targetCharacterNumber,
+        }),
+      );
+
+      if (response.statusCode == 200) {
+        final responseData = json.decode(response.body);
+        if (responseData['ok'] == true) {
+          _showSuccess(responseData);
+        } else {
+          _showError(responseData['error'] ?? 'Trade failed');
+        }
+      } else {
+        final errorData = json.decode(response.body);
+        _showError(errorData['error'] ?? 'Trade failed with status ${response.statusCode}');
+      }
+    } catch (e) {
+      _showError('Error executing trade: $e');
+    }
+  }
+
+  void _showSuccess(Map<String, dynamic> responseData) {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Row(
+            children: [
+              Icon(Icons.check_circle, color: Colors.green),
+              SizedBox(width: 8),
+              Text('Trade Successful'),
+            ],
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text('Your ${widget.tierName} core has been traded successfully!'),
+              SizedBox(height: 16),
+              Container(
+                padding: EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.green.shade50,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.green.shade300),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('Remaining ${widget.tierName} cores: ${responseData['sourceCountAfter']}'),
+                    Text('Target now has: ${responseData['targetCountAfter']} ${widget.tierName} core(s)'),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            ElevatedButton(
+              onPressed: () {
+                Navigator.of(context).pop();
+                Navigator.of(context).pop(); // Go back to character sheet
+              },
+              child: Text('OK'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  void _showError(String message) {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Row(
+            children: [
+              Icon(Icons.error, color: Colors.red),
+              SizedBox(width: 8),
+              Text('Scan Error'),
+            ],
+          ),
+          content: Text(message),
+          actions: [
+            ElevatedButton(
+              onPressed: () {
+                Navigator.of(context).pop();
+                _resetScanner();
+              },
+              child: Text('Try Again'),
+            ),
+            TextButton(
+              onPressed: () {
+                Navigator.of(context).pop();
+                Navigator.of(context).pop(); // Go back to character sheet
+              },
+              child: Text('Cancel'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  void _resetScanner() {
+    print('Resetting QR scanner...');
+    setState(() {
+      isScanning = true;
+      scannedData = null;
+    });
+    // Restart the camera if needed
+    controller?.resumeCamera();
+    print('QR scanner reset complete');
+  }
+
+  void _fetchPlayerCharacters(String playerUid, String playerName) async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) {
+        _showError('You must be logged in to trade cores.');
+        return;
+      }
+
+      // Check if trying to trade with yourself
+      if (user.uid == playerUid) {
+        _showError('You cannot trade cores with yourself. Please scan another player\'s QR code.');
+        return;
+      }
+
+      final idToken = await user.getIdToken();
+      final response = await http.post(
+        Uri.parse('${AppConfig.getPlayerCharactersUrl}'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $idToken',
+        },
+        body: json.encode({
+          'targetPlayerUid': playerUid,
+        }),
+      );
+
+      if (response.statusCode == 200) {
+        final responseData = json.decode(response.body);
+        if (responseData['ok'] == true) {
+          final characters = responseData['characters'] ?? [];
+          if (characters.isEmpty) {
+            _showError('This player has no characters available for trading.');
+            return;
+          }
+          
+          // Show character selection with fetched data
+          _showCharacterSelection({
+            'uid': playerUid,
+            'characters': characters,
+            'playerName': playerName,
+          });
+        } else {
+          _showError(responseData['error'] ?? 'Failed to fetch player characters');
+        }
+      } else {
+        final errorData = json.decode(response.body);
+        _showError(errorData['error'] ?? 'Failed to fetch player characters');
+      }
+    } catch (e) {
+      _showError('Error fetching player characters: $e');
+    }
+  }
+
+  void _testQRCode() {
+    // Test with a sample QR code data
+    final testData = '{"uid": "test123", "characters": [{"characterNumber": 1, "name": "Test Character", "cultivationTier": "Iron"}]}';
+    print('Testing with sample QR data: $testData');
+    setState(() {
+      isScanning = false;
+      scannedData = testData;
+    });
+    _processScannedData(testData);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('Trade ${widget.tierName} Core'),
+        backgroundColor: Colors.blue,
+        foregroundColor: Colors.white,
+      ),
+      body: Column(
+        children: [
+          Expanded(
+            flex: 4,
+            child: QRView(
+              key: qrKey,
+              onQRViewCreated: _onQRViewCreated,
+              overlay: QrScannerOverlayShape(
+                borderColor: Colors.blue,
+                borderRadius: 10,
+                borderLength: 30,
+                borderWidth: 10,
+                cutOutSize: 300,
+              ),
+            ),
+          ),
+          Container(
+            height: 120,
+            padding: EdgeInsets.all(12),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(
+                  Icons.qr_code_scanner,
+                  size: 32,
+                  color: Colors.blue,
+                ),
+                SizedBox(height: 8),
+                Text(
+                  'Scan player QR code',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+                ),
+                if (scannedData != null) ...[
+                  SizedBox(height: 4),
+                  Text(
+                    'Processing...',
+                    style: TextStyle(
+                      color: Colors.orange,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 12,
+                    ),
+                  ),
+                ] else if (isScanning) ...[
+                  SizedBox(height: 8),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                    children: [
+                      ElevatedButton(
+                        onPressed: () {
+                          _testQRCode();
+                        },
+                        style: ElevatedButton.styleFrom(
+                          padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                        ),
+                        child: Text('Test QR', style: TextStyle(fontSize: 12)),
+                      ),
+                      ElevatedButton(
+                        onPressed: () {
+                          _resetScanner();
+                        },
+                        style: ElevatedButton.styleFrom(
+                          padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                        ),
+                        child: Text('Reset', style: TextStyle(fontSize: 12)),
+                      ),
+                    ],
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }

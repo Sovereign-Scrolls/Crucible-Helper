@@ -1,0 +1,5051 @@
+import 'package:flutter/material.dart';
+import 'dart:async';
+import 'dart:convert';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_storage/firebase_storage.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'firebase_options.dart';
+import 'shared/rules_service.dart';
+import 'dart:html' as html;
+import 'package:http/http.dart' as http;
+import 'package:crypto/crypto.dart';
+import 'package:qr_code_scanner_plus/qr_code_scanner_plus.dart';
+import 'package:flutter/foundation.dart';
+import 'package:geolocator/geolocator.dart';
+import 'dart:io';
+
+import 'models/character.dart'; 
+import 'models/monster_core.dart';
+import 'pages/login_page.dart';
+import 'pages/events_page.dart';
+import 'utils/skill_lookup.dart';
+
+// Data structures for unsubmitted advancement
+class AffinityChange {
+  final String timestamp;
+  final String affinityName;
+  final String adjustment; // e.g., "Bought in Gold"
+  final int cost;
+  final int levelChange; // +1 for increase, -1 for decrease
+
+  AffinityChange({
+    required this.timestamp,
+    required this.affinityName,
+    required this.adjustment,
+    required this.cost,
+    required this.levelChange,
+  });
+
+  Map<String, dynamic> toJson() => {
+    'timestamp': timestamp,
+    'affinityName': affinityName,
+    'adjustment': adjustment,
+    'cost': cost,
+    'levelChange': levelChange,
+  };
+
+  factory AffinityChange.fromJson(Map<String, dynamic> json) => AffinityChange(
+    timestamp: json['timestamp'],
+    affinityName: json['affinityName'],
+    adjustment: json['adjustment'],
+    cost: json['cost'],
+    levelChange: json['levelChange'],
+  );
+}
+
+class SkillChange {
+  final String timestamp;
+  final String skillName;
+  final String skillType;
+  final int levelChange; // +1 for increase, -1 for decrease
+  final int cost;
+
+  SkillChange({
+    required this.timestamp,
+    required this.skillName,
+    required this.skillType,
+    required this.levelChange,
+    required this.cost,
+  });
+
+  Map<String, dynamic> toJson() => {
+    'timestamp': timestamp,
+    'skillName': skillName,
+    'skillType': skillType,
+    'levelChange': levelChange,
+    'cost': cost,
+  };
+
+  factory SkillChange.fromJson(Map<String, dynamic> json) => SkillChange(
+    timestamp: json['timestamp'],
+    skillName: json['skillName'],
+    skillType: json['skillType'],
+    levelChange: json['levelChange'],
+    cost: json['cost'],
+  );
+}
+
+class EssenceChange {
+  final String timestamp;
+  final int essenceAdjustment; // +1 for increase, -1 for decrease
+  final int cost;
+
+  EssenceChange({
+    required this.timestamp,
+    required this.essenceAdjustment,
+    required this.cost,
+  });
+
+  Map<String, dynamic> toJson() => {
+    'timestamp': timestamp,
+    'essenceAdjustment': essenceAdjustment,
+    'cost': cost,
+  };
+
+  factory EssenceChange.fromJson(Map<String, dynamic> json) => EssenceChange(
+    timestamp: json['timestamp'],
+    essenceAdjustment: json['essenceAdjustment'],
+    cost: json['cost'],
+  );
+}
+
+class UnsubmittedAdvancement {
+  final List<AffinityChange> affinityChanges;
+  final List<SkillChange> skillChanges;
+  final List<EssenceChange> essenceChanges;
+
+  UnsubmittedAdvancement({
+    this.affinityChanges = const [],
+    this.skillChanges = const [],
+    this.essenceChanges = const [],
+  });
+
+  Map<String, dynamic> toJson() => {
+    'affinityChanges': affinityChanges.map((change) => change.toJson()).toList(),
+    'skillChanges': skillChanges.map((change) => change.toJson()).toList(),
+    'essenceChanges': essenceChanges.map((change) => change.toJson()).toList(),
+  };
+
+  factory UnsubmittedAdvancement.fromJson(Map<String, dynamic> json) => UnsubmittedAdvancement(
+    affinityChanges: (json['affinityChanges'] as List<dynamic>?)
+        ?.map((change) => AffinityChange.fromJson(change))
+        .toList() ?? [],
+    skillChanges: (json['skillChanges'] as List<dynamic>?)
+        ?.map((change) => SkillChange.fromJson(change))
+        .toList() ?? [],
+    essenceChanges: (json['essenceChanges'] as List<dynamic>?)
+        ?.map((change) => EssenceChange.fromJson(change))
+        .toList() ?? [],
+  );
+}
+
+
+Character? cachedCharacter;
+
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp(
+    options: DefaultFirebaseOptions.currentPlatform,
+  );
+
+  try {
+    await RulesService.fetchAndCacheRules();
+    print('✅ rules.json successfully cached.');
+  } catch (e) {
+    print('❌ Error caching rules.json: $e');
+  }
+
+  runApp(const CrucibleHelperApp());
+}
+
+class CrucibleHelperApp extends StatelessWidget {
+  const CrucibleHelperApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      title: 'Crucible Helper',
+      theme: ThemeData.dark(),
+      home: LoginPage(), // Start at the login page
+    );
+  }
+}
+
+class HomePage extends StatefulWidget {
+  const HomePage({super.key});
+
+  @override
+  _HomePageState createState() => _HomePageState();
+}
+
+class _HomePageState extends State<HomePage> {
+  Character? character;
+
+  @override
+  void initState() {
+    super.initState();
+    fetchCharacter();
+  }
+
+  Future<void> fetchCharacter() async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      final email = user?.email;
+      if (email == null) {
+        throw Exception("User email is null");
+      }
+
+      final ref = FirebaseStorage.instance.ref().child('users/$email/pc.json');
+      final data = await ref.getData();
+      if (data != null) {
+        final jsonString = utf8.decode(data);
+        final jsonMap = json.decode(jsonString);
+        setState(() {
+          character = Character.fromJson(jsonMap);
+        });
+        
+        // Also try to download QR code (don't fail if it doesn't exist)
+        _downloadQRCode(email);
+      }
+    } catch (e) {
+      print('Error fetching character JSON: $e');
+    }
+  }
+
+  Future<String?> _downloadQRCode(String email) async {
+    try {
+      final qrRef = FirebaseStorage.instance.ref().child('users/$email/qr.png');
+      final data = await qrRef.getData();
+      if (data != null) {
+        print('✅ QR code downloaded');
+        return 'https://storage.googleapis.com/crucible-helper-storage/users/$email/qr.png';
+      }
+    } catch (e) {
+      print('⚠️ QR code not available: $e');
+    }
+    return null;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        actions: [
+          IconButton(
+            icon: Icon(Icons.person),
+            onPressed: () {
+              Navigator.push(context, MaterialPageRoute(builder: (_) => ProfilePage()));
+            },
+            tooltip: 'Profile',
+          ),
+        ],
+      ),
+      body: SafeArea(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Expanded(
+              child: Center(
+                child: LayoutBuilder(
+                  builder: (context, constraints) {
+                    double screenHeight = constraints.maxHeight;
+                    double logoSize = screenHeight * 0.25; // 25% of the screen height
+
+                    if (logoSize > 200) {
+                      logoSize = 200; // Cap it at 200px so it doesn't get too big
+                    }
+
+                    return Image.asset(
+                      'assets/logo.png',
+                      height: logoSize,
+                    );
+                  },
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.only(bottom: 24.0),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  _HomeButton(
+                    icon: Icons.person,
+                    label: 'Character',
+                    onPressed: () {
+                      if (character != null) {
+                        Navigator.push(context, MaterialPageRoute(
+                          builder: (_) => CharacterSheetPage(character: character!),
+                        ));
+                      } else {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text('Character data not loaded yet')),
+                        );
+                      }
+                    },
+                  ),
+                  _HomeButton(
+                    icon: Icons.qr_code_scanner,
+                    label: 'Scan',
+                    onPressed: () {
+                      Navigator.push(context, MaterialPageRoute(builder: (_) => QRScannerPage()));
+                    },
+                  ),
+                  _HomeButton(
+                    icon: Icons.timer,
+                    label: 'Death',
+                    onPressed: () {
+                      Navigator.push(context, MaterialPageRoute(builder: (_) => DeathTimerPage()));
+                    },
+                  ),
+                  _HomeButton(
+                    icon: Icons.calendar_today,
+                    label: 'Events',
+                    onPressed: () {
+                      Navigator.push(context, MaterialPageRoute(builder: (_) => EventsPage()));
+                    },
+                  ),
+
+                ],
+              ),
+            )
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _HomeButton extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final VoidCallback onPressed;
+
+  const _HomeButton({required this.icon, required this.label, required this.onPressed});
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        FloatingActionButton(
+          heroTag: label,
+          backgroundColor: Colors.grey[800],
+          onPressed: onPressed,
+          child: Icon(icon, size: 28),
+        ),
+        SizedBox(height: 8),
+        Text(label, style: TextStyle(fontSize: 12))
+      ],
+    );
+  }
+}
+
+class CharacterSheetPage extends StatefulWidget {
+  final Character character;
+  const CharacterSheetPage({super.key, required this.character});
+
+  @override
+  State<CharacterSheetPage> createState() => _CharacterSheetPageState();
+}
+
+class _CharacterSheetPageState extends State<CharacterSheetPage> {
+  late int currentHP;
+  String _selectedSkillSort = 'Frequency';
+  final List<String> _skillSortOptions = ['Alphabetical', 'Type', 'Frequency'];
+  Map<String, dynamic>? rulesJson;
+  bool _isEditMode = false;
+  
+  // Track unspent points for edit mode
+  int _originalUnspentAffinityPoints = 0;
+  int _originalUnspentBuildPoints = 0;
+  int _currentUnspentAffinityPoints = 0;
+  int _currentUnspentBuildPoints = 0;
+  
+  // Track unsubmitted advancement changes
+  UnsubmittedAdvancement? _unsubmittedAdvancement;
+  bool _hasUnsubmittedChanges = false;
+
+  @override
+  void initState() {
+    super.initState();
+    currentHP = widget.character.hitPoints['total'];
+    _loadSkillSortPreference();
+    _loadUnsubmittedAdvancement();
+
+    RulesService.loadCachedRules().then((cached) {
+      if (cached == null) {
+        print('⚠️ No cached rules. Trying to download...');
+        RulesService.fetchAndCacheRules().then((_) {
+          RulesService.loadCachedRules().then((downloaded) {
+            if (downloaded != null) {
+              setState(() {
+                rulesJson = json.decode(downloaded);
+              });
+            } else {
+              print('❌ Still failed to load rules.json');
+            }
+          });
+        });
+      } else {
+        setState(() {
+          rulesJson = json.decode(cached);
+        });
+      }
+    });
+
+  }
+
+  // SharedPreferences functions for unsubmitted advancement
+  Future<void> _loadUnsubmittedAdvancement() async {
+    final prefs = await SharedPreferences.getInstance();
+    final advancementJson = prefs.getString('unsubmitted_advancement');
+    if (advancementJson != null) {
+      try {
+        final advancement = UnsubmittedAdvancement.fromJson(json.decode(advancementJson));
+        setState(() {
+          _unsubmittedAdvancement = advancement;
+          _hasUnsubmittedChanges = advancement.affinityChanges.isNotEmpty || advancement.skillChanges.isNotEmpty || advancement.essenceChanges.isNotEmpty;
+        });
+      } catch (e) {
+        print('Error loading unsubmitted advancement: $e');
+      }
+    }
+  }
+
+  Future<void> _saveUnsubmittedAdvancement(UnsubmittedAdvancement advancement) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('unsubmitted_advancement', json.encode(advancement.toJson()));
+    setState(() {
+      _unsubmittedAdvancement = advancement;
+      _hasUnsubmittedChanges = advancement.affinityChanges.isNotEmpty || advancement.skillChanges.isNotEmpty || advancement.essenceChanges.isNotEmpty;
+    });
+  }
+
+  Future<void> _addAffinityChange(AffinityChange change) async {
+    final currentAdvancement = _unsubmittedAdvancement ?? UnsubmittedAdvancement();
+    final updatedAdvancement = UnsubmittedAdvancement(
+      affinityChanges: [...currentAdvancement.affinityChanges, change],
+      skillChanges: currentAdvancement.skillChanges,
+      essenceChanges: currentAdvancement.essenceChanges,
+    );
+    await _saveUnsubmittedAdvancement(updatedAdvancement);
+  }
+
+  Future<void> _addSkillChange(SkillChange change) async {
+    final currentAdvancement = _unsubmittedAdvancement ?? UnsubmittedAdvancement();
+    final updatedAdvancement = UnsubmittedAdvancement(
+      affinityChanges: currentAdvancement.affinityChanges,
+      skillChanges: [...currentAdvancement.skillChanges, change],
+      essenceChanges: currentAdvancement.essenceChanges,
+    );
+    await _saveUnsubmittedAdvancement(updatedAdvancement);
+  }
+
+  Future<void> _addEssenceChange(EssenceChange change) async {
+    final currentAdvancement = _unsubmittedAdvancement ?? UnsubmittedAdvancement();
+    final updatedAdvancement = UnsubmittedAdvancement(
+      affinityChanges: currentAdvancement.affinityChanges,
+      skillChanges: currentAdvancement.skillChanges,
+      essenceChanges: [...currentAdvancement.essenceChanges, change],
+    );
+    await _saveUnsubmittedAdvancement(updatedAdvancement);
+  }
+
+  Future<void> _clearUnsubmittedAdvancement() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('unsubmitted_advancement');
+    setState(() {
+      _unsubmittedAdvancement = null;
+      _hasUnsubmittedChanges = false;
+    });
+  }
+
+
+
+  Future<void> _saveSubmissionTimestamp(String timestamp) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('last_submission_timestamp', timestamp);
+  }
+
+  Future<String?> _getLastSubmissionTimestamp() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString('last_submission_timestamp');
+  }
+
+  Future<void> _syncCharacterData() async {
+    // Show loading indicator
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Row(
+            children: [
+              SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+              SizedBox(width: 12),
+              Text('Checking for updates...'),
+            ],
+          ),
+          duration: Duration(seconds: 2),
+        ),
+      );
+    }
+
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      final email = user?.email;
+      if (email == null) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('❌ User not authenticated')),
+          );
+        }
+        return;
+      }
+
+      final ref = FirebaseStorage.instance.ref().child('users/$email/pc.json');
+      final data = await ref.getData();
+      
+      if (data != null) {
+        final jsonString = utf8.decode(data);
+        final jsonMap = json.decode(jsonString);
+        final newCharacter = Character.fromJson(jsonMap);
+        
+        // Check if the character data has actually changed
+        if (newCharacter.generatedAt != widget.character.generatedAt) {
+          // Character data has been updated - refresh the page
+          if (context.mounted) {
+            Navigator.pushReplacement(
+              context,
+              MaterialPageRoute(
+                builder: (_) => CharacterSheetPage(character: newCharacter),
+              ),
+            );
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('✅ Character data updated!'),
+                backgroundColor: Colors.green,
+              ),
+            );
+          }
+        } else {
+          // No changes
+          if (context.mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('ℹ️ Character data is up to date'),
+                backgroundColor: Colors.blue,
+              ),
+            );
+          }
+        }
+      } else {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('❌ No character data found')),
+          );
+        }
+      }
+    } catch (e) {
+      print('Error syncing character data: $e');
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('❌ Failed to sync character data: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  // Calculate skill cost based on the formula
+  int calculateSkillCost(int baseCost, int level) {
+    if (level <= 0) return 0;
+    if (baseCost <= 0) return 0; // Handle skills with 0 base cost
+    
+    int totalCost = baseCost;
+    
+    for (int i = 2; i <= level; i++) {
+      totalCost += (baseCost - (i - 1)).clamp(1, baseCost);
+    }
+    
+    return totalCost;
+  }
+
+  // Get all affinities including unsubmitted ones in edit mode
+  Map<String, AffinityDetail> _getAllAffinities() {
+    final affinities = Map<String, AffinityDetail>.from(widget.character.affinities);
+    
+    if (_isEditMode && _unsubmittedAdvancement != null) {
+      // Group unsubmitted changes by affinity name
+      final unsubmittedAffinities = <String, Map<String, int>>{};
+      
+      for (final change in _unsubmittedAdvancement!.affinityChanges) {
+        final tierMatch = RegExp(r'Bought in (.+)').firstMatch(change.adjustment);
+        if (tierMatch != null) {
+          final tier = tierMatch.group(1)!;
+          unsubmittedAffinities.putIfAbsent(change.affinityName, () => {});
+          unsubmittedAffinities[change.affinityName]![tier] = 
+              (unsubmittedAffinities[change.affinityName]![tier] ?? 0) + change.levelChange;
+        }
+      }
+      
+      // Add or update affinities with unsubmitted changes
+      for (final entry in unsubmittedAffinities.entries) {
+        final affinityName = entry.key;
+        final tierChanges = entry.value;
+        
+        if (affinities.containsKey(affinityName)) {
+          // Update existing affinity
+          final existingAffinity = affinities[affinityName]!;
+          final updatedTiers = Map<String, int>.from(existingAffinity.tiers);
+          
+          for (final tierChange in tierChanges.entries) {
+            final tier = tierChange.key;
+            final change = tierChange.value;
+            updatedTiers[tier] = (updatedTiers[tier] ?? 0) + change;
+          }
+          
+          affinities[affinityName] = AffinityDetail(
+            effectLevel: existingAffinity.effectLevel + tierChanges.values.fold(0, (sum, change) => sum + change),
+            tiers: updatedTiers,
+          );
+        } else {
+          // Create new affinity
+          affinities[affinityName] = AffinityDetail(
+            effectLevel: tierChanges.values.fold(0, (sum, change) => sum + change),
+            tiers: tierChanges,
+          );
+        }
+      }
+    }
+    
+    return affinities;
+  }
+
+  // Get all skills including unsubmitted ones in edit mode
+  List<Skill> _getAllSkills() {
+    final skills = List<Skill>.from(widget.character.skills);
+    
+    if (_isEditMode && _unsubmittedAdvancement != null) {
+      // Group unsubmitted changes by skill name
+      final unsubmittedSkills = <String, int>{};
+      final skillTypes = <String, String>{};
+      
+      for (final change in _unsubmittedAdvancement!.skillChanges) {
+        unsubmittedSkills[change.skillName] = 
+            (unsubmittedSkills[change.skillName] ?? 0) + change.levelChange;
+        skillTypes[change.skillName] = change.skillType;
+      }
+      
+      // Update skills with unsubmitted changes
+      for (int i = 0; i < skills.length; i++) {
+        final skill = skills[i];
+        if (unsubmittedSkills.containsKey(skill.name)) {
+          final levelChange = unsubmittedSkills[skill.name]!;
+          skills[i] = Skill(
+            name: skill.name,
+            type: skill.type,
+            level: skill.level + levelChange,
+            frequency: skill.frequency,
+            delivery: skill.delivery,
+            verbal: skill.verbal,
+            description: skill.description,
+          );
+        }
+      }
+      
+      // Add completely new skills from unsubmitted advancement
+      final originalSkillNames = widget.character.skills.map((s) => s.name).toSet();
+      for (final entry in unsubmittedSkills.entries) {
+        if (!originalSkillNames.contains(entry.key)) {
+          // This is a completely new skill - start at level 0
+          skills.add(Skill(
+            name: entry.key,
+            type: skillTypes[entry.key] ?? 'Unknown',
+            level: 0, // Start at level 0 for new skills
+            frequency: 'At Will', // Default, will be updated when skill details are loaded
+            delivery: 'None',
+            verbal: '',
+            description: '',
+          ));
+        }
+      }
+    }
+    
+    return skills;
+  }
+
+  // Get total build cost from unsubmitted skill changes
+  int _getUnsubmittedBuildCost() {
+    if (_unsubmittedAdvancement == null) return 0;
+    
+    int totalCost = 0;
+    for (final change in _unsubmittedAdvancement!.skillChanges) {
+      totalCost += change.cost;
+    }
+    return totalCost;
+  }
+
+  // Get completely new skills from unsubmitted advancement
+  List<Skill> _getNewSkillsFromUnsubmitted() {
+    if (_unsubmittedAdvancement == null) return [];
+    
+    final newSkills = <Skill>[];
+    final originalSkillNames = widget.character.skills.map((s) => s.name).toSet();
+    
+    // Group unsubmitted changes by skill name
+    final unsubmittedSkills = <String, int>{};
+    final skillTypes = <String, String>{};
+    for (final change in _unsubmittedAdvancement!.skillChanges) {
+      unsubmittedSkills[change.skillName] = 
+          (unsubmittedSkills[change.skillName] ?? 0) + change.levelChange;
+      skillTypes[change.skillName] = change.skillType;
+    }
+    
+    // Find skills that don't exist in original character skills
+    for (final entry in unsubmittedSkills.entries) {
+      if (!originalSkillNames.contains(entry.key)) {
+        // Create skill with type from unsubmitted advancement
+        newSkills.add(Skill(
+          name: entry.key,
+          type: skillTypes[entry.key] ?? 'Unknown',
+          level: entry.value,
+          frequency: 'At Will', // Default, will be updated when skill details are loaded
+          delivery: 'None',
+          verbal: '',
+          description: '',
+        ));
+      }
+    }
+    
+    return newSkills;
+  }
+
+  void _showAvailableAffinities(BuildContext context) async {
+    // Get available affinities from rules
+    List<Map<String, dynamic>> availableAffinities = [];
+    
+    try {
+      final cachedRules = await RulesService.loadCachedRules();
+      if (cachedRules != null) {
+        final rules = json.decode(cachedRules);
+        final affinities = rules['Affinity'] as List<dynamic>? ?? [];
+        
+        // Filter out unique affinities (for now, include all non-unique)
+        for (final affinity in affinities) {
+          if (affinity['Unique'] != true) {
+            availableAffinities.add({
+              'name': affinity['Name'],
+            });
+          }
+        }
+      }
+    } catch (e) {
+      print('Error loading available affinities: $e');
+    }
+
+    // Filter out affinities the character already has
+    final existingAffinityNames = widget.character.affinities.keys.toSet();
+    availableAffinities = availableAffinities.where((affinity) => 
+      !existingAffinityNames.contains(affinity['name'])
+    ).toList();
+
+    if (availableAffinities.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('No new affinities available')),
+      );
+      return;
+    }
+
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text('Available Affinities'),
+        content: SizedBox(
+          width: 400,
+          height: 300,
+          child: ListView.builder(
+            itemCount: availableAffinities.length,
+            itemBuilder: (context, index) {
+              final affinity = availableAffinities[index];
+              return ListTile(
+                title: Text(affinity['name']),
+                onTap: () {
+                  Navigator.pop(context);
+                  _addNewAffinity(context, affinity['name']);
+                },
+              );
+            },
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text('Cancel'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _addNewAffinity(BuildContext context, String affinityName) {
+    // Create a new affinity with 0 levels in all tiers
+    final newAffinity = AffinityDetail(
+      effectLevel: 0,
+      tiers: {},
+    );
+
+    // Update the character's affinities (temporary until we implement proper state management)
+    final updatedAffinities = Map<String, AffinityDetail>.from(widget.character.affinities);
+    updatedAffinities[affinityName] = newAffinity;
+
+    final updatedCharacter = Character(
+      playerName: widget.character.playerName,
+      characterName: widget.character.characterName,
+      characterNumber: widget.character.characterNumber,
+      race: widget.character.race,
+      build: widget.character.build,
+      affinityPoints: widget.character.affinityPoints,
+      hitPoints: widget.character.hitPoints,
+      dr: widget.character.dr,
+      cultivationTier: widget.character.cultivationTier,
+      skills: widget.character.skills,
+      affinities: updatedAffinities,
+    );
+
+    // Update the widget's character (temporary until we implement proper state management)
+    setState(() {
+      // This is a temporary solution - in a real app, you'd update the character data properly
+      // For now, we'll just show the affinity details dialog
+    });
+
+    // Open affinity details dialog for the new affinity
+    _showAffinityDetails(
+      context,
+      affinityName,
+      newAffinity,
+      availableAffinityPoints: _currentUnspentAffinityPoints,
+      onAffinityPointsChanged: (newPoints) {
+        setState(() {
+          _currentUnspentAffinityPoints = newPoints;
+        });
+      },
+    );
+  }
+
+  void _showUnsubmittedChanges(BuildContext context) {
+    if (_unsubmittedAdvancement == null) return;
+
+    final buffer = StringBuffer();
+
+    int totalAPCost = 0;
+    int totalBuildCost = 0;
+
+    if (_unsubmittedAdvancement!.affinityChanges.isNotEmpty) {
+      buffer.writeln('Affinity Changes:');
+      for (final change in _unsubmittedAdvancement!.affinityChanges) {
+        buffer.writeln('  • ${change.affinityName}: ${change.adjustment} (${change.levelChange > 0 ? '+' : ''}${change.levelChange}) - ${change.cost} AP');
+        totalAPCost += change.cost;
+      }
+      buffer.writeln('');
+    }
+
+    if (_unsubmittedAdvancement!.skillChanges.isNotEmpty) {
+      buffer.writeln('Skill Changes:');
+      for (final change in _unsubmittedAdvancement!.skillChanges) {
+        buffer.writeln('  • ${change.skillName} (${change.skillType}): ${change.levelChange > 0 ? '+' : ''}${change.levelChange} - ${change.cost} build');
+        totalBuildCost += change.cost;
+      }
+      buffer.writeln('');
+    }
+
+    if (_unsubmittedAdvancement!.essenceChanges.isNotEmpty) {
+      buffer.writeln('Essence Changes:');
+      for (final change in _unsubmittedAdvancement!.essenceChanges) {
+        buffer.writeln('  • Direct Buy: ${change.essenceAdjustment > 0 ? '+' : ''}${change.essenceAdjustment} essence - ${change.cost} build');
+        totalBuildCost += change.cost;
+      }
+      buffer.writeln('');
+    }
+
+    // Add cost totals
+    if (totalAPCost > 0 || totalBuildCost > 0) {
+      buffer.writeln('Total Costs:');
+      if (totalAPCost > 0) {
+        buffer.writeln('  • AP: $totalAPCost');
+      }
+      if (totalBuildCost > 0) {
+        buffer.writeln('  • Build: $totalBuildCost');
+      }
+    }
+
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text('Unsubmitted Advancement'),
+        content: SingleChildScrollView(
+          child: Text(buffer.toString()),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text('Close'),
+          ),
+          if (_unsubmittedAdvancement != null && 
+              (_unsubmittedAdvancement!.affinityChanges.isNotEmpty || 
+               _unsubmittedAdvancement!.skillChanges.isNotEmpty ||
+               _unsubmittedAdvancement!.essenceChanges.isNotEmpty)) ...[
+            TextButton(
+              onPressed: () async {
+                Navigator.pop(context);
+                await _submitAdvancementToGoogleAppScript(context);
+              },
+              child: Text('Submit'),
+            ),
+            TextButton(
+              onPressed: () async {
+                await _clearUnsubmittedAdvancement();
+                Navigator.pop(context);
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text('Unsubmitted advancement cleared'),
+                    backgroundColor: Colors.orange,
+                  ),
+                );
+              },
+              child: Text('Clear'),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Future<void> _loadSkillSortPreference() async {
+    final prefs = await SharedPreferences.getInstance();
+    final savedSort = prefs.getString('skill_sorting');
+    if (savedSort != null && _skillSortOptions.contains(savedSort)) {
+      setState(() {
+        _selectedSkillSort = savedSort;
+      });
+    }
+  }
+
+  int _getDRForTier(String tier) {
+    final key = 'dr${tier[0].toUpperCase()}${tier.substring(1).toLowerCase()}';
+    final raw = widget.character.dr[key] ?? 0;
+    if (raw is int) return raw;
+    if (raw is num) return raw.toInt();
+    return 0;
+  }
+
+
+  void _showHitPointInfo() {
+    final hp = widget.character.hitPoints;
+    final buffer = StringBuffer();
+
+    buffer.writeln('Base: ${hp['base']}');
+    buffer.writeln('Extra: ${hp['extra']}');
+
+    const tiers = ['Iron', 'Silver', 'Gold', 'Jade', 'Saint', 'Sovereign'];
+    int bodyTotal = 0;
+    final tierDetails = <String>[];
+
+    for (final tier in tiers) {
+      final key = 'body$tier';
+      final dynamic raw = hp[key] ?? 0;
+      final int value = raw is int ? raw : (raw as num).toInt();
+
+      if (value > 0) {
+        bodyTotal += value;
+        tierDetails.add('  • $tier: $value');
+      }
+    }
+
+    if (bodyTotal > 0) {
+      buffer.writeln('Body Total: $bodyTotal');
+      tierDetails.forEach(buffer.writeln);
+    }
+
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text('How Hit Points Are Calculated'),
+        content: Text(buffer.toString()),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _editCurrentHP() async {
+    final result = await showDialog<int>(
+      context: context,
+      builder: (context) {
+        int temp = currentHP;
+        int tempExtra = widget.character.hitPoints['extra'] ?? 0;
+        final maxHP = widget.character.hitPoints['total'];
+        final maxDirectBuy = _getMaxDirectBuyForTier(widget.character.cultivationTier);
+        final bodyEssence = _getBodyEssenceTotal();
+        final bodyEssenceBreakdown = _getBodyEssenceBreakdown();
+
+        return StatefulBuilder(
+          builder: (context, setState) {
+            return AlertDialog(
+              title: Text('Essence Details'),
+              content: SizedBox(
+                width: 500,
+                height: 400,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // HP Display with bigger font
+                    Text(
+                      '$temp / $maxHP',
+                      style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+                    ),
+                    SizedBox(height: 16),
+                    
+                    // Slider with arrows
+                    Row(
+                      children: [
+                        IconButton(
+                          icon: Icon(Icons.arrow_back),
+                          onPressed: () {
+                            if (temp > 0) {
+                              setState(() => temp--);
+                            }
+                          },
+                        ),
+                        Expanded(
+                          child: Slider(
+                            min: 0,
+                            max: maxHP.toDouble(),
+                            divisions: maxHP,
+                            value: temp.toDouble(),
+                            label: "$temp",
+                            onChanged: (value) {
+                              setState(() => temp = value.round());
+                            },
+                          ),
+                        ),
+                        IconButton(
+                          icon: Icon(Icons.arrow_forward),
+                          onPressed: () {
+                            if (temp < maxHP) {
+                              setState(() => temp++);
+                            }
+                          },
+                        ),
+                      ],
+                    ),
+                    SizedBox(height: 16),
+                    
+                    // Cost Breakdown
+                    Text('Cost Breakdown:', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                    SizedBox(height: 8),
+                    
+                    // Direct Buy Section
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        if (_isEditMode)
+                          IconButton(
+                            icon: Icon(Icons.remove, color: Colors.amber, size: 16),
+                            onPressed: () {
+                              final originalExtra = widget.character.hitPoints['extra'] ?? 0;
+                              if (tempExtra > originalExtra) {
+                                setState(() => tempExtra--);
+                              }
+                            },
+                            padding: EdgeInsets.zero,
+                            constraints: BoxConstraints(),
+                          ),
+                        SizedBox(width: 8),
+                        Text('Direct Buy: $tempExtra', style: TextStyle(fontSize: 14)),
+                        SizedBox(width: 8),
+                        if (_isEditMode)
+                          IconButton(
+                            icon: Icon(Icons.add, color: Colors.amber, size: 16),
+                            onPressed: () {
+                              if (tempExtra < maxDirectBuy) {
+                                setState(() => tempExtra++);
+                              }
+                            },
+                            padding: EdgeInsets.zero,
+                            constraints: BoxConstraints(),
+                          ),
+                      ],
+                    ),
+                    Text('Cost: ${tempExtra * 2} build points (2 per essence)', style: TextStyle(fontSize: 12, color: Colors.grey)),
+                    Text('Max Direct Buy: $maxDirectBuy essence per tier', style: TextStyle(fontSize: 12, color: Colors.grey)),
+                    SizedBox(height: 8),
+                    
+                    // Body Essence Section
+                    Text('Essence from Body: $bodyEssence', style: TextStyle(fontSize: 14)),
+                    if (bodyEssenceBreakdown.isNotEmpty) ...[
+                      SizedBox(height: 4),
+                      ...bodyEssenceBreakdown.map((breakdown) => 
+                        Text(breakdown, style: TextStyle(fontSize: 12, color: Colors.grey))
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              actions: [
+                if (_isEditMode)
+                  TextButton(
+                    onPressed: () async {
+                      // Calculate essence adjustment
+                      final originalExtra = widget.character.hitPoints['extra'] ?? 0;
+                      final essenceAdjustment = tempExtra - originalExtra;
+                      
+                      if (essenceAdjustment != 0) {
+                        // Calculate cost
+                        final cost = essenceAdjustment * 2;
+                        
+                        // Add essence change to unsubmitted advancement
+                        final essenceChange = EssenceChange(
+                          timestamp: DateTime.now().toIso8601String(),
+                          essenceAdjustment: essenceAdjustment.toInt(),
+                          cost: cost.toInt(),
+                        );
+                        
+                        await _addEssenceChange(essenceChange);
+                        
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text('Essence advancement saved for submission'),
+                            backgroundColor: Colors.green,
+                          ),
+                        );
+                      }
+                      
+                      Navigator.pop(context);
+                    },
+                    child: Text('Submit'),
+                  ),
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: Text('Cancel'),
+                ),
+                ElevatedButton(
+                  onPressed: () => Navigator.pop(context, temp),
+                  child: Text('Set'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    if (result != null && result != currentHP) {
+      setState(() {
+        currentHP = result;
+      });
+
+      if (currentHP == 0) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Current HP is 0. Start death timer?'),
+        ));
+      }
+    }
+  }
+
+  // Helper methods for essence calculations
+  int _getMaxDirectBuyForTier(String tier) {
+    const tierMultipliers = {
+      'Iron': 1,
+      'Silver': 2,
+      'Gold': 3,
+      'Jade': 4,
+      'Saint': 5,
+      'Sovereign': 6,
+    };
+    return 5 * (tierMultipliers[tier] ?? 1);
+  }
+
+  int _getBodyEssenceTotal() {
+    final hp = widget.character.hitPoints;
+    int total = 0;
+    
+    const tiers = ['Iron', 'Silver', 'Gold', 'Jade', 'Saint', 'Sovereign'];
+    for (final tier in tiers) {
+      final key = 'body$tier';
+      final dynamic raw = hp[key] ?? 0;
+      final int value = raw is int ? raw : (raw as num).toInt();
+      total += value;
+    }
+    
+    return total;
+  }
+
+  List<String> _getBodyEssenceBreakdown() {
+    final hp = widget.character.hitPoints;
+    final breakdown = <String>[];
+    
+    const tiers = ['Iron', 'Silver', 'Gold', 'Jade', 'Saint', 'Sovereign'];
+    for (final tier in tiers) {
+      final key = 'body$tier';
+      final dynamic raw = hp[key] ?? 0;
+      final int value = raw is int ? raw : (raw as num).toInt();
+      
+      if (value > 0) {
+        breakdown.add('  • $tier: $value');
+      }
+    }
+    
+    return breakdown;
+  }
+
+  void _showBuildInfo(BuildContext context) {
+    final build = widget.character.build;
+    final double dialogHeight = MediaQuery.of(context).size.height * 0.65;
+
+    final headerStyle = TextStyle(fontWeight: FontWeight.bold);
+
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text('Build Total Details'),
+        content: SizedBox(
+          height: dialogHeight,
+          width: double.maxFinite,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Build Total: ${build.total}'),
+              Text('Unspent Build: ${build.unspent}'),
+              Text('Need to Ascend: ${build.needToAscend}'),
+              const SizedBox(height: 12),
+              Expanded(
+                child: SingleChildScrollView(
+                  child: Table(
+                    columnWidths: const {
+                      0: IntrinsicColumnWidth(),
+                      1: FixedColumnWidth(64),
+                      2: FlexColumnWidth(),
+                    },
+                    border: TableBorder.all(color: Colors.grey),
+                    defaultVerticalAlignment: TableCellVerticalAlignment.middle,
+                    children: [
+                      TableRow(
+                        decoration: BoxDecoration(color: Colors.grey[800]),
+                        children: [
+                          Padding(
+                            padding: EdgeInsets.all(6),
+                            child: Text('Date', style: headerStyle),
+                          ),
+                          Padding(
+                            padding: EdgeInsets.all(6),
+                            child: Text('Build', style: headerStyle),
+                          ),
+                          Padding(
+                            padding: EdgeInsets.all(6),
+                            child: Text('Reason', style: headerStyle),
+                          ),
+                        ],
+                      ),
+                      TableRow(
+                        children: [
+                          Padding(
+                            padding: EdgeInsets.all(6),
+                            child: Text(build.starting.date),
+                          ),
+                          Padding(
+                            padding: EdgeInsets.all(6),
+                            child: Text('${build.starting.amount}'),
+                          ),
+                          Padding(
+                            padding: EdgeInsets.all(6),
+                            child: Text('Starting Build'),
+                          ),
+                        ],
+                      ),
+                      ...build.gains.map((gain) {
+                        return TableRow(
+                          children: [
+                            Padding(
+                              padding: EdgeInsets.all(6),
+                              child: Text(gain.date),
+                            ),
+                            Padding(
+                              padding: EdgeInsets.all(6),
+                              child: Text('${gain.amount}'),
+                            ),
+                            Padding(
+                              padding: EdgeInsets.all(6),
+                              child: Text('${gain.reason}${gain.note.isNotEmpty ? ' - ${gain.note}' : ''}'),
+                            ),
+                          ],
+                        );
+                      }),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text('Close'),
+          )
+        ],
+      ),
+    );
+  }
+
+  void _showDRInfo() {
+    const tiers = ['Iron', 'Silver', 'Gold', 'Jade', 'Saint', 'Sovereign'];
+    final dr = widget.character.dr;
+    final buffer = StringBuffer();
+
+    for (final tier in tiers) {
+      final value = dr['dr$tier'] ?? 0;
+      buffer.writeln('• $tier: $value');
+    }
+
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text('Damage Resistance (DR) Breakdown'),
+        content: Text(buffer.toString()),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showAffinityDetails(BuildContext context, String name, AffinityDetail detail, {int? availableAffinityPoints, Function(int)? onAffinityPointsChanged}) async {
+    // Get affinity multiplier from rules
+    double affinityMultiplier = 1.0;
+    try {
+      final cachedRules = await RulesService.loadCachedRules();
+      if (cachedRules != null) {
+        final rules = json.decode(cachedRules);
+        final affinities = rules['Affinity'] as List<dynamic>? ?? [];
+        final affinity = affinities.firstWhere(
+          (a) => a['Name'] == name,
+          orElse: () => null,
+        );
+        if (affinity != null) {
+          affinityMultiplier = (affinity['Multiplier'] ?? 1.0).toDouble();
+        }
+      }
+    } catch (e) {
+      print('Error loading affinity multiplier: $e');
+    }
+
+    // Calculate effective levels for each tier
+    final currentTier = widget.character.cultivationTier;
+    final tiers = ['Iron', 'Silver', 'Gold', 'Jade', 'Saint', 'Sovereign'];
+    final currentTierIndex = tiers.indexOf(currentTier);
+    
+    // Calculate effective levels (total levels - 2 for each tier above Iron)
+    final effectiveLevels = <String, int>{};
+    for (int i = 0; i < tiers.length; i++) {
+      final tier = tiers[i];
+      final tierAdjustment = i * 2; // -2 for each tier above Iron
+      effectiveLevels[tier] = detail.effectLevel - tierAdjustment;
+    }
+    
+    // Calculate ascension adjustments
+    final ascensionAdjustments = <String, int>{};
+    for (int i = 1; i <= currentTierIndex; i++) { // Start from Silver (index 1)
+      final tier = tiers[i];
+      ascensionAdjustments[tier] = -2;
+    }
+
+    // Helper function to calculate cost
+    int calculateCost(int level) {
+      if (level <= 0) return 0;
+      final baseCost = (level * (level + 1)) / 2;
+      return (baseCost * affinityMultiplier).round();
+    }
+
+    // Create a copy of the tiers map for editing
+    Map<String, int> editableTiers = Map<String, int>.from(detail.tiers);
+    int currentTierLevel = editableTiers[currentTier] ?? 0;
+    
+    // Track current available affinity points within the dialog
+    int currentAvailablePoints = availableAffinityPoints ?? 0;
+    
+    // Load and apply unsubmitted changes for this affinity
+    if (_isEditMode && _unsubmittedAdvancement != null) {
+      for (final change in _unsubmittedAdvancement!.affinityChanges) {
+        if (change.affinityName == name) {
+          // Extract tier from adjustment (e.g., "Bought in Gold" -> "Gold")
+          final tierMatch = RegExp(r'Bought in (.+)').firstMatch(change.adjustment);
+          if (tierMatch != null) {
+            final tier = tierMatch.group(1)!;
+            final currentLevel = editableTiers[tier] ?? 0;
+            editableTiers[tier] = currentLevel + change.levelChange;
+          }
+        }
+      }
+      
+      // Calculate total cost of existing unsubmitted changes for this affinity
+      int existingCost = 0;
+      for (final change in _unsubmittedAdvancement!.affinityChanges) {
+        if (change.affinityName == name) {
+          existingCost += change.cost;
+        }
+      }
+      currentAvailablePoints += existingCost; // Add back the cost since we're starting fresh
+    }
+
+    showDialog(
+      context: context,
+      builder: (_) => StatefulBuilder(
+        builder: (context, setState) => AlertDialog(
+        title: Text('$name Affinity Details'),
+        contentPadding: EdgeInsets.all(24),
+        content: SizedBox(
+          width: 500, // Make dialog wider
+          child: SingleChildScrollView(
+            child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Effective Level
+              Text(
+                'Effective Level',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+              ),
+              SizedBox(height: 8),
+              
+              // Current tier
+              Padding(
+                padding: EdgeInsets.only(left: 16, top: 2),
+                child: Text(
+                  '$currentTier: ${detail.effectLevel}',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                ),
+              ),
+              
+              // Tiers below current (add 2 for each tier below)
+              ...tiers.take(currentTierIndex).map((tier) {
+                final levelsBelow = currentTierIndex - tiers.indexOf(tier);
+                final adjustedLevel = detail.effectLevel + (levelsBelow * 2);
+                return Padding(
+                  padding: EdgeInsets.only(left: 16, top: 2),
+                  child: Text(
+                    '$tier: $adjustedLevel',
+                    style: TextStyle(fontSize: 12),
+                  ),
+                );
+              }),
+              SizedBox(height: 16),
+              
+              // Purchases table
+              Text(
+                'Purchases by Tier:',
+                style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
+              ),
+              SizedBox(height: 8),
+              Container(
+                decoration: BoxDecoration(
+                  border: Border.all(color: Colors.grey),
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Table(
+                  border: TableBorder.all(color: Colors.grey),
+                  columnWidths: {
+                    0: FlexColumnWidth(2),
+                    1: FlexColumnWidth(1),
+                    2: FlexColumnWidth(1),
+                  },
+                  children: [
+                    TableRow(
+                      decoration: BoxDecoration(color: Colors.grey[800]),
+                      children: [
+                        Padding(
+                          padding: EdgeInsets.all(8),
+                          child: Text('Adjustment', style: TextStyle(fontWeight: FontWeight.bold)),
+                        ),
+                        Padding(
+                          padding: EdgeInsets.all(8),
+                          child: Text('Level', style: TextStyle(fontWeight: FontWeight.bold), textAlign: TextAlign.center),
+                        ),
+                        Padding(
+                          padding: EdgeInsets.all(8),
+                          child: Text('Cost', style: TextStyle(fontWeight: FontWeight.bold), textAlign: TextAlign.right),
+                        ),
+                      ],
+                    ),
+                    ...tiers.take(currentTierIndex + 1).map((tier) {
+                      final level = editableTiers[tier] ?? 0;
+                      final cost = calculateCost(level);
+                      final isCurrentTier = tier == currentTier;
+                      return TableRow(
+                        children: [
+                          Padding(
+                            padding: EdgeInsets.all(8),
+                            child: Text('Bought in $tier'),
+                          ),
+                          Padding(
+                            padding: EdgeInsets.all(8),
+                            child: _isEditMode && isCurrentTier
+                                ? Row(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    children: [
+                                      IconButton(
+                                        icon: Icon(Icons.remove, color: Colors.amber, size: 16),
+                                        onPressed: () {
+                                          // Don't allow going below current tier level
+                                          if (level > currentTierLevel) {
+                                            // Calculate cost difference (current level cost - previous level cost)
+                                            final currentLevelCost = calculateCost(level);
+                                            final previousLevelCost = calculateCost(level - 1);
+                                            final costDifference = currentLevelCost - previousLevelCost;
+                                            
+                                            setState(() {
+                                              editableTiers[tier] = level - 1;
+                                              currentAvailablePoints += costDifference;
+                                            });
+                                            // Update the available points in the parent widget
+                                            if (onAffinityPointsChanged != null) {
+                                              onAffinityPointsChanged(currentAvailablePoints);
+                                            }
+                                          }
+                                        },
+                                        padding: EdgeInsets.zero,
+                                        constraints: BoxConstraints(),
+                                      ),
+                                      SizedBox(width: 8),
+                                      Text('$level', textAlign: TextAlign.center),
+                                      SizedBox(width: 8),
+                                      IconButton(
+                                        icon: Icon(Icons.add, color: Colors.amber, size: 16),
+                                                                                onPressed: () {
+                                          // Don't allow going above 6 levels
+                                          if (level < 6) {
+                                            // Calculate cost difference (new level cost - current level cost)
+                                            final currentLevelCost = calculateCost(level);
+                                            final nextLevelCost = calculateCost(level + 1);
+                                            final costDifference = nextLevelCost - currentLevelCost;
+                                            
+                                            // Check if we have enough affinity points for the difference
+                                            if (currentAvailablePoints >= costDifference) {
+                                              setState(() {
+                                                editableTiers[tier] = level + 1;
+                                                currentAvailablePoints -= costDifference;
+                                              });
+                                              // Update the available points in the parent widget
+                                              if (onAffinityPointsChanged != null) {
+                                                onAffinityPointsChanged(currentAvailablePoints);
+                                              }
+                                            } else {
+                                              // Show error message
+                                              ScaffoldMessenger.of(context).showSnackBar(
+                                                SnackBar(
+                                                  content: Text('Not enough affinity points! Need $costDifference, have $currentAvailablePoints'),
+                                                  backgroundColor: Colors.red,
+                                                ),
+                                              );
+                                            }
+                                          }
+                                        },
+                                        padding: EdgeInsets.zero,
+                                        constraints: BoxConstraints(),
+                                      ),
+                                    ],
+                                  )
+                                : Text('$level', textAlign: TextAlign.center),
+                          ),
+                          Padding(
+                            padding: EdgeInsets.all(8),
+                            child: Text('$cost', textAlign: TextAlign.right),
+                          ),
+                        ],
+                      );
+                    }),
+                    ...ascensionAdjustments.entries.map((entry) {
+                      return TableRow(
+                        children: [
+                          Padding(
+                            padding: EdgeInsets.all(8),
+                            child: Text('${entry.key} Ascension'),
+                          ),
+                          Padding(
+                            padding: EdgeInsets.all(8),
+                            child: Text('${entry.value}', textAlign: TextAlign.center),
+                          ),
+                          Padding(
+                            padding: EdgeInsets.all(8),
+                            child: Text('-', textAlign: TextAlign.right),
+                          ),
+                        ],
+                      );
+                    }),
+                    // Calculate totals
+                    TableRow(
+                      decoration: BoxDecoration(color: Colors.grey[700]),
+                      children: [
+                        Padding(
+                          padding: EdgeInsets.all(8),
+                          child: Text('Total', style: TextStyle(fontWeight: FontWeight.bold)),
+                        ),
+                        Padding(
+                          padding: EdgeInsets.all(8),
+                          child: Text(
+                            '${tiers.take(currentTierIndex + 1).map((tier) => editableTiers[tier] ?? 0).fold(0, (sum, value) => sum + value) + ascensionAdjustments.values.fold(0, (sum, value) => sum + value)}',
+                            style: TextStyle(fontWeight: FontWeight.bold),
+                            textAlign: TextAlign.center,
+                          ),
+                        ),
+                        Padding(
+                          padding: EdgeInsets.all(8),
+                          child: Text(
+                            '${tiers.take(currentTierIndex + 1).map((tier) => calculateCost(editableTiers[tier] ?? 0)).fold(0, (sum, value) => sum + value)}',
+                            style: TextStyle(fontWeight: FontWeight.bold),
+                            textAlign: TextAlign.right,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          ),
+        ),
+        actions: [
+          if (_isEditMode)
+            TextButton(
+              onPressed: () async {
+                // Remove existing unsubmitted changes for this affinity
+                if (_unsubmittedAdvancement != null) {
+                  final filteredChanges = _unsubmittedAdvancement!.affinityChanges
+                      .where((change) => change.affinityName != name)
+                      .toList();
+                  
+                  if (filteredChanges.length != _unsubmittedAdvancement!.affinityChanges.length) {
+                    await _saveUnsubmittedAdvancement(UnsubmittedAdvancement(
+                      affinityChanges: filteredChanges,
+                    ));
+                  }
+                }
+                
+                // Collect all changes made to the affinity
+                final changes = <AffinityChange>[];
+                final originalTiers = detail.tiers;
+                
+                for (final entry in editableTiers.entries) {
+                  final tier = entry.key;
+                  final newLevel = entry.value;
+                  final originalLevel = originalTiers[tier] ?? 0;
+                  final levelChange = newLevel - originalLevel;
+                  
+                  if (levelChange != 0) {
+                    // Calculate the cost difference
+                    final originalCost = calculateCost(originalLevel);
+                    final newCost = calculateCost(newLevel);
+                    final costDifference = newCost - originalCost;
+                    
+                    changes.add(AffinityChange(
+                      timestamp: DateTime.now().toIso8601String(),
+                      affinityName: name,
+                      adjustment: 'Bought in $tier',
+                      cost: costDifference,
+                      levelChange: levelChange,
+                    ));
+                  }
+                }
+                
+                // Store the changes
+                if (changes.isNotEmpty) {
+                  for (final change in changes) {
+                    await _addAffinityChange(change);
+                  }
+                  
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text('${changes.length} affinity change(s) saved for submission'),
+                      backgroundColor: Colors.green,
+                    ),
+                  );
+                }
+                
+                Navigator.pop(context);
+              },
+              child: Text('Submit'),
+            ),
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text('Close'),
+          )
+        ],
+        ),
+      ),
+    );
+  }
+
+  void _showAffinityPointInfo(BuildContext context) {
+    final points = widget.character.affinityPoints;
+    final buffer = StringBuffer()
+      ..writeln('Affinity Points Total: ${points['affinityPointsTotal']}')
+      ..writeln('Affinity Points Max: ${points['affinityPointsMax']}')
+      ..writeln('Unspent Affinity Points: ${points['affinityPointUnspend']}')
+      ..writeln('')
+      ..writeln('Tier Points Total: ${points['affinityTierPointsTotal']}')
+      ..writeln('Tier Points Max: ${points['affinityTierPointsMax']}')
+      ..writeln('Unspent Tier Points: ${points['affinityTierPointUnspend']}')
+      ..writeln('Unslotted Tier Points: ${points['affinityTierPointsUnslotted']}');
+
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text('Affinity Point Details'),
+        content: SingleChildScrollView(child: Text(buffer.toString())),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showSkillDetails(BuildContext context, Skill skill, {Function(int)? onBuildPointsChanged}) async {
+    final details = await getSkillDetailsFromRules(skill.name, skill.type, widget.character.race);
+    if (details == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('No details found for ${skill.name}')),
+      );
+      return;
+    }
+
+    final delivery = skill.delivery ?? details['Delivery'] ?? details['delivery'] ?? 'None';
+    final verbal = skill.verbal ?? details['verbal'] ?? '';
+    final rules = skill.description ?? details['rules'] ?? '';
+    
+    // Get base cost from rules for affinity skills
+    int baseCost = 1; // Default fallback
+    int maxLevel = 6; // Default max level
+    if (skill.type != 'Common' && skill.type != widget.character.race) {
+      try {
+        final cachedRules = await RulesService.loadCachedRules();
+        if (cachedRules != null) {
+          final rules = json.decode(cachedRules);
+          
+          // First try to get from Affinity Skills
+          final affinitySkills = rules['Affinity Skills'] as List<dynamic>? ?? [];
+          final affinitySkill = affinitySkills.firstWhere(
+            (s) => s['Name'] == skill.name,
+            orElse: () => null,
+          );
+          
+          if (affinitySkill != null) {
+            maxLevel = affinitySkill['Level'] ?? 6;
+            baseCost = affinitySkill['Build'] ?? 1;
+          } else {
+            // Fallback to affinity rules for base cost
+            final affinities = rules['Affinity'] as List<dynamic>? ?? [];
+            final affinity = affinities.firstWhere(
+              (a) => a['Name'] == skill.type,
+              orElse: () => null,
+            );
+            if (affinity != null) {
+              baseCost = affinity['Build'] ?? 1;
+            }
+          }
+        }
+      } catch (e) {
+        print('Error loading affinity skill max level: $e');
+      }
+    } else {
+      // For Common and race skills, get max level from skill details
+      try {
+        final cachedRules = await RulesService.loadCachedRules();
+        if (cachedRules != null) {
+          final rules = json.decode(cachedRules);
+          final skills = rules['Skill'] as List<dynamic>? ?? [];
+          final skillRule = skills.firstWhere(
+            (s) => s['Name'] == skill.name,
+            orElse: () => null,
+          );
+          if (skillRule != null) {
+            maxLevel = skillRule['Level'] ?? 6;
+            baseCost = skillRule['Build'] ?? 1;
+          }
+        }
+      } catch (e) {
+        print('Error loading skill max level: $e');
+      }
+    }
+    
+    List<int> calculateCost(Map<String, dynamic> details, int level) {
+      if (!details.containsKey('Build') || !details.containsKey('Level')) {
+        return List.filled(level, 1); // fallback
+      }
+
+      final base = details['Build'];
+      final maxLevel = details['Level'];
+
+      if (base is! int || maxLevel is! int) return List.filled(level, 1);
+
+      return List.generate(
+        level,
+        (i) => (base - i).clamp(1, base), // avoid negative or zero values
+      );
+    }
+
+    final cost = calculateCost(details, skill.level);
+    final totalCost = cost.fold(0, (sum, c) => sum + c);
+
+    List<bool> usesChecked = List<bool>.filled(skill.level, false);
+
+    // Track editable skill level for edit mode
+    int editableSkillLevel = skill.level;
+    int currentAvailableBuildPoints = _isEditMode ? _currentUnspentBuildPoints : 0;
+
+    // Load unsubmitted changes for this skill
+    if (_isEditMode && _unsubmittedAdvancement != null) {
+      for (final change in _unsubmittedAdvancement!.skillChanges) {
+        if (change.skillName == skill.name) {
+          editableSkillLevel += change.levelChange;
+          currentAvailableBuildPoints += change.cost; // Add back the cost since we're starting fresh
+        }
+      }
+    }
+
+    showDialog(
+      context: context,
+      builder: (context) {
+        final screenHeight = MediaQuery.of(context).size.height;
+        final dialogHeight = screenHeight * 0.65; // 65% of screen height
+
+        return AlertDialog(
+          titlePadding: const EdgeInsets.all(16),
+          contentPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+          title: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Expanded(
+                child: Text(
+                  '${skill.name} (${skill.type})',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                ),
+              ),
+              Text(
+                '${skill.frequency} • $delivery',
+                style: TextStyle(fontSize: 14, color: Colors.grey[300]),
+              ),
+            ],
+          ),
+          content: SizedBox(
+            height: dialogHeight,
+            width: double.maxFinite,
+            child: Column(
+              children: [
+                Row(
+                  children: [
+                    Text('Uses:', style: TextStyle(fontWeight: FontWeight.bold)),
+                    const SizedBox(width: 8),
+                    for (int i = 0; i < skill.level; i++)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 2),
+                        child: StatefulBuilder(
+                          builder: (context, setState) {
+                            return Checkbox(
+                              value: usesChecked[i],
+                              onChanged: (val) {
+                                setState(() => usesChecked[i] = val!);
+                              },
+                              visualDensity: VisualDensity.compact,
+                            );
+                          },
+                        ),
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                Expanded(
+                  child: DefaultTabController(
+                    length: 3,
+                    initialIndex: _isEditMode ? 2 : 0, // Start on Cost tab (index 2) if in edit mode
+                    child: Column(
+                      children: [
+                        const TabBar(
+                          tabs: [
+                            Tab(text: 'Verbal'),
+                            Tab(text: 'Rules'),
+                            Tab(text: 'Cost'),
+                          ],
+                          labelColor: Colors.white,
+                        ),
+                        Expanded(
+                          child: TabBarView(
+                            children: [
+                              SingleChildScrollView(
+                                padding: const EdgeInsets.all(8),
+                                child: Text(verbal, style: TextStyle(fontSize: 16)),
+                              ),
+                              SingleChildScrollView(
+                                padding: const EdgeInsets.all(8),
+                                child: Text(rules, style: TextStyle(fontSize: 16)),
+                              ),
+                              _isEditMode
+                                ? StatefulBuilder(
+                                    builder: (context, setState) {
+                                      final currentCost = calculateSkillCost(baseCost, editableSkillLevel);
+                                      final nextLevelCost = calculateSkillCost(baseCost, editableSkillLevel + 1);
+                                      final previousLevelCost = calculateSkillCost(baseCost, editableSkillLevel - 1);
+                                      final costDifference = nextLevelCost - currentCost;
+                                      final costRefund = currentCost - previousLevelCost;
+                                      
+                                      return Column(
+                                        children: [
+                                          SizedBox(height: 16),
+                                          Row(
+                                            mainAxisAlignment: MainAxisAlignment.center,
+                                            children: [
+                                              IconButton(
+                                                icon: Icon(Icons.remove, color: Colors.amber, size: 20),
+                                                onPressed: () {
+                                                  if (editableSkillLevel > skill.level) {
+                                                    setState(() {
+                                                      editableSkillLevel--;
+                                                      currentAvailableBuildPoints += costRefund;
+                                                    });
+                                                    if (onBuildPointsChanged != null) {
+                                                      onBuildPointsChanged(currentAvailableBuildPoints);
+                                                    }
+                                                  }
+                                                },
+                                              ),
+                                              SizedBox(width: 16),
+                                              Text(
+                                                'Level: $editableSkillLevel',
+                                                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                                              ),
+                                              SizedBox(width: 16),
+                                              IconButton(
+                                                icon: Icon(Icons.add, color: Colors.amber, size: 20),
+                                                onPressed: () {
+                                                  if (editableSkillLevel >= maxLevel) {
+                                                    ScaffoldMessenger.of(context).showSnackBar(
+                                                      SnackBar(
+                                                        content: Text('Cannot exceed maximum level of $maxLevel'),
+                                                        backgroundColor: Colors.red,
+                                                      ),
+                                                    );
+                                                  } else if (currentAvailableBuildPoints >= costDifference) {
+                                                    setState(() {
+                                                      editableSkillLevel++;
+                                                      currentAvailableBuildPoints -= costDifference;
+                                                    });
+                                                    if (onBuildPointsChanged != null) {
+                                                      onBuildPointsChanged(currentAvailableBuildPoints);
+                                                    }
+                                                  } else {
+                                                    ScaffoldMessenger.of(context).showSnackBar(
+                                                      SnackBar(
+                                                        content: Text('Not enough build points! Need $costDifference, have $currentAvailableBuildPoints'),
+                                                        backgroundColor: Colors.red,
+                                                      ),
+                                                    );
+                                                  }
+                                                },
+                                              ),
+                                            ],
+                                          ),
+                                          SizedBox(height: 16),
+                                          Text(
+                                            'Base Cost: $baseCost build points',
+                                            style: TextStyle(fontSize: 14, color: Colors.grey),
+                                          ),
+                                          SizedBox(height: 8),
+                                          Text(
+                                            'Cost: $currentCost build points',
+                                            style: TextStyle(fontSize: 16),
+                                          ),
+                                          SizedBox(height: 8),
+                                          Text(
+                                            'Available: $currentAvailableBuildPoints build points',
+                                            style: TextStyle(fontSize: 14, color: Colors.grey),
+                                          ),
+                                        ],
+                                      );
+                                    },
+                                  )
+                                : Center(
+                                    child: Text(
+                                      'Skill Build Total: $totalCost (${cost.join(" + ")})',
+                                      style: TextStyle(fontSize: 16),
+                                    ),
+                                  ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            if (_isEditMode)
+              TextButton(
+                onPressed: () async {
+                  // Calculate level change
+                  final levelChange = editableSkillLevel - skill.level;
+                  
+                  if (levelChange != 0) {
+                    // Calculate cost difference
+                    final originalCost = calculateSkillCost(baseCost, skill.level);
+                    final newCost = calculateSkillCost(baseCost, editableSkillLevel);
+                    final costDifference = newCost - originalCost;
+                    
+                    // Add skill change to unsubmitted advancement
+                    final skillChange = SkillChange(
+                      timestamp: DateTime.now().toIso8601String(),
+                      skillName: skill.name,
+                      skillType: skill.type,
+                      levelChange: levelChange,
+                      cost: costDifference,
+                    );
+                    
+                    await _addSkillChange(skillChange);
+                    
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text('Skill advancement saved for submission'),
+                        backgroundColor: Colors.green,
+                      ),
+                    );
+                  }
+                  
+                  Navigator.pop(context);
+                },
+                child: Text('Submit'),
+              ),
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Close'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Map<String, List<Skill>> groupSkillsBy(
+    List<Skill> skills,
+    String sortBy,
+    String characterRace,
+  ) {
+    Map<String, List<Skill>> grouped = {};
+
+    if (sortBy == 'Type') {
+      // Define special order for type
+      final order = ['Common', characterRace]; // e.g., 'Common', 'Human'
+      for (var skill in skills) {
+        final key = skill.type;
+        grouped.putIfAbsent(key, () => []).add(skill);
+      }
+
+      // Sort within each group
+      for (var key in grouped.keys) {
+        grouped[key]!.sort((a, b) => a.name.compareTo(b.name));
+      }
+
+      // Sort outer map by special order first, then alphabetically
+      final sorted = Map<String, List<Skill>>.fromEntries(
+        grouped.entries.toList()
+          ..sort((a, b) {
+            int aIndex = order.indexOf(a.key);
+            int bIndex = order.indexOf(b.key);
+            if (aIndex == -1 && bIndex == -1) return a.key.compareTo(b.key);
+            if (aIndex == -1) return 1;
+            if (bIndex == -1) return -1;
+            return aIndex.compareTo(bIndex);
+          }),
+      );
+      return sorted;
+    }
+
+    if (sortBy == 'Frequency') {
+      final frequencyOrder = [
+        'Passive',
+        'At Will',
+        'Encounter',
+        'Bell',
+        'Daily',
+        'Weekend'
+      ];
+
+      for (var skill in skills) {
+        final freq = skill.frequency.trim();
+        grouped.putIfAbsent(freq, () => []).add(skill);
+      }
+
+      for (var key in grouped.keys) {
+        grouped[key]!.sort((a, b) => a.name.compareTo(b.name));
+      }
+
+      final sorted = Map<String, List<Skill>>.fromEntries(
+        grouped.entries.toList()
+          ..sort((a, b) {
+            int aIndex = frequencyOrder.indexOf(a.key);
+            int bIndex = frequencyOrder.indexOf(b.key);
+            if (aIndex == -1 && bIndex == -1) return a.key.compareTo(b.key);
+            if (aIndex == -1) return 1;
+            if (bIndex == -1) return -1;
+            return aIndex.compareTo(bIndex);
+          }),
+      );
+      return sorted;
+    }
+
+    return {
+      '': List.from(skills)..sort((a, b) => a.name.compareTo(b.name)),
+    };
+  }
+
+  Color _getCultivationColor(String tier) {
+    switch (tier.toLowerCase()) {
+      case 'iron': return Colors.grey;
+      case 'silver': return Colors.white;
+      case 'gold': return Colors.yellow.shade600;
+      case 'jade': return Colors.green.shade400;
+      case 'saint': return Colors.red;
+      case 'sovereign': return Colors.purple;
+      default: return Colors.blueGrey;
+    }
+  }
+
+  Widget _buildInfoBox({
+    required String label,
+    required String value,
+    required VoidCallback onTap,
+    VoidCallback? onBoxTap,
+    bool showPlusButton = false,
+    VoidCallback? onPlusPressed,
+  }) {
+    return Column(
+      children: [
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(label, style: TextStyle(fontSize: 16)),
+            IconButton(
+              icon: Icon(Icons.info_outline, size: 16),
+              onPressed: onTap,
+              tooltip: 'More info on $label',
+            ),
+            if (showPlusButton && onPlusPressed != null)
+              IconButton(
+                icon: Icon(Icons.add, size: 16, color: Colors.amber),
+                onPressed: onPlusPressed,
+                tooltip: 'Add $label',
+              ),
+          ],
+        ),
+        GestureDetector(
+          onTap: onBoxTap,  // 👈 support full-box tap if provided
+          child: Container(
+            padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            decoration: BoxDecoration(
+              border: Border.all(color: Colors.white),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Text(
+              value,
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _StatBox({required String label, required String value, required VoidCallback onTap, bool isEditMode = false}) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Text(label, style: TextStyle(fontSize: 16)),
+            SizedBox(width: 4),
+            GestureDetector(
+              onTap: onTap,
+              child: Icon(Icons.info_outline, size: 16, color: Colors.grey[300]),
+            ),
+          ],
+        ),
+        Container(
+          padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          decoration: BoxDecoration(
+            border: Border.all(color: isEditMode ? Colors.amber : Colors.white),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Text(
+            value,
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+          ),
+        ),
+      ],
+    );
+  }
+
+
+  @override
+  Widget build(BuildContext context) {
+    if (rulesJson == null) {
+    return Scaffold(
+        appBar: AppBar(title: Text('My Character')),
+        body: Center(child: CircularProgressIndicator()), // Loading indicator
+      );
+    }
+    final character = widget.character;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Row(
+          children: [
+            Text('My Character'),
+            if (_isEditMode) ...[
+              SizedBox(width: 8),
+              Container(
+                padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: Colors.amber.withOpacity(0.2),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Text(
+                  'EDIT MODE',
+                  style: TextStyle(
+                    color: Colors.amber,
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ],
+            if (_hasUnsubmittedChanges && !_isEditMode) ...[
+              SizedBox(width: 8),
+              GestureDetector(
+                onTap: () => _showUnsubmittedChanges(context),
+                child: Container(
+                  padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: Colors.blue.withOpacity(0.2),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Icon(
+                    Icons.upload,
+                      color: Colors.blue,
+                    size: 16,
+                  ),
+                ),
+              ),
+            ],
+          ],
+        ),
+        actions: [
+          IconButton(
+            icon: Icon(Icons.sync),
+            onPressed: _syncCharacterData,
+            tooltip: 'Sync Character Data',
+          ),
+          IconButton(
+            icon: Icon(_isEditMode ? Icons.save : Icons.edit),
+            onPressed: () async {
+              if (!_isEditMode) {
+                // Check if we can enter edit mode
+                final lastSubmissionTimestamp = await _getLastSubmissionTimestamp();
+                final characterGeneratedAt = widget.character.generatedAt;
+                
+                if (lastSubmissionTimestamp != null && characterGeneratedAt != null) {
+                  final submissionTime = DateTime.parse(lastSubmissionTimestamp);
+                  final characterTime = DateTime.parse(characterGeneratedAt);
+                  
+                  if (characterTime.isBefore(submissionTime)) {
+                    // Character data is older than last submission - show warning
+                    if (context.mounted) {
+                      showDialog(
+                        context: context,
+                        builder: (BuildContext context) {
+                          return AlertDialog(
+                            title: Text('Pending Processing'),
+                            content: Text('Your character advancement has been submitted and is being processed. Please wait for your character data to be updated before making new changes.'),
+                            actions: [
+                              TextButton(
+                                onPressed: () => Navigator.of(context).pop(),
+                                child: Text('OK'),
+                              ),
+                            ],
+                          );
+                        },
+                      );
+                    }
+                    return; // Don't enter edit mode
+                  }
+                }
+                
+                // Entering edit mode - initialize tracking variables
+                setState(() {
+                  _originalUnspentAffinityPoints = widget.character.unspentAffinityPoints;
+                  _originalUnspentBuildPoints = widget.character.build.unspent;
+                  
+                  // Calculate actual available points by subtracting unsubmitted advancement costs
+                  int affinityCostFromUnsubmitted = 0;
+                  int buildCostFromUnsubmitted = 0;
+                  
+                  if (_unsubmittedAdvancement != null) {
+                    for (final change in _unsubmittedAdvancement!.affinityChanges) {
+                      affinityCostFromUnsubmitted += change.cost;
+                    }
+                    for (final change in _unsubmittedAdvancement!.skillChanges) {
+                      buildCostFromUnsubmitted += change.cost;
+                    }
+                    for (final change in _unsubmittedAdvancement!.essenceChanges) {
+                      buildCostFromUnsubmitted += change.cost;
+                    }
+                  }
+                  
+                  _currentUnspentAffinityPoints = _originalUnspentAffinityPoints - affinityCostFromUnsubmitted;
+                  _currentUnspentBuildPoints = _originalUnspentBuildPoints - buildCostFromUnsubmitted;
+                  _isEditMode = true;
+                });
+              } else {
+                // Exiting edit mode - save changes (TODO: implement save functionality)
+                print('Saving changes...');
+                setState(() {
+                  _isEditMode = false;
+                });
+              }
+            },
+            tooltip: _isEditMode ? 'Save Changes' : 'Edit Character',
+          ),
+        ],
+      ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+
+
+            // Character Header Layout
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                Text(
+                  character.characterName,
+                  style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  '${character.cultivationTier} tier ${character.race}',
+                  style: TextStyle(
+                    fontSize: 18,
+                    color: _getCultivationColor(character.cultivationTier),
+                  ),
+                ),
+                const SizedBox(height: 16),
+
+                // Row 1: Build + Affinity
+                Row(
+                  children: [
+                    Expanded(
+                      child: _StatBox(
+                        label: 'Build Total',
+                        value: _isEditMode 
+                            ? '${character.build.total - _getUnsubmittedBuildCost()} ($_currentUnspentBuildPoints)'
+                            : '${character.build.total} (${character.build.unspent})',
+                        onTap: () => _showBuildInfo(context),
+                        isEditMode: _isEditMode,
+                      ),
+                    ),
+                    SizedBox(width: 12),
+                    Expanded(
+                      child: _StatBox(
+                        label: 'Affinity Points',
+                        value: _isEditMode 
+                            ? '${character.totalAffinityPoints} ($_currentUnspentAffinityPoints)'
+                            : '${character.totalAffinityPoints} (${character.unspentAffinityPoints})',
+                        onTap: () => _showAffinityPointInfo(context),
+                        isEditMode: _isEditMode,
+                      ),
+                    ),
+                  ],
+                ),
+
+                SizedBox(height: 12),
+
+                // Row 2: DR + Essence
+                Row(
+                  children: [
+                    Expanded(
+                      child: _buildInfoBox(
+                        label: 'DR',
+                        value: '${_getDRForTier(character.cultivationTier)}',
+                        onTap: _showDRInfo,
+                      ),
+                    ),
+                    SizedBox(width: 12),
+                    Expanded(
+                      child: _buildInfoBox(
+                        label: 'Essence',
+                        value: '$currentHP / ${character.hitPoints['total']}',
+                        onTap: _showHitPointInfo,
+                        onBoxTap: _editCurrentHP,
+                        showPlusButton: _isEditMode,
+                        onPlusPressed: () {
+                          // TODO: Add essence editing functionality
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(content: Text('Essence editing coming soon!')),
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+
+              ],
+            ),
+
+
+            const Divider(height: 32),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Row(
+                  children: [
+                    Text('Affinities', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                    if (_isEditMode) ...[
+                      SizedBox(width: 8),
+                      IconButton(
+                        icon: Icon(Icons.add, color: Colors.amber, size: 20),
+                        onPressed: () {
+                          _showAvailableAffinities(context);
+                        },
+                        padding: EdgeInsets.zero,
+                        constraints: BoxConstraints(),
+                      ),
+                    ],
+                  ],
+                ),
+              ],
+            ),
+
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final int columns = 3; // Force 3 across even on narrow screens
+                final double spacing = 6.0;
+                final double totalSpacing = (columns - 1) * spacing;
+                final double itemWidth = (constraints.maxWidth - totalSpacing) / columns;
+
+                return Wrap(
+                  spacing: spacing,
+                  runSpacing: spacing,
+                  children: (_getAllAffinities().entries.toList()
+                    ..sort((a, b) => a.key.compareTo(b.key)))
+                    .map((entry) {
+                      final name = entry.key;
+                      final detail = entry.value;
+
+                      return Semantics(
+                        label: '$name affinity, level ${detail.effectLevel}',
+                        button: true,
+                        child: InkWell(
+                          onTap: () => _showAffinityDetails(
+                            context, 
+                            name, 
+                            detail,
+                            availableAffinityPoints: _isEditMode ? _currentUnspentAffinityPoints : null,
+                            onAffinityPointsChanged: _isEditMode ? (newPoints) {
+                              setState(() {
+                                _currentUnspentAffinityPoints = newPoints;
+                              });
+                            } : null,
+                          ),
+                          borderRadius: BorderRadius.circular(4),
+                          child: ConstrainedBox(
+                            constraints: BoxConstraints(minHeight: 48), // 👈 Ensures minimum tap area
+                            child: SizedBox(
+                              width: itemWidth,
+                              child: Card(
+                                margin: EdgeInsets.zero,
+                                color: Colors.grey[850],
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 8),
+                                  child: Row(
+                                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                    children: [
+                                      Expanded(
+                                        child: Center(
+                                          child: Text(
+                                            '$name: ${detail.effectLevel}',
+                                            style: TextStyle(fontSize: 14),
+                                          ),
+                                        ),
+                                      ),
+                                      if (_isEditMode)
+                                        IconButton(
+                                          icon: Icon(Icons.add, color: Colors.amber, size: 16),
+                                          onPressed: () => _showAffinityDetails(
+                                            context, 
+                                            name, 
+                                            detail,
+                                            availableAffinityPoints: _currentUnspentAffinityPoints,
+                                            onAffinityPointsChanged: (newPoints) {
+                                              setState(() {
+                                                _currentUnspentAffinityPoints = newPoints;
+                                              });
+                                            },
+                                          ),
+                                          padding: EdgeInsets.zero,
+                                          constraints: BoxConstraints(),
+                                        ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      );
+                    }).toList(),
+
+
+                );
+              },
+            ),
+
+
+            const Divider(height: 32),
+
+            // Skills Section
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Row(
+                  children: [
+                    Text('Skills', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                    if (_isEditMode) ...[
+                      SizedBox(width: 8),
+                      IconButton(
+                        icon: Icon(Icons.add, color: Colors.amber, size: 20),
+                        onPressed: () {
+                          _showAvailableAffinitiesForSkills(context);
+                        },
+                        padding: EdgeInsets.zero,
+                        constraints: BoxConstraints(),
+                      ),
+                    ],
+                  ],
+                ),
+                DropdownButton<String>(
+                  value: _selectedSkillSort,
+                  onChanged: (value) async {
+                    setState(() {
+                      _selectedSkillSort = value!;
+                    });
+
+                    final prefs = await SharedPreferences.getInstance();
+                    await prefs.setString('skill_sorting', _selectedSkillSort);
+                  },
+                  items: _skillSortOptions.map((String value) {
+                    return DropdownMenuItem<String>(
+                      value: value,
+                      child: Text(value),
+                    );
+                  }).toList(),
+                ),
+              ],
+            ),
+            ...groupSkillsBy(_getAllSkills(), _selectedSkillSort, character.race).entries.expand((entry) {
+              final groupName = entry.key;
+              final skillList = entry.value;
+
+              return [
+                if (groupName.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 16.0, bottom: 8.0),
+                    child: Text(
+                      groupName,
+                      style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white),
+                    ),
+                  ),
+                ...skillList.map((skill) {
+                  final isPassiveOrAtWill = skill.frequency == 'Passive' || skill.frequency == 'At Will';
+                  
+                  // Check if this skill has unsubmitted changes
+                  int unsubmittedLevelChange = 0;
+                  bool isNewSkill = false;
+                  if (_isEditMode && _unsubmittedAdvancement != null) {
+                    for (final change in _unsubmittedAdvancement!.skillChanges) {
+                      if (change.skillName == skill.name) {
+                        unsubmittedLevelChange += change.levelChange;
+                        // Check if this is a completely new skill (not in original character skills)
+                        if (!widget.character.skills.any((s) => s.name == skill.name)) {
+                          isNewSkill = true;
+                        }
+                      }
+                    }
+                  }
+                  
+                  final displayLevel = skill.level + unsubmittedLevelChange;
+                  final hasUnsubmittedChanges = unsubmittedLevelChange != 0 || isNewSkill;
+                  
+                  return InkWell(
+                    onTap: () {
+                      if (_isEditMode && isPassiveOrAtWill) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text('Cannot increase ${skill.frequency} skills'),
+                            backgroundColor: Colors.orange,
+                          ),
+                        );
+                      } else {
+                        _showSkillDetails(context, skill, onBuildPointsChanged: _isEditMode ? (newPoints) {
+                          setState(() {
+                            _currentUnspentBuildPoints = newPoints;
+                          });
+                        } : null);
+                      }
+                    },
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 6.0),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: RichText(
+                              text: TextSpan(
+                                style: Theme.of(context).textTheme.bodyMedium!.copyWith(
+                                  color: hasUnsubmittedChanges ? Colors.amber : Colors.white,
+                                  decoration: TextDecoration.none,
+                                ),
+                                children: [
+                                  TextSpan(
+                                    text: skill.name,
+                                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                                  ),
+                                  TextSpan(
+                                    text: ' (${skill.type} • Level ',
+                                    style: TextStyle(fontSize: 14),
+                                  ),
+                                  TextSpan(
+                                    text: '$displayLevel',
+                                    style: TextStyle(
+                                      fontSize: 14,
+                                      fontWeight: hasUnsubmittedChanges ? FontWeight.bold : null,
+                                    ),
+                                  ),
+                                  TextSpan(
+                                    text: ' • ${skill.frequency})',
+                                    style: TextStyle(fontSize: 14),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                          if (_isEditMode && !isPassiveOrAtWill)
+                            IconButton(
+                              icon: Icon(Icons.add, color: Colors.amber, size: 20),
+                              onPressed: () {
+                                _showSkillDetails(context, skill, onBuildPointsChanged: _isEditMode ? (newPoints) {
+                                  setState(() {
+                                    _currentUnspentBuildPoints = newPoints;
+                                  });
+                                } : null);
+                              },
+                              padding: EdgeInsets.zero,
+                              constraints: BoxConstraints(),
+                            ),
+                        ],
+                      ),
+                    ),
+                  );
+                }),
+              ];
+            }),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showAvailableAffinitiesForSkills(BuildContext context) async {
+    // Get all affinities the character has (including unsubmitted ones)
+    final allAffinities = _getAllAffinities();
+    final availableAffinities = allAffinities.keys.toList();
+    
+    if (availableAffinities.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('No affinities available for skills')),
+      );
+      return;
+    }
+
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text('Select Affinity for New Skill'),
+        content: SizedBox(
+          width: 400,
+          height: 300,
+          child: ListView.builder(
+            itemCount: availableAffinities.length,
+            itemBuilder: (context, index) {
+              final affinityName = availableAffinities[index];
+              return ListTile(
+                title: Text(affinityName),
+                onTap: () {
+                  Navigator.pop(context);
+                  _showAvailableSkillsForAffinity(context, affinityName);
+                },
+              );
+            },
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text('Cancel'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showAvailableSkillsForAffinity(BuildContext context, String affinityName) async {
+    // Get available skills for this affinity
+    List<Map<String, dynamic>> availableSkills = [];
+    
+    try {
+      final cachedRules = await RulesService.loadCachedRules();
+      if (cachedRules != null) {
+        final rules = json.decode(cachedRules);
+        final affinitySkills = rules['Affinity Skills'] as List<dynamic>? ?? [];
+        
+        // Filter skills for this affinity
+        for (final skill in affinitySkills) {
+          if (skill['Affinity'] == affinityName) {
+            availableSkills.add({
+              'name': skill['Name'],
+              'type': affinityName,
+              'frequency': skill['Frequency'] ?? 'At Will',
+              'delivery': skill['Delivery'] ?? 'None',
+            });
+          }
+        }
+      }
+    } catch (e) {
+      print('Error loading available skills: $e');
+    }
+
+    // Filter out skills the character already has
+    final existingSkillNames = _getAllSkills().map((s) => s.name).toSet();
+    availableSkills = availableSkills.where((skill) => 
+      !existingSkillNames.contains(skill['name'])
+    ).toList();
+
+    if (availableSkills.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('No new skills available for $affinityName')),
+      );
+      return;
+    }
+
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text('Available Skills for $affinityName'),
+        content: SizedBox(
+          width: 400,
+          height: 300,
+          child: ListView.builder(
+            itemCount: availableSkills.length,
+            itemBuilder: (context, index) {
+              final skill = availableSkills[index];
+              return ListTile(
+                title: Text(skill['name']),
+                subtitle: Text('${skill['frequency']} • ${skill['delivery']}'),
+                onTap: () {
+                  Navigator.pop(context);
+                  _addNewSkill(context, skill);
+                },
+              );
+            },
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text('Cancel'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _addNewSkill(BuildContext context, Map<String, dynamic> skillData) {
+    // Create a new skill
+    final newSkill = Skill(
+      name: skillData['name'],
+      type: skillData['type'],
+      level: 0, // Start at level 0
+      frequency: skillData['frequency'],
+      delivery: skillData['delivery'],
+      verbal: '',
+      description: '',
+    );
+
+    // Open skill details dialog for the new skill
+    _showSkillDetails(context, newSkill, onBuildPointsChanged: _isEditMode ? (newPoints) {
+      setState(() {
+        _currentUnspentBuildPoints = newPoints;
+      });
+    } : null);
+  }
+
+  // Submit unsubmitted advancement to Google App Script
+  Future<void> _submitAdvancementToGoogleAppScript(BuildContext context) async {
+    if (_unsubmittedAdvancement == null || 
+        (_unsubmittedAdvancement!.affinityChanges.isEmpty && 
+         _unsubmittedAdvancement!.skillChanges.isEmpty && 
+         _unsubmittedAdvancement!.essenceChanges.isEmpty)) {
+      return;
+    }
+
+    try {
+      // Get current user and ID token
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) {
+        throw Exception('User not authenticated');
+      }
+
+      // Get ID token
+      final idToken = await user.getIdToken();
+      if (idToken == null) {
+        throw Exception('Failed to get authentication token');
+      }
+
+      // Prepare the payload
+      final payload = {
+        'idToken': idToken,
+        ..._unsubmittedAdvancement!.toJson(),
+      };
+
+      // Submit to Google App Script
+      final response = await _submitToGoogleAppScript(payload);
+
+      if (response['ok'] == true) {
+        // Success - record submission timestamp and clear the unsubmitted advancement
+        final submissionTimestamp = DateTime.now().toIso8601String();
+        await _saveSubmissionTimestamp(submissionTimestamp);
+        await _clearUnsubmittedAdvancement();
+        
+        // Show success message
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('✅ Advancement submitted successfully! Please wait for your character data to be updated.'),
+              backgroundColor: Colors.green,
+            ),
+          );
+        }
+      } else {
+        // Error - show error message
+        final errorMessage = response['message'] ?? 'Unknown error occurred';
+        throw Exception('Submission failed: $errorMessage');
+      }
+
+    } catch (e) {
+      print('Error submitting advancement: $e');
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('❌ Failed to submit advancement: ${e.toString()}'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  // Submit payload to Firebase Function (proxy to Google Apps Script)
+  Future<Map<String, dynamic>> _submitToGoogleAppScript(Map<String, dynamic> payload) async {
+    // Use Firebase Function as proxy to Google Apps Script
+    final String functionUrl = 'https://us-central1-crucible-helper.cloudfunctions.net/advancementIntake';
+    
+    try {
+      print('Submitting payload to: $functionUrl');
+      print('Payload: ${json.encode(payload)}');
+      
+      final response = await http.post(
+        Uri.parse(functionUrl),
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: json.encode(payload),
+      );
+
+      print('Response status: ${response.statusCode}');
+      print('Response body: ${response.body}');
+
+      if (response.statusCode == 200) {
+        final responseData = json.decode(response.body);
+        return responseData;
+      } else {
+        throw Exception('HTTP ${response.statusCode}: ${response.body}');
+      }
+    } catch (e) {
+      print('Error details: $e');
+      throw Exception('Failed to submit advancement: $e');
+    }
+  }
+}
+
+class MonsterCoresPage extends StatelessWidget {
+  const MonsterCoresPage({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text('Monster Cores')),
+      body: Center(child: Text('Monster Cores Coming Soon!')),
+    );
+  }
+}
+
+
+
+class DeathTimerPage extends StatefulWidget {
+  const DeathTimerPage({super.key});
+
+  @override
+  _DeathTimerPageState createState() => _DeathTimerPageState();
+}
+
+class _DeathTimerPageState extends State<DeathTimerPage> {
+  Timer? _timer;
+  int _remainingSeconds = 180; // 3 minutes
+  bool _isRunning = false;
+
+  void _startTimer() {
+    if (_isRunning) return;
+    setState(() => _isRunning = true);
+    _timer = Timer.periodic(Duration(seconds: 1), (timer) {
+      setState(() {
+        if (_remainingSeconds > 0) {
+          _remainingSeconds--;
+        } else {
+          timer.cancel();
+          _isRunning = false;
+        }
+      });
+    });
+  }
+
+  void _resetTimer() {
+    _timer?.cancel();
+    setState(() {
+      _remainingSeconds = 180;
+      _isRunning = false;
+    });
+  }
+
+  void _heal() {
+    _timer?.cancel();
+    setState(() {
+      _remainingSeconds = 180;
+      _isRunning = false;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text('Healed! Death count reset.'),
+      duration: Duration(seconds: 2),
+    ));
+  }
+
+  String _getStatusLabel() {
+    if (_remainingSeconds > 120) return "Stage 1: Bleeding Out";
+    if (_remainingSeconds > 0) return "Stage 2: Unconscious/Dying";
+    return "Dead";
+  }
+
+  Color _getStatusColor() {
+    if (_remainingSeconds > 120) return Colors.red;
+    if (_remainingSeconds > 0) return Colors.purple;
+    return Colors.grey;
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: _getStatusColor(),
+      appBar: AppBar(
+        title: Text('Death Timer'),
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(24.0),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Text(
+              _getStatusLabel(),
+              style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold),
+            ),
+            SizedBox(height: 20),
+            Text(
+              '${_remainingSeconds ~/ 60}:${(_remainingSeconds % 60).toString().padLeft(2, '0')}',
+              style: TextStyle(fontSize: 48),
+            ),
+            SizedBox(height: 40),
+            ElevatedButton(
+              onPressed: _startTimer,
+              child: Text('Start Death Timer'),
+            ),
+            SizedBox(height: 10),
+            ElevatedButton(
+              onPressed: _heal,
+              child: Text('Healed / Life Effect Used'),
+            ),
+            SizedBox(height: 10),
+            TextButton(
+              onPressed: _resetTimer,
+              child: Text('Reset'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// QR Code Display Widget
+class _QRCodeDisplay extends StatefulWidget {
+  final String email;
+  
+  const _QRCodeDisplay({required this.email});
+  
+  @override
+  _QRCodeDisplayState createState() => _QRCodeDisplayState();
+}
+
+class _QRCodeDisplayState extends State<_QRCodeDisplay> {
+  String? qrCodeUrl;
+  bool isLoading = true;
+  bool hasError = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadQRCode();
+  }
+
+  Future<void> _loadQRCode() async {
+    try {
+      print('🔍 Attempting to load QR code for: ${widget.email}');
+      final qrRef = FirebaseStorage.instance.ref().child('users/${widget.email}/qr.png');
+      
+      // First check if the file exists
+      try {
+        final metadata = await qrRef.getMetadata();
+        print('✅ QR code file exists: ${metadata.name}');
+      } catch (e) {
+        print('❌ QR code file does not exist: $e');
+        setState(() {
+          hasError = true;
+          isLoading = false;
+        });
+        return;
+      }
+      
+      final data = await qrRef.getData();
+      if (data != null) {
+        print('✅ QR code data loaded successfully (${data.length} bytes)');
+        
+        // Get the download URL instead of using the direct URL
+        final downloadUrl = await qrRef.getDownloadURL();
+        print('✅ QR code download URL: $downloadUrl');
+        
+        setState(() {
+          qrCodeUrl = downloadUrl;
+          isLoading = false;
+        });
+      } else {
+        print('❌ QR code data is null');
+        setState(() {
+          hasError = true;
+          isLoading = false;
+        });
+      }
+    } catch (e) {
+      print('❌ Error loading QR code: $e');
+      setState(() {
+        hasError = true;
+        isLoading = false;
+      });
+    }
+  }
+
+  void _showQRCode(BuildContext context) {
+    if (qrCodeUrl == null) return;
+    
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Text('QR Code'),
+          content: Container(
+            width: 300,
+            height: 300,
+            decoration: BoxDecoration(
+              border: Border.all(color: Colors.grey),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: Image.network(
+                qrCodeUrl!,
+                fit: BoxFit.contain,
+                loadingBuilder: (context, child, loadingProgress) {
+                  if (loadingProgress == null) {
+                    print('✅ Enlarged image loaded successfully');
+                    return child;
+                  }
+                  print('🔄 Enlarged image loading: ${loadingProgress.expectedTotalBytes != null ? (loadingProgress.cumulativeBytesLoaded / loadingProgress.expectedTotalBytes! * 100).round() : 0}%');
+                  return Center(child: CircularProgressIndicator());
+                },
+                errorBuilder: (context, error, stackTrace) {
+                  print('❌ Enlarged image error: $error');
+                  return Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(Icons.qr_code, size: 64, color: Colors.grey),
+                        SizedBox(height: 8),
+                        Text(
+                          'QR Code not available',
+                          style: TextStyle(color: Colors.grey),
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: Text('Close'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        GestureDetector(
+          onTap: isLoading ? null : () => _showQRCode(context),
+          child: Container(
+            width: 120,
+            height: 120,
+            decoration: BoxDecoration(
+              border: Border.all(color: Colors.grey),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: isLoading
+                  ? Center(child: CircularProgressIndicator())
+                  : hasError
+                      ? Center(
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(Icons.qr_code, size: 32, color: Colors.grey),
+                              SizedBox(height: 4),
+                              Text(
+                                'QR Code not available',
+                                style: TextStyle(color: Colors.grey, fontSize: 10),
+                                textAlign: TextAlign.center,
+                              ),
+                              SizedBox(height: 4),
+                              IconButton(
+                                icon: Icon(Icons.refresh, size: 16, color: Colors.blue),
+                                onPressed: () {
+                                  setState(() {
+                                    isLoading = true;
+                                    hasError = false;
+                                  });
+                                  _loadQRCode();
+                                },
+                                padding: EdgeInsets.zero,
+                                constraints: BoxConstraints(),
+                              ),
+                            ],
+                          ),
+                        )
+                      : Image.network(
+                          qrCodeUrl!,
+                          fit: BoxFit.contain,
+                          loadingBuilder: (context, child, loadingProgress) {
+                            if (loadingProgress == null) {
+                              print('✅ Image loaded successfully');
+                              return child;
+                            }
+                            print('🔄 Image loading: ${loadingProgress.expectedTotalBytes != null ? (loadingProgress.cumulativeBytesLoaded / loadingProgress.expectedTotalBytes! * 100).round() : 0}%');
+                            return Center(child: CircularProgressIndicator());
+                          },
+                          errorBuilder: (context, error, stackTrace) {
+                            print('❌ Image error: $error');
+                            return Center(
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Icon(Icons.qr_code, size: 32, color: Colors.grey),
+                                  SizedBox(height: 4),
+                                  Text(
+                                    'QR Code not available',
+                                    style: TextStyle(color: Colors.grey, fontSize: 10),
+                                    textAlign: TextAlign.center,
+                                  ),
+                                  SizedBox(height: 4),
+                                  IconButton(
+                                    icon: Icon(Icons.refresh, size: 16, color: Colors.blue),
+                                    onPressed: () {
+                                      setState(() {
+                                        isLoading = true;
+                                        hasError = false;
+                                      });
+                                      _loadQRCode();
+                                    },
+                                    padding: EdgeInsets.zero,
+                                    constraints: BoxConstraints(),
+                                  ),
+                                ],
+                              ),
+                            );
+                          },
+                        ),
+            ),
+          ),
+        ),
+        SizedBox(height: 4),
+        Text(
+          hasError ? 'Click refresh to retry' : 'Click to enlarge',
+          style: TextStyle(fontSize: 12, color: Colors.grey),
+        ),
+      ],
+    );
+  }
+}
+
+// QR Code Scanner Landing Page
+class QRScannerPage extends StatefulWidget {
+  const QRScannerPage({super.key});
+
+  @override
+  _QRScannerPageState createState() => _QRScannerPageState();
+}
+
+class _QRScannerPageState extends State<QRScannerPage> {
+  final FirebaseAuth _auth = FirebaseAuth.instance;
+  bool isSuperAdmin = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _checkSuperAdminPermissions();
+  }
+
+  Future<void> _checkSuperAdminPermissions() async {
+    try {
+      final user = _auth.currentUser;
+      if (user == null) return;
+
+      final idToken = await user.getIdToken();
+      
+      final response = await http.post(
+        Uri.parse('https://us-central1-crucible-helper.cloudfunctions.net/checkSuperAdmin'),
+        headers: {
+          'Authorization': 'Bearer $idToken',
+          'Content-Type': 'application/json',
+        },
+        body: json.encode({
+          'uid': user.uid,
+        }),
+      );
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        setState(() {
+          isSuperAdmin = data['isSuperAdmin'] ?? false;
+        });
+      }
+    } catch (error) {
+      print('❌ Error checking super admin permissions: $error');
+    }
+  }
+
+  void _openCameraScanner() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => _CameraScannerPage(
+          onQRCodeScanned: _handleQRCodeResult,
+          isSuperAdmin: isSuperAdmin,
+        ),
+      ),
+    );
+  }
+
+  void _handleQRCodeResult(String qrData) {
+    // Close the camera scanner
+    Navigator.pop(context);
+    
+    // Process the QR code on this page (main scan screen)
+    _processQRCode(qrData);
+  }
+
+  // Move all the QR processing logic here
+  void _processQRCode(String qrData) {
+    try {
+      // Try to parse as JSON first
+      final data = json.decode(qrData);
+      
+      // Check if it's a Crucible Helper character QR code (new format)
+      if (data['game'] == 'Crucible' && data['playerName'] != null) {
+        _showCharacterQRResult(data);
+        return;
+      }
+      
+      // Check if it's a Monster Core QR code
+      if (data['game'] == 'Crucible' && data['label'] == 'Monster Core') {
+        _showMonsterCoreQRResult(data);
+        return;
+      }
+      
+      // Check if it's the old format
+      if (data['app'] == 'Crucible Helper' && data['playerName'] != null) {
+        _showCharacterQRResult(data);
+        return;
+      }
+      
+      // If it's JSON but not a character QR code, show unrecognized message
+      _showUnrecognizedQRCode();
+      
+    } catch (e) {
+      // If it's not JSON, show unrecognized message
+      _showUnrecognizedQRCode();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        title: Text('QR Scanner'),
+        backgroundColor: Colors.black,
+        actions: [
+          if (isSuperAdmin)
+            IconButton(
+              icon: Icon(Icons.print),
+              onPressed: _showMonsterCorePrintoutDialog,
+              tooltip: 'Generate Monster Core Printout',
+            ),
+        ],
+      ),
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              Icons.qr_code_scanner,
+              size: 120,
+              color: Colors.white,
+            ),
+            SizedBox(height: 40),
+            Text(
+              'QR Code Scanner',
+              style: TextStyle(
+                fontSize: 24,
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            SizedBox(height: 20),
+            Text(
+              'Scan Monster Cores and Character QR codes',
+              style: TextStyle(
+                fontSize: 16,
+                color: Colors.grey,
+              ),
+              textAlign: TextAlign.center,
+            ),
+            SizedBox(height: 60),
+            ElevatedButton(
+              onPressed: _openCameraScanner,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.amber,
+                foregroundColor: Colors.black,
+                padding: EdgeInsets.symmetric(horizontal: 40, vertical: 16),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8),
+                ),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.camera_alt, size: 24),
+                  SizedBox(width: 12),
+                  Text(
+                    'Start Scanning',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // All QR processing methods moved here
+  void _showMonsterCoreQRResult(Map<String, dynamic> data) async {
+    // Check if widget is still mounted
+    if (!mounted) return;
+    
+    try {
+      final isActive = data['isActive'];
+      
+      // Debug: Print the isActive value
+      print('🔍 Monster Core isActive value: $isActive (type: ${isActive.runtimeType})');
+
+      // First, check if core is active before doing anything else
+      // Handle both boolean false and string "false"
+      if (isActive == false || isActive == "false" || isActive == null) {
+        showDialog(
+          context: context,
+          builder: (BuildContext context) {
+            return AlertDialog(
+              title: Text('Inactive Monster Core'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.warning, color: Colors.orange, size: 48),
+                  SizedBox(height: 16),
+                  Text(
+                    'Please turn in core',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  ),
+                  SizedBox(height: 8),
+                  Text('This Monster Core is no longer active.'),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () {
+                    Navigator.of(context).pop();
+                  },
+                  child: Text('OK'),
+                ),
+              ],
+            );
+          },
+        );
+        return;
+      }
+
+      // Core is active - continue with processing
+      _showSuccess('Active Monster Core detected - processing...');
+      
+    } catch (e) {
+      print('Error showing monster core QR result: $e');
+      _showUnrecognizedQRCode();
+    }
+  }
+
+  void _showCharacterQRResult(Map<String, dynamic> data) {
+    // Character QR code processing
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Text('Character QR Code'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.person, color: Colors.blue, size: 48),
+              SizedBox(height: 16),
+              Text('Character QR code detected'),
+              Text('Player: ${data['playerName']}'),
+              if (data['characterName'] != null)
+                Text('Character: ${data['characterName']}'),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: Text('OK'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  void _showUnrecognizedQRCode() {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Text('Unrecognized QR Code'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.qr_code, color: Colors.grey, size: 48),
+              SizedBox(height: 16),
+              Text(
+                'This QR code is not recognized.',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 16),
+              ),
+              SizedBox(height: 8),
+              Text(
+                'Please scan a valid Monster Core or Character QR code.',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 14, color: Colors.grey),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: Text('OK'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  void _showMonsterCorePrintoutDialog() {
+    // Monster Core printout dialog
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Text('Generate Monster Core Printout'),
+          content: Text('This feature will be implemented soon.'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: Text('OK'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  void _showSuccess(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: Colors.green,
+      ),
+    );
+  }
+
+  void _showError(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: Colors.red,
+      ),
+    );
+  }
+}
+
+// Camera Scanner Page (actual camera interface)
+class _CameraScannerPage extends StatefulWidget {
+  final Function(String) onQRCodeScanned;
+  final bool isSuperAdmin;
+
+  const _CameraScannerPage({
+    required this.onQRCodeScanned,
+    required this.isSuperAdmin,
+  });
+
+  @override
+  _CameraScannerPageState createState() => _CameraScannerPageState();
+}
+
+class _CameraScannerPageState extends State<_CameraScannerPage> {
+  final GlobalKey qrKey = GlobalKey(debugLabel: 'QR');
+  QRViewController? controller;
+  String? lastScannedCode;
+  DateTime? lastScanTime;
+
+  @override
+  void initState() {
+    super.initState();
+  }
+
+  @override
+  void dispose() {
+    controller?.dispose();
+    super.dispose();
+  }
+
+  void _onQRViewCreated(QRViewController controller) {
+    this.controller = controller;
+    controller.scannedDataStream.listen((scanData) {
+      if (scanData.code != null) {
+        _handleQRCodeScan(scanData.code!);
+      }
+    });
+  }
+
+  void _handleQRCodeScan(String qrCode) {
+    final now = DateTime.now();
+    
+    // Debounce: Ignore scans of the same code within 2 seconds
+    if (lastScannedCode == qrCode && 
+        lastScanTime != null && 
+        now.difference(lastScanTime!).inSeconds < 2) {
+      return;
+    }
+    
+    // Update last scan info
+    lastScannedCode = qrCode;
+    lastScanTime = now;
+    
+    // Call the callback to pass the QR code back to the main page
+    widget.onQRCodeScanned(qrCode);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        title: Text('Scanning'),
+        backgroundColor: Colors.black,
+        actions: [
+          IconButton(
+            icon: Icon(Icons.flash_on),
+            onPressed: () async {
+              await controller?.toggleFlash();
+            },
+          ),
+          IconButton(
+            icon: Icon(Icons.flip_camera_ios),
+            onPressed: () async {
+              await controller?.flipCamera();
+            },
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          Expanded(
+            flex: 5,
+            child: QRView(
+              key: qrKey,
+              onQRViewCreated: _onQRViewCreated,
+            ),
+          ),
+          Expanded(
+            flex: 1,
+            child: Container(
+              color: Colors.black,
+              child: Center(
+                child: Text(
+                  'Point camera at QR code',
+                  style: TextStyle(
+                    fontSize: 16,
+                    color: Colors.white,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class ProfilePage extends StatefulWidget {
+  const ProfilePage({super.key});
+
+  @override
+  _ProfilePageState createState() => _ProfilePageState();
+}
+
+class _ProfilePageState extends State<ProfilePage> {
+    // Check if widget is still mounted
+    if (!mounted) return;
+    
+    try {
+      final isActive = data['isActive'];
+      
+      // Debug: Print the isActive value
+      print('🔍 Monster Core isActive value: $isActive (type: ${isActive.runtimeType})');
+
+      // First, check if core is active before doing anything else
+      // Handle both boolean false and string "false"
+      if (isActive == false || isActive == "false" || isActive == null) {
+        showDialog(
+          context: context,
+          builder: (BuildContext context) {
+            return AlertDialog(
+              title: Text('Inactive Monster Core'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.warning, color: Colors.orange, size: 48),
+                  SizedBox(height: 16),
+                  Text(
+                    'Please turn in core',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  ),
+                  SizedBox(height: 8),
+                  Text('This Monster Core is no longer active.'),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () {
+                    Navigator.of(context).pop();
+                    _resetScanState();
+                  },
+                  child: Text('OK'),
+                ),
+              ],
+            );
+          },
+        );
+        return;
+      }
+
+      // Core is active - now parse all the data and track the scan
+      final label = data['label'];
+      final tier = data['tier'];
+      final uniqueNumber = data['uniqueNumber'];
+      final timestamp = data['timestamp'];
+      final providedHash = data['verificationHash'];
+      final coreId = data['id'];
+
+      // Track the scan with location (don't await to avoid blocking UI)
+      _trackMonsterCoreScan(data).catchError((error) {
+        print('Error tracking scan: $error');
+      });
+
+      // Get current user's character data
+      final user = _auth.currentUser;
+      if (user == null) {
+        _showError('User not authenticated');
+        return;
+      }
+
+      // Get character data from Firebase Storage
+      final email = user.email;
+      if (email == null) {
+        _showError('Email not available');
+        return;
+      }
+
+      final ref = FirebaseStorage.instance.ref().child('users/$email/pc.json');
+      final dataBytes = await ref.getData();
+      if (dataBytes == null) {
+        _showError('Character data not found');
+        return;
+      }
+
+      final jsonString = utf8.decode(dataBytes);
+      final characterData = json.decode(jsonString);
+      final characterTier = characterData['cultivationTier'] ?? 'Iron';
+
+      // Compare tiers
+      final tierComparison = _compareTiers(characterTier, tier);
+      
+      // Show appropriate options based on tier comparison
+      _showMonsterCoreOptions(data, tierComparison, characterData);
+
+    } catch (e) {
+      print('Error showing monster core QR result: $e');
+      _showGenericQRResult(json.encode(data), 'Monster Core Data');
+    }
+  }
+
+  int _compareTiers(String characterTier, String coreTier) {
+    final tiers = ['Iron', 'Silver', 'Gold', 'Jade', 'Saint', 'Sovereign'];
+    final characterIndex = tiers.indexOf(characterTier);
+    final coreIndex = tiers.indexOf(coreTier);
+    
+    if (characterIndex == -1 || coreIndex == -1) return 0;
+    
+    return coreIndex - characterIndex; // Positive = core higher, negative = core lower
+  }
+
+  void _showMonsterCoreOptions(Map<String, dynamic> coreData, int tierDifference, Map<String, dynamic> characterData) {
+    final coreTier = coreData['tier'];
+    final characterTier = characterData['cultivationTier'] ?? 'Iron';
+    
+    String title;
+    List<Widget> options = [];
+    
+    if (tierDifference == 0) {
+      // Same tier
+      title = 'Monster Core - Same Tier';
+      options = [
+        _buildConsumeOption(coreData, characterData, 'Consume for Build'),
+        SizedBox(height: 12),
+        _buildAffinityOption(coreData, characterData, 'Slot for Affinity Points'),
+      ];
+    } else if (tierDifference == -1) {
+      // Core is 1 level lower
+      title = 'Monster Core - Lower Tier';
+      options = [
+        Text('You need to scan 9 more active cores of $coreTier tier to equal 1 core.'),
+        SizedBox(height: 16),
+        ElevatedButton(
+          onPressed: () {
+            Navigator.of(context).pop(); // Close current dialog first
+            _startLowerTierScanning(coreData, characterData);
+          },
+          child: Text('Start Scanning Lower Tier Cores'),
+        ),
+      ];
+    } else if (tierDifference == 1) {
+      // Core is 1 level higher
+      title = 'Monster Core - Higher Tier';
+      options = [
+        _buildAffinityOption(coreData, characterData, 'Slot for Affinity Points (Perfect Cultivation)'),
+      ];
+    } else if (tierDifference == 2) {
+      // Core is 2 levels higher
+      title = 'Monster Core - Much Higher Tier';
+      options = [
+        ElevatedButton(
+          onPressed: () => _resetBuild(coreData, characterData),
+          child: Text('Reset Build'),
+        ),
+      ];
+    } else {
+      // Too big difference
+      title = 'Monster Core - Tier Too Different';
+      options = [
+        Text('This core tier is too different from your cultivation tier.'),
+      ];
+    }
+
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Text(title),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: options,
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.of(context).pop();
+                _resetScanState();
+              },
+              child: Text('Cancel'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _buildConsumeOption(Map<String, dynamic> coreData, Map<String, dynamic> characterData, String title) {
+    // TODO: Get current consumption count and max from event attendee type
+    final currentConsumed = 0; // Get from database
+    final maxConsume = 4; // Get from event attendee type
+    
+    return ElevatedButton(
+      onPressed: currentConsumed < maxConsume ? () => _consumeForBuild(coreData, characterData) : null,
+      child: Text('$title ($currentConsumed of $maxConsume)'),
+    );
+  }
+
+  Widget _buildAffinityOption(Map<String, dynamic> coreData, Map<String, dynamic> characterData, String title) {
+    // TODO: Calculate current affinity points and max
+    final currentAffinity = 0; // Get from character
+    final maxAffinity = 10; // Calculate: build - 40 - current affinity
+    final unslotted = maxAffinity - currentAffinity;
+    
+    return ElevatedButton(
+      onPressed: unslotted > 0 ? () => _slotForAffinity(coreData, characterData) : null,
+      child: Text('$title ($unslotted Unslotted)'),
+    );
+  }
+
+  void _consumeForBuild(Map<String, dynamic> coreData, Map<String, dynamic> characterData) {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Text('Confirm Consumption'),
+          content: Text('This will add 1 Build.'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.of(context).pop();
+                _processConsumption(coreData, characterData, 'build');
+              },
+              child: Text('Confirm'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  void _slotForAffinity(Map<String, dynamic> coreData, Map<String, dynamic> characterData) {
+    final message = coreData['tier'] == characterData['cultivationTier'] 
+        ? 'This will add 1 Affinity Point.'
+        : 'This will add 1 Affinity Point and 0.1 perfect cultivation points.';
+    
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Text('Confirm Affinity Slot'),
+          content: Text(message),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.of(context).pop();
+                _processConsumption(coreData, characterData, 'affinity');
+              },
+              child: Text('Confirm'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  void _resetBuild(Map<String, dynamic> coreData, Map<String, dynamic> characterData) {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Text('Confirm Build Reset'),
+          content: Text('Reset Affinity Points to 0'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.of(context).pop();
+                _processConsumption(coreData, characterData, 'reset');
+              },
+              child: Text('Confirm'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  void _startLowerTierScanning(Map<String, dynamic> coreData, Map<String, dynamic> characterData) {
+    // Show the lower tier scanning dialog
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Text('Lower Tier Core Scanning'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.info, color: Colors.blue, size: 48),
+              SizedBox(height: 16),
+              Text(
+                'Scan 10 ${coreData['tier']} cores to equal 1 core of your tier.',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 16),
+              ),
+              SizedBox(height: 8),
+              Text(
+                'You can cancel at any time between scans.',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 14, color: Colors.grey),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.of(context).pop();
+                _resetScanState();
+              },
+              child: Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.of(context).pop();
+                // Start the scanning process
+                _beginLowerTierScanning(coreData, characterData);
+              },
+              child: Text('Start Scanning'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  void _beginLowerTierScanning(Map<String, dynamic> coreData, Map<String, dynamic> characterData) {
+    // For now, just show a message that this feature is coming soon
+    // In the future, this would track scanned cores and only process when 10 are collected
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Text('Feature Coming Soon'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.construction, color: Colors.orange, size: 48),
+              SizedBox(height: 16),
+              Text(
+                'Lower tier core scanning will be implemented soon!',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 16),
+              ),
+              SizedBox(height: 8),
+              Text(
+                'This feature will allow you to scan 10 lower tier cores to equal 1 core of your tier.',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 14, color: Colors.grey),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.of(context).pop();
+                _resetScanState();
+              },
+              child: Text('OK'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Future<Map<String, dynamic>?> _getPWALocation() async {
+    try {
+      // Check if geolocation is supported
+      if (!await Geolocator.isLocationServiceEnabled()) {
+        print('Location services not enabled');
+        return null;
+      }
+
+      // Get location with PWA-appropriate settings
+      final position = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.high,
+        timeLimit: Duration(seconds: 15), // Longer timeout for PWA
+      );
+      
+      return {
+        'latitude': position.latitude,
+        'longitude': position.longitude,
+        'accuracy': position.accuracy,
+        'timestamp': position.timestamp?.toIso8601String(),
+        'source': 'pwa_browser',
+      };
+    } catch (e) {
+      print('PWA location error: $e');
+      return null;
+    }
+  }
+
+  Future<void> _trackMonsterCoreScan(Map<String, dynamic> coreData) async {
+    try {
+      final user = _auth.currentUser;
+      if (user == null) return;
+
+      // Get PWA location
+      final locationData = await _getPWALocation();
+      
+      // Check if widget is still mounted
+      if (!mounted) return;
+      
+      // Get character data
+      final email = user.email;
+      if (email == null) return;
+
+      final ref = FirebaseStorage.instance.ref().child('users/$email/pc.json');
+      final dataBytes = await ref.getData();
+      if (dataBytes == null) return;
+
+      final jsonString = utf8.decode(dataBytes);
+      final characterData = json.decode(jsonString);
+
+      // Check if widget is still mounted
+      if (!mounted) return;
+
+      final idToken = await user.getIdToken();
+      
+      await http.post(
+        Uri.parse('https://us-central1-crucible-helper.cloudfunctions.net/trackMonsterCoreScan'),
+        headers: {
+          'Authorization': 'Bearer $idToken',
+          'Content-Type': 'application/json',
+        },
+        body: json.encode({
+          'coreId': coreData['id'],
+          'scanResult': 'scanned',
+          'characterData': characterData,
+          'locationData': locationData,
+        }),
+      );
+    } catch (e) {
+      print('Error tracking monster core scan: $e');
+      // Don't show error to user, just log it
+    }
+  }
+
+  void _processConsumption(Map<String, dynamic> coreData, Map<String, dynamic> characterData, String action) async {
+    try {
+      // Check if widget is still mounted before showing dialog
+      if (!mounted) return;
+      
+      // Show loading indicator
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (BuildContext context) {
+          return AlertDialog(
+            title: Text('Processing Consumption'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(height: 16),
+                Text('Getting location and processing...'),
+              ],
+            ),
+          );
+        },
+      );
+
+      // Get PWA location
+      final locationData = await _getPWALocation();
+      
+      // Check if widget is still mounted before closing dialog
+      if (!mounted) return;
+      
+      // Close loading dialog
+      Navigator.of(context).pop();
+      
+      // Continue with consumption logic
+      final user = _auth.currentUser;
+      if (user == null) {
+        if (mounted) _showError('User not authenticated');
+        return;
+      }
+
+      final idToken = await user.getIdToken();
+      
+      final response = await http.post(
+        Uri.parse('https://us-central1-crucible-helper.cloudfunctions.net/consumeMonsterCore'),
+        headers: {
+          'Authorization': 'Bearer $idToken',
+          'Content-Type': 'application/json',
+        },
+        body: json.encode({
+          'coreId': coreData['id'],
+          'consumptionType': action,
+          'characterData': characterData,
+          'locationData': locationData, // PWA location data
+        }),
+      );
+
+      // Check if widget is still mounted before showing results
+      if (!mounted) return;
+
+      if (response.statusCode == 200) {
+        _showSuccess('Consumption processed successfully!');
+      } else {
+        final errorData = json.decode(response.body);
+        _showError('Failed to process consumption: ${errorData['error'] ?? 'Unknown error'}');
+      }
+    } catch (error) {
+      // Check if widget is still mounted before handling error
+      if (!mounted) return;
+      
+      // Close loading dialog if still open
+      if (Navigator.of(context).canPop()) {
+        Navigator.of(context).pop();
+      }
+      print('❌ Error processing consumption: $error');
+      _showError('Error processing consumption: $error');
+    }
+  }
+
+  void _showCharacterQRResult(Map<String, dynamic> data) {
+    try {
+      final playerName = data['playerName'];
+      final characterName = data['characterName'];
+      final characterNumber = data['characterNumber'];
+      final cultivationTier = data['cultivationTier'];
+      final race = data['race'];
+      final timestamp = data['timestamp'];
+      final providedHash = data['verificationHash'];
+
+      // Check if hash exists and has the right format
+      final isValid = providedHash != null && providedHash.length == 8;
+
+      // Check if QR code is not too old (24 hours)
+      final qrTime = DateTime.fromMillisecondsSinceEpoch(timestamp);
+      final now = DateTime.now();
+      final difference = now.difference(qrTime);
+      final isExpired = difference.inHours > 24;
+
+      showDialog(
+        context: context,
+        builder: (BuildContext context) {
+          return AlertDialog(
+            title: Text('Character QR Code'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Container(
+                  padding: EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: isValid && !isExpired ? Colors.green.withOpacity(0.1) : Colors.orange.withOpacity(0.1),
+                    border: Border.all(color: isValid && !isExpired ? Colors.green : Colors.orange),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('Game: ${data['game'] ?? 'Crucible'}', style: TextStyle(fontWeight: FontWeight.bold)),
+                      Text('Player: ${data['playerName']}'),
+                      Text('Player Number: ${data['playerNumber']}'),
+                      Text('Email: ${data['playerEmail']}'),
+                      if (data['playerUid'] != null)
+                        Text('UID: ${data['playerUid']}', style: TextStyle(fontSize: 12, color: Colors.grey)),
+                      SizedBox(height: 8),
+                      Text('Generated: ${DateTime.fromMillisecondsSinceEpoch(data['timestamp']).toString().substring(0, 19)}'),
+                      if (data['verificationHash'] != null)
+                        Text('Verification: ${data['verificationHash']}', style: TextStyle(fontSize: 12, color: Colors.grey)),
+                      SizedBox(height: 8),
+                      if (!isValid)
+                        Text('⚠️ Verification hash mismatch', style: TextStyle(color: Colors.orange, fontWeight: FontWeight.bold)),
+                      if (isExpired)
+                        Text('⚠️ QR code is ${difference.inHours} hours old', style: TextStyle(color: Colors.orange, fontWeight: FontWeight.bold)),
+                    ],
+                  ),
+                ),
+                SizedBox(height: 16),
+                Text(
+                  'Would you like to check this person in for an event?',
+                  style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(),
+                child: Text('Cancel'),
+              ),
+              ElevatedButton(
+                onPressed: () {
+                  Navigator.of(context).pop();
+                  _showCheckInDialog(data);
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.blue,
+                  foregroundColor: Colors.white,
+                ),
+                child: Text('Check In'),
+              ),
+            ],
+          );
+        },
+      );
+    } catch (e) {
+      _showGenericQRResult(json.encode(data), 'Character Data (Error)');
+    }
+  }
+
+  void _showCheckInDialog(Map<String, dynamic> characterData) {
+    String attendingAs = characterData['characterName'] ?? '';
+    String characterNumber = characterData['characterNumber']?.toString() ?? '';
+
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return StatefulBuilder(
+          builder: (context, setState) {
+            return AlertDialog(
+              title: Text('Event Check-In'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Checking in: ${characterData['playerName']}'),
+                  Text('Character: ${characterData['characterName']}'),
+                  SizedBox(height: 16),
+                  TextField(
+                    decoration: InputDecoration(
+                      labelText: 'Attending As',
+                      hintText: 'Character name or "Player Name"',
+                      border: OutlineInputBorder(),
+                    ),
+                    controller: TextEditingController(text: attendingAs),
+                    onChanged: (value) => attendingAs = value,
+                  ),
+                  SizedBox(height: 8),
+                  TextField(
+                    decoration: InputDecoration(
+                      labelText: 'Character Number',
+                      hintText: 'Character number',
+                      border: OutlineInputBorder(),
+                    ),
+                    controller: TextEditingController(text: characterNumber),
+                    onChanged: (value) => characterNumber = value,
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: Text('Cancel'),
+                ),
+                ElevatedButton(
+                  onPressed: () async {
+                    Navigator.of(context).pop();
+                    await _submitCheckIn(characterData, attendingAs, characterNumber);
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.green,
+                    foregroundColor: Colors.white,
+                  ),
+                  child: Text('Submit Check-In'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Future<void> _submitCheckIn(Map<String, dynamic> characterData, String attendingAs, String characterNumber) async {
+    try {
+      // Get current user's ID token
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) {
+        _showError('You must be logged in to check someone in.');
+        return;
+      }
+
+      final idToken = await user.getIdToken();
+      if (idToken == null) {
+        _showError('Unable to get authentication token.');
+        return;
+      }
+
+      // Prepare check-in data
+      final checkInData = {
+        'idToken': idToken,
+        'eventAttendance': [
+          {
+            'timestamp': DateTime.now().toIso8601String(),
+            'attendingAs': attendingAs,
+            'characterNumber': characterNumber,
+          }
+        ]
+      };
+
+      // Submit to Firebase Function (same as advancement submission)
+      final String functionUrl = 'https://us-central1-crucible-helper.cloudfunctions.net/advancementIntake';
+      
+      print('Submitting check-in to: $functionUrl');
+      print('Check-in payload: ${json.encode(checkInData)}');
+      
+      final response = await http.post(
+        Uri.parse(functionUrl),
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: json.encode(checkInData),
+      );
+
+      print('Check-in response status: ${response.statusCode}');
+      print('Check-in response body: ${response.body}');
+
+      if (response.statusCode == 200) {
+        final responseData = json.decode(response.body);
+        if (responseData['ok'] == true) {
+          _showSuccess('Check-in successful!');
+        } else {
+          _showError('Check-in failed: ${responseData['message'] ?? 'Unknown error'}');
+        }
+      } else {
+        _showError('Check-in failed: HTTP ${response.statusCode}');
+      }
+    } catch (e) {
+      print('Check-in error details: $e');
+      _showError('Check-in failed: $e');
+    }
+  }
+
+  void _showSuccess(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: Colors.green,
+      ),
+    );
+  }
+
+  void _showError(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: Colors.red,
+      ),
+    );
+  }
+
+  void _showMonsterCorePrintoutDialog() {
+    final numberOfPagesController = TextEditingController();
+    String? selectedTier;
+    const tiers = ['Iron', 'Silver', 'Gold', 'Jade', 'Saint', 'Sovereign'];
+    
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return StatefulBuilder(
+          builder: (context, setState) {
+            return AlertDialog(
+              title: Text('Generate Monster Core Printout'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextField(
+                    controller: numberOfPagesController,
+                    decoration: InputDecoration(
+                      labelText: 'Number of Pages',
+                      hintText: 'Enter number of pages (1-100)',
+                    ),
+                    keyboardType: TextInputType.number,
+                  ),
+                  SizedBox(height: 16),
+                  DropdownButtonFormField<String>(
+                    value: selectedTier,
+                    decoration: InputDecoration(
+                      labelText: 'Tier',
+                      border: OutlineInputBorder(),
+                    ),
+                    hint: Text('Select tier'),
+                    items: tiers.map((tier) {
+                      return DropdownMenuItem<String>(
+                        value: tier,
+                        child: Text(tier),
+                      );
+                    }).toList(),
+                    onChanged: (value) {
+                      setState(() {
+                        selectedTier = value;
+                      });
+                    },
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: Text('Cancel'),
+                ),
+                ElevatedButton(
+                  onPressed: () async {
+                    final numberOfPages = int.tryParse(numberOfPagesController.text);
+                    
+                    if (numberOfPages == null) {
+                      _showError('Please enter a valid number of pages');
+                      return;
+                    }
+                    
+                    if (selectedTier == null) {
+                      _showError('Please select a tier');
+                      return;
+                    }
+                    
+                    if (numberOfPages < 1 || numberOfPages > 100) {
+                      _showError('Number of pages must be between 1 and 100');
+                      return;
+                    }
+                    
+                    Navigator.of(context).pop();
+                    await _generateMonsterCorePrintout(numberOfPages, selectedTier!);
+                  },
+                  child: Text('Generate'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Future<void> _generateMonsterCorePrintout(int numberOfPages, String tier) async {
+    try {
+      final user = _auth.currentUser;
+      if (user == null) {
+        _showError('User not authenticated');
+        return;
+      }
+
+      // Show loading dialog
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (BuildContext context) {
+          return AlertDialog(
+            title: Text('Generating Monster Core Printout'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(height: 16),
+                Text('Please wait while we generate your PDF...'),
+                Text('This may take a few moments.'),
+              ],
+            ),
+          );
+        },
+      );
+
+      final idToken = await user.getIdToken();
+      
+      final response = await http.post(
+        Uri.parse('https://us-central1-crucible-helper.cloudfunctions.net/generateMonsterCorePrintout'),
+        headers: {
+          'Authorization': 'Bearer $idToken',
+          'Content-Type': 'application/json',
+        },
+        body: json.encode({
+          'numberOfPages': numberOfPages,
+          'tier': tier,
+        }),
+      );
+
+      // Close loading dialog
+      Navigator.of(context).pop();
+
+      if (response.statusCode == 200) {
+        // For web, trigger download
+        if (kIsWeb) {
+          final blob = html.Blob([response.bodyBytes]);
+          final url = html.Url.createObjectUrlFromBlob(blob);
+          final anchor = html.AnchorElement(href: url)
+            ..setAttribute('download', 'monster_cores_tier_$tier.pdf')
+            ..click();
+          html.Url.revokeObjectUrl(url);
+        }
+        _showSuccess('Monster core printout generated successfully!');
+      } else {
+        final errorData = json.decode(response.body);
+        _showError('Failed to generate printout: ${errorData['error'] ?? 'Unknown error'}');
+      }
+    } catch (error) {
+      print('❌ Error generating monster core printout: $error');
+      _showError('Error generating printout: $error');
+    }
+  }
+
+  void _showUnrecognizedQRCode() {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Text('Unrecognized QR Code'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.qr_code, color: Colors.grey, size: 48),
+              SizedBox(height: 16),
+              Text(
+                'This QR code is not recognized.',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 16),
+              ),
+              SizedBox(height: 8),
+              Text(
+                'Please scan a valid Monster Core or Character QR code.',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 14, color: Colors.grey),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.of(context).pop();
+                _resetScanState();
+              },
+              child: Text('OK'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  void _showGenericQRResult(String data, String type) {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Text('QR Code Content'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Type: $type'),
+              SizedBox(height: 16),
+              Container(
+                width: double.maxFinite,
+                padding: EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade900,
+                  borderRadius: BorderRadius.circular(4),
+                  border: Border.all(color: Colors.grey.shade700),
+                ),
+                child: SelectableText(
+                  data,
+                  style: TextStyle(fontSize: 12, fontFamily: 'monospace', color: Colors.white),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: Text('Close'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    // Initialize camera scanner
+    _requestCameraPermission();
+    // Check super admin permissions
+    _checkSuperAdminPermissions();
+  }
+
+  @override
+  void dispose() {
+    controller?.dispose();
+    super.dispose();
+  }
+
+  void _onQRViewCreated(QRViewController controller) {
+    this.controller = controller;
+    controller.scannedDataStream.listen((scanData) {
+      if (scanData.code != null) {
+        _handleQRCodeScan(scanData.code!);
+      }
+    });
+  }
+
+  void _handleQRCodeScan(String qrCode) {
+    final now = DateTime.now();
+    
+    // Debounce: Ignore scans of the same code within 2 seconds
+    if (lastScannedCode == qrCode && 
+        lastScanTime != null && 
+        now.difference(lastScanTime!).inSeconds < 2) {
+      return;
+    }
+    
+    // Update last scan info
+    lastScannedCode = qrCode;
+    lastScanTime = now;
+    
+    // Process the QR code
+    _processQRCode(qrCode);
+  }
+
+  void _resetScanState() {
+    lastScannedCode = null;
+    lastScanTime = null;
+  }
+
+  Future<void> _requestCameraPermission() async {
+    try {
+      setState(() {
+        isScanning = true;
+      });
+      
+      print('🔍 Initializing camera scanner...');
+      
+      // Camera will be initialized when QRView is created
+      await Future.delayed(Duration(milliseconds: 500));
+      
+      setState(() {
+        isScanning = false;
+      });
+      
+      print('✅ Camera scanner initialized');
+      
+    } catch (e) {
+      print('❌ Camera initialization error: $e');
+      setState(() {
+        isScanning = false;
+      });
+      
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Camera access failed. Please ensure camera permissions are granted.'),
+          backgroundColor: Colors.red,
+          duration: Duration(seconds: 5),
+        ),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('QR Code Scanner'),
+        actions: [
+          if (isSuperAdmin)
+            IconButton(
+              icon: Icon(Icons.print),
+              onPressed: _showMonsterCorePrintoutDialog,
+              tooltip: 'Generate Monster Core Printout',
+            ),
+          IconButton(
+            icon: Icon(Icons.flash_on),
+            onPressed: () async {
+              await controller?.toggleFlash();
+            },
+          ),
+          IconButton(
+            icon: Icon(Icons.flip_camera_ios),
+            onPressed: () async {
+              await controller?.flipCamera();
+            },
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          Expanded(
+            flex: 5,
+            child: QRView(
+              key: qrKey,
+              onQRViewCreated: _onQRViewCreated,
+
+            ),
+          ),
+          Expanded(
+            flex: 1,
+            child: Center(
+              child: Text(
+                'Scan a QR code',
+                style: TextStyle(fontSize: 16),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+
+}
+
+class ProfilePage extends StatefulWidget {
+  const ProfilePage({super.key});
+
+  @override
+  _ProfilePageState createState() => _ProfilePageState();
+}
+
+class _ProfilePageState extends State<ProfilePage> {
+  final FirebaseAuth _auth = FirebaseAuth.instance;
+  Character? character;
+  bool isLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    fetchCharacterFromFirebase();
+  }
+
+  Future<bool> fetchCharacterFromFirebase() async {
+    try {
+      final user = _auth.currentUser;
+      final email = user?.email;
+      if (email == null) return false;
+
+      final ref = FirebaseStorage.instance.ref().child('users/$email/pc.json');
+      final data = await ref.getData();
+
+      if (data != null) {
+        final jsonString = utf8.decode(data);
+        final jsonMap = json.decode(jsonString);
+        final fetchedCharacter = Character.fromJson(jsonMap);
+        setState(() {
+          character = fetchedCharacter;
+          isLoading = false;
+        });
+        cachedCharacter = fetchedCharacter;
+        print('✅ Character updated');
+        
+        // Also try to download QR code (don't fail if it doesn't exist)
+        _downloadQRCode(email);
+        
+        return true;
+      }
+    } catch (e) {
+      print('❌ Failed to sync character: $e');
+    }
+    setState(() {
+      isLoading = false;
+    });
+    return false;
+  }
+
+  Future<String?> _downloadQRCode(String email) async {
+    try {
+      final qrRef = FirebaseStorage.instance.ref().child('users/$email/qr.png');
+      final data = await qrRef.getData();
+      if (data != null) {
+        print('✅ QR code downloaded');
+        return 'https://storage.googleapis.com/crucible-helper-storage/users/$email/qr.png';
+      }
+    } catch (e) {
+      print('⚠️ QR code not available: $e');
+    }
+    return null;
+  }
+
+  Future<void> signOut(BuildContext context) async {
+    await _auth.signOut();
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(builder: (_) => LoginPage()),
+    );
+  }
+  void checkForAppUpdate(BuildContext context) {
+    final serviceWorker = html.window.navigator.serviceWorker;
+
+    if (serviceWorker != null) {
+      serviceWorker.getRegistration().then((registration) {
+        registration.update(); // Ask the service worker to check for updates
+
+        registration.addEventListener('updatefound', (event) {
+          final newWorker = registration.installing;
+
+          newWorker?.addEventListener('statechange', (stateEvent) {
+            if (newWorker.state == 'installed') {
+              if (html.window.navigator.serviceWorker?.controller != null) {
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                  content: Text('Update found! Reloading...'),
+                ));
+                Future.delayed(Duration(seconds: 1), () {
+                  html.window.location.reload();
+                });
+              }
+            }
+          });
+        });
+
+      });
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('No Service Worker detected (not a PWA build?)'),
+      ));
+    }
+  }
+
+
+  @override
+  Widget build(BuildContext context) {
+    final user = _auth.currentUser;
+
+    return Scaffold(
+      appBar: AppBar(title: Text('Profile')),
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Text('Signed in as ${user?.email ?? "Unknown"}', style: TextStyle(fontSize: 18)),
+            SizedBox(height: 20),
+            
+            // Character Info Section
+            if (isLoading)
+              CircularProgressIndicator()
+            else if (character != null) ...[
+              Container(
+                padding: EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  border: Border.all(color: Colors.grey),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Column(
+                  children: [
+                    Text(
+                      'Character Information',
+                      style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                    ),
+                    SizedBox(height: 8),
+                    Text('Player: ${character!.playerName}'),
+                    Text('Character: ${character!.characterName}'),
+                    Text('Number: ${character!.characterNumber}'),
+                    Text('Tier: ${character!.cultivationTier}'),
+                    Text('Race: ${character!.race}'),
+                  ],
+                ),
+              ),
+              SizedBox(height: 20),
+              
+              // QR Code Display
+              _QRCodeDisplay(email: _auth.currentUser?.email ?? ''),
+              SizedBox(height: 20),
+            ] else ...[
+              Text('No character data available', style: TextStyle(color: Colors.grey)),
+              SizedBox(height: 20),
+            ],
+            
+            ElevatedButton(
+              onPressed: () async {
+                final scaffold = ScaffoldMessenger.of(context);
+                final user = _auth.currentUser;
+                final email = user?.email;
+
+                // 1. Sync character
+                final characterSuccess = await fetchCharacterFromFirebase();
+                scaffold.showSnackBar(SnackBar(
+                  content: Text(characterSuccess
+                      ? '✅ Character synced'
+                      : '❌ Failed to sync character'),
+                ));
+
+                // 2. Sync QR code
+                if (email != null) {
+                  try {
+                    await _downloadQRCode(email);
+                    scaffold.showSnackBar(SnackBar(
+                      content: Text('✅ QR code synced'),
+                    ));
+                  } catch (e) {
+                    scaffold.showSnackBar(SnackBar(
+                      content: Text('⚠️ QR code not available'),
+                    ));
+                  }
+                }
+
+                // 3. Sync rules.json
+                try {
+                  await RulesService.fetchAndCacheRules();
+                  scaffold.showSnackBar(SnackBar(
+                    content: Text('✅ Rules updated'),
+                  ));
+                } catch (e) {
+                  scaffold.showSnackBar(SnackBar(
+                    content: Text('❌ Failed to fetch rules: $e'),
+                  ));
+                }
+
+                // 4. Check for app update
+                checkForAppUpdate(context);
+              },
+              child: Text('🔄 Sync Everything'),
+            ),
+
+            SizedBox(height: 20),
+            ElevatedButton(
+              onPressed: () => signOut(context),
+              child: Text('Sign Out'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+
+}
+
+
+

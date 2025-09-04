@@ -13,13 +13,18 @@ dependencies:
 
   cupertino_icons: ^1.0.2
   http: ^1.1.0
-  qr_code_scanner: ^1.0.1
+  crypto: ^3.0.3
 
   firebase_core: ^3.13.0
   firebase_auth: ^5.5.2
   firebase_storage: ^12.4.5
   google_sign_in: ^6.2.1
   shared_preferences: ^2.2.2 
+  qr_code_scanner_plus: ^2.0.10+1
+  cloud_firestore: ^5.6.12
+  url_launcher: ^6.2.5
+  geolocator: ^10.1.0
+  path_provider: ^2.1.2
 
 dev_dependencies:
   flutter_test:
@@ -31,6 +36,7 @@ flutter:
 
   assets:
     - assets/logo.png
+    - assets/logo cropped.png
 
 
 fonts:

@@ -1,0 +1,78 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Allow authenticated users to read their own user data
+    match /users/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+    
+    // Allow authenticated users to read roles (for permission checking)
+    match /roles/{roleId} {
+      allow read: if request.auth != null;
+      allow write: if false; // Only allow admin writes through Firebase Console
+      
+      // Allow reading members subcollection
+      match /members/{memberId} {
+        allow read: if request.auth != null;
+        allow write: if false;
+      }
+    }
+    
+    // Allow authenticated users to read event registrations (for permission checking)
+    match /events/{eventId} {
+      allow read: if request.auth != null;
+      allow write: if false; // Only allow admin writes through Firebase Console
+      
+                      // Allow reading registrations subcollection
+                match /registrations/{userId} {
+                  allow read: if request.auth != null;
+                  allow write: if false;
+                }
+              }
+              
+              // Allow authenticated users to read events
+              match /events/{eventId} {
+                allow read: if request.auth != null;
+                allow write: if false; // Only allow admin writes through Firebase Console or Functions
+              }
+              
+              // Allow authenticated users to read locations
+              match /locations/{locationId} {
+                allow read: if request.auth != null;
+                allow write: if false; // Only allow admin writes through Firebase Console or Functions
+              }
+              
+                              // Allow authenticated users to read event types
+                match /event_types/{typeId} {
+                  allow read: if request.auth != null;
+                  allow write: if false; // Only allow admin writes through Firebase Console or Functions
+                }
+
+                // Allow authenticated users to read event attendee types
+                match /event_attendee_types/{attendeeTypeId} {
+                  allow read: if request.auth != null;
+                  allow write: if false; // Only allow admin writes through Firebase Console or Functions
+                }
+
+                // Allow authenticated users to read monster cores
+                match /monster_cores/{coreId} {
+                  allow read: if request.auth != null;
+                  allow write: if false; // Only allow admin writes through Firebase Console or Functions
+                }
+
+                // Allow authenticated users to read/write monster core scans
+                match /monster_core_scans/{scanId} {
+                  allow read, write: if request.auth != null;
+                }
+
+                // Allow authenticated users to read/write monster core consumptions
+                match /monster_core_consumptions/{consumptionId} {
+                  allow read, write: if request.auth != null;
+                }
+              
+              // Deny all other access
+              match /{document=**} {
+                allow read, write: if false;
+              }
+  }
+}
