@@ -260,7 +260,7 @@ exports.generateQRCode = onObjectFinalized({ secrets: [GAME_SECRET] }, async (ev
     // Extract required data for QR code
     const qrData = {
       game: "Crucible",
-      playerNumber: characterData.playerNumber || 0,
+      playerNumber: characterData.characterNumber || characterData.playerNumber || 0,
       playerName: characterData.playerName || "Unknown",
       playerEmail: userEmail,
       playerUid: playerUid,
@@ -2241,7 +2241,31 @@ exports.generateMonsterCorePrintout = onRequest({ secrets: [GAME_SECRET] }, asyn
     // Generate cores
     for (let i = 0; i < totalCores; i++) {
       const timestamp = Date.now() + i; // Ensure unique timestamps
-      const uniqueNumber = Math.floor(Math.random() * 1000000) + 1;
+      
+      // Generate unique number with collision checking
+      let uniqueNumber;
+      let isUnique = false;
+      let attempts = 0;
+      const maxAttempts = 100;
+
+      while (!isUnique && attempts < maxAttempts) {
+        uniqueNumber = Math.floor(Math.random() * 1000000) + 1;
+        
+        // Check if this number already exists in Firestore
+        const existingDoc = await db.collection('monster_cores').doc(uniqueNumber.toString()).get();
+        isUnique = !existingDoc.exists;
+        attempts++;
+        
+        if (!isUnique) {
+          console.log(`⚠️ Collision detected for number ${uniqueNumber}, trying again... (attempt ${attempts})`);
+        }
+      }
+
+      if (!isUnique) {
+        throw new Error(`Could not generate unique number after ${maxAttempts} attempts. Please try again.`);
+      }
+
+      console.log(`✅ Generated unique number: ${uniqueNumber} (attempt ${attempts})`);
       
       // Generate verification hash using Firebase Secret
       const secret = GAME_SECRET.value();
@@ -3449,19 +3473,19 @@ exports.tradeMonsterCore = onRequest(async (req, res) => {
     console.error('Error trading monster core:', error);
     
     // TRACKING: Update trade tracking to failed if we have a tracking ref
-    if (typeof tradeTrackingRef !== 'undefined') {
-      try {
+    try {
+      if (typeof tradeTrackingRef !== 'undefined') {
         await tradeTrackingRef.update({
           status: 'failed',
           error: error.message,
           failedAt: admin.firestore.FieldValue.serverTimestamp()
         });
-      } catch (trackingError) {
-        console.error('Error updating trade tracking:', trackingError);
       }
+    } catch (trackingError) {
+      console.error('Error updating trade tracking:', trackingError);
     }
     
-    return res.status(500).json({ ok: false, error: 'Internal server error' });
+    return res.status(500).json({ ok: false, error: 'Internal server error: ' + error.message });
   }
 });
 
@@ -4375,23 +4399,37 @@ exports.getPlayerCharacters = onRequest(async (req, res) => {
       return res.status(400).json({ ok: false, error: 'Cannot trade with yourself' });
     }
 
-    // Get target player's characters
-    const charactersQuery = await db.collection('characters')
-      .where('playerUid', '==', targetUid)
-      .get();
-
-    if (charactersQuery.empty) {
+    // Get target player's characters from new structure: players/{uid}/characters
+    console.log(`🔍 Looking for characters for target player ${targetUid} in new structure...`);
+    
+    const playerRef = db.collection('players').doc(targetUid);
+    const playerDoc = await playerRef.get();
+    
+    if (!playerDoc.exists) {
+      console.log(`❌ Player document not found for target user ${targetUid}`);
+      return res.status(404).json({ ok: false, error: 'Target player not found' });
+    }
+    
+    const charactersRef = playerRef.collection('characters');
+    const charactersSnapshot = await charactersRef.get();
+    
+    if (charactersSnapshot.empty) {
+      console.log(`❌ No characters found for target user ${targetUid}`);
       return res.status(404).json({ ok: false, error: 'Target player has no characters' });
     }
 
     const characters = [];
-    charactersQuery.forEach(doc => {
+    charactersSnapshot.forEach(doc => {
       const data = doc.data();
+      // Create character ID in the format expected by the frontend: {uid}_{characterNumber}
+      const characterId = `${targetUid}_${doc.id}`;
       characters.push({
-        id: doc.id,
-        playerName: data.playerName,
-        playerNumber: data.playerNumber,
-        race: data.race
+        id: characterId, // This is the format the frontend expects
+        characterNumber: doc.id, // The actual character number from the document ID
+        playerName: data.playerName || 'Unknown',
+        characterName: data.characterName || 'Unknown',
+        race: data.race || 'Unknown',
+        cultivationTier: data.cultivationTier || 'Unknown'
       });
     });
 

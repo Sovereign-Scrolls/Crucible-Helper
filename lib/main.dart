@@ -5,7 +5,6 @@ import 'dart:convert';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'firebase_options.dart';
 import 'shared/rules_service.dart';
@@ -17,7 +16,6 @@ import 'package:path_provider/path_provider.dart';
 import 'dart:io';
 
 import 'models/character.dart'; 
-import 'models/stored_core.dart';
 import 'pages/login_page.dart';
 import 'pages/events_page.dart';
 import 'config/app_config.dart';
@@ -1333,7 +1331,7 @@ class _QRScannerPageState extends State<QRScannerPage> {
         },
         body: json.encode({
           'coreId': coreId,
-          'characterNumber': cachedCharacter?.characterNumber?.toString() ?? 'main',
+          'characterNumber': cachedCharacter?.characterNumber.toString() ?? 'main',
         }),
       );
 
@@ -2644,7 +2642,7 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
       }
 
       final idToken = await user.getIdToken();
-      final characterNumber = widget.character.characterNumber?.toString() ?? 'main';
+      final characterNumber = widget.character.characterNumber.toString() ?? 'main';
       
       // Use the Firebase Function to get stored cores
       final response = await http.get(
@@ -2967,7 +2965,7 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
         ),
       );
 
-      final characterNumber = widget.character.characterNumber?.toString() ?? 'main';
+      final characterNumber = widget.character.characterNumber.toString() ?? 'main';
       final idToken = await user.getIdToken();
 
       final response = await http.post(
@@ -2988,7 +2986,7 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
         if (responseData['ok'] == true) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: Text('${tierName} core consumed successfully for ${usageType}!'),
+              content: Text('$tierName core consumed successfully for $usageType!'),
               backgroundColor: Colors.green,
             ),
           );
@@ -3146,7 +3144,7 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
         ),
       );
 
-      final characterNumber = widget.character.characterNumber?.toString() ?? 'main';
+      final characterNumber = widget.character.characterNumber.toString() ?? 'main';
       final idToken = await user.getIdToken();
 
       final response = await http.post(
@@ -3167,7 +3165,7 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
         if (responseData['ok'] == true) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: Text('${tierName} core slotted successfully for ${usageType}!'),
+              content: Text('$tierName core slotted successfully for $usageType!'),
               backgroundColor: Colors.green,
             ),
           );
@@ -3359,8 +3357,8 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
     );
   }
 
-  void _startTradeFlow(String tierName, int coreCount) {
-    Navigator.push(
+  void _startTradeFlow(String tierName, int coreCount) async {
+    final result = await Navigator.push<Map<String, dynamic>>(
       context,
       MaterialPageRoute(
         builder: (context) => TradeQRScannerPage(
@@ -3369,6 +3367,302 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
           fromCharacter: widget.character,
         ),
       ),
+    );
+    
+    // Handle the scanned data if we got a result
+    if (result != null) {
+      _processTradeQRData(result, tierName, coreCount);
+    }
+  }
+
+  void _processTradeQRData(Map<String, dynamic> qrData, String tierName, int coreCount) async {
+    try {
+      // Show loading modal
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (BuildContext context) {
+          return AlertDialog(
+            content: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(width: 20),
+                Text('Loading player characters...'),
+              ],
+            ),
+          );
+        },
+      );
+
+      // Handle profile QR code format (from generateQRCode function)
+      if (qrData.containsKey('game') && qrData['game'] == 'Crucible' && qrData.containsKey('playerUid')) {
+        final String uid = qrData['playerUid'];
+        if (uid.isEmpty) {
+          Navigator.of(context).pop(); // Close loading dialog
+          _showError('QR code has empty player ID. Please scan a valid player QR code.');
+          return;
+        }
+        
+        // Fetch the player's characters from the backend
+        _fetchPlayerCharactersForTrade(uid, qrData['playerName'] ?? 'Unknown Player', tierName, coreCount);
+        return;
+      }
+      
+      // Handle old format with direct character data
+      if (qrData.containsKey('uid') && qrData.containsKey('characters')) {
+        final String uid = qrData['uid'];
+        if (uid.isEmpty) {
+          Navigator.of(context).pop(); // Close loading dialog
+          _showError('QR code has empty player ID. Please scan a valid player QR code.');
+          return;
+        }
+        
+        // Check if trying to trade with yourself
+        final user = FirebaseAuth.instance.currentUser;
+        if (user != null && user.uid == uid) {
+          Navigator.of(context).pop(); // Close loading dialog
+          _showError('You cannot trade cores with yourself. Please scan another player\'s QR code.');
+          return;
+        }
+        
+        Navigator.of(context).pop(); // Close loading dialog
+        _showCharacterSelectionForTrade(qrData, tierName, coreCount);
+        return;
+      }
+      
+      Navigator.of(context).pop(); // Close loading dialog
+      _showError('This QR code is not a valid player profile. Please scan a player QR code from the Profile page.');
+    } catch (e) {
+      print('QR Code processing error: $e');
+      if (Navigator.of(context).canPop()) {
+        Navigator.of(context).pop(); // Close loading dialog
+      }
+      _showError('Invalid QR code format. Please scan a valid player QR code.\n\nError: ${e.toString()}');
+    }
+  }
+
+  void _fetchPlayerCharactersForTrade(String playerUid, String playerName, String tierName, int coreCount) async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) {
+        Navigator.of(context).pop(); // Close loading dialog
+        _showError('You must be logged in to trade cores.');
+        return;
+      }
+
+      // Check if trying to trade with yourself
+      if (user.uid == playerUid) {
+        Navigator.of(context).pop(); // Close loading dialog
+        _showError('You cannot trade cores with yourself. Please scan another player\'s QR code.');
+        return;
+      }
+
+      final idToken = await user.getIdToken();
+      final response = await http.post(
+        Uri.parse(AppConfig.getPlayerCharactersUrl),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $idToken',
+        },
+        body: json.encode({
+          'targetPlayerUid': playerUid,
+        }),
+      );
+
+      Navigator.of(context).pop(); // Close loading dialog
+
+      if (response.statusCode == 200) {
+        final responseData = json.decode(response.body);
+        if (responseData['ok'] == true) {
+          final characters = responseData['characters'] ?? [];
+          if (characters.isEmpty) {
+            _showError('This player has no characters available for trading.');
+            return;
+          }
+          
+          // Show character selection with fetched data
+          _showCharacterSelectionForTrade({
+            'uid': playerUid,
+            'characters': characters,
+            'playerName': playerName,
+          }, tierName, coreCount);
+        } else {
+          _showError(responseData['error'] ?? 'Failed to fetch player characters');
+        }
+      } else {
+        final errorData = json.decode(response.body);
+        _showError(errorData['error'] ?? 'Failed to fetch player characters');
+      }
+    } catch (e) {
+      print('Error fetching player characters: $e');
+      Navigator.of(context).pop(); // Close loading dialog
+      _showError('Error fetching player characters: ${e.toString()}');
+    }
+  }
+
+  void _showCharacterSelectionForTrade(Map<String, dynamic> playerData, String tierName, int coreCount) {
+    final String targetPlayerUid = playerData['uid'];
+    final List<dynamic> characters = playerData['characters'] ?? [];
+
+    if (characters.isEmpty) {
+      _showError('This player has no characters available for trading.');
+      return;
+    }
+
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Text('Select Target Character'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: characters.map<Widget>((character) {
+              return ListTile(
+                title: Text('Character ${character['characterNumber']}'),
+                subtitle: Text(character['characterName'] ?? 'Unknown'),
+                onTap: () {
+                  Navigator.of(context).pop();
+                  _confirmTrade(tierName, coreCount, targetPlayerUid, character['characterNumber'].toString());
+                },
+              );
+            }).toList(),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: Text('Cancel'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  void _confirmTrade(String tierName, int coreCount, String targetPlayerUid, String targetCharacterNumber) {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          backgroundColor: Colors.black,
+          title: Text('Confirm Trade', style: TextStyle(color: Colors.white)),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Trade Details:', style: TextStyle(color: Colors.white)),
+              SizedBox(height: 8),
+              Container(
+                padding: EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.grey[800],
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('From: ${widget.character.characterName} (Character ${widget.character.characterNumber})', style: TextStyle(color: Colors.white)),
+                    Text('To: Unknown (Character $targetCharacterNumber)', style: TextStyle(color: Colors.white)),
+                    Text('Item: 1 $tierName Core', style: TextStyle(color: Colors.white)),
+                  ],
+                ),
+              ),
+              SizedBox(height: 16),
+              Text('Are you sure you want to proceed with this trade?', style: TextStyle(color: Colors.white)),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: Text('Cancel', style: TextStyle(color: Colors.white)),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.of(context).pop();
+                _executeTradeFromCharacterSheet(targetPlayerUid, targetCharacterNumber, tierName);
+              },
+              child: Text('Confirm Trade', style: TextStyle(color: Colors.black)),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  void _executeTradeFromCharacterSheet(String targetPlayerUid, String targetCharacterNumber, String tierName) async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) {
+        _showError('You must be logged in to trade cores.');
+        return;
+      }
+
+      final idToken = await user.getIdToken();
+      final requestBody = {
+        'tier': tierName,
+        'fromCharacterNumber': widget.character.characterNumber.toString(),
+        'toPlayerUid': targetPlayerUid,
+        'toCharacterNumber': targetCharacterNumber,
+      };
+      
+      print('🔄 Sending trade request: $requestBody');
+      
+      final response = await http.post(
+        Uri.parse(AppConfig.tradeMonsterCoreUrl),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $idToken',
+        },
+        body: json.encode(requestBody),
+      );
+
+      if (response.statusCode == 200) {
+        final responseData = json.decode(response.body);
+        if (responseData['ok'] == true) {
+          _showTradeSuccess(responseData);
+        } else {
+          _showError(responseData['error'] ?? 'Trade failed');
+        }
+      } else {
+        print('❌ Trade HTTP error ${response.statusCode}: ${response.body}');
+        try {
+          final errorData = json.decode(response.body);
+          _showError(errorData['error'] ?? 'Trade failed with status ${response.statusCode}');
+        } catch (jsonError) {
+          _showError('Trade failed with status ${response.statusCode}. Response: ${response.body}');
+        }
+      }
+    } catch (e) {
+      print('❌ Trade execution error: $e');
+      _showError('Error executing trade: $e');
+    }
+  }
+
+  void _showTradeSuccess(Map<String, dynamic> responseData) {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Row(
+            children: [
+              Icon(Icons.check_circle, color: Colors.green),
+              SizedBox(width: 8),
+              Text('Trade Successful'),
+            ],
+          ),
+          content: Text(responseData['message'] ?? 'Core traded successfully!'),
+          actions: [
+            ElevatedButton(
+              onPressed: () {
+                Navigator.of(context).pop();
+                // Refresh the stored cores display
+                setState(() {});
+              },
+              child: Text('OK'),
+            ),
+          ],
+        );
+      },
     );
   }
 
@@ -3861,44 +4155,6 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
     }
   }
 
-  void _showTradeSuccess(String message) {
-    showDialog(
-      context: context,
-      builder: (BuildContext context) {
-        return AlertDialog(
-          title: Row(
-            children: [
-              Icon(Icons.check_circle, color: Colors.green),
-              SizedBox(width: 8),
-              Text('Trade Successful'),
-            ],
-          ),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(Icons.swap_horiz, color: Colors.purple, size: 48),
-              SizedBox(height: 16),
-              Text(
-                message,
-                textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 16),
-              ),
-            ],
-          ),
-          actions: [
-            ElevatedButton(
-              onPressed: () => Navigator.of(context).pop(),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.green,
-                foregroundColor: Colors.white,
-              ),
-              child: Text('OK'),
-            ),
-          ],
-        );
-      },
-    );
-  }
 
   Future<void> _syncCharacterData() async {
     // Show loading indicator
@@ -6574,11 +6830,11 @@ class TradeQRScannerPage extends StatefulWidget {
   final Character fromCharacter;
 
   const TradeQRScannerPage({
-    Key? key,
+    super.key,
     required this.tierName,
     required this.coreCount,
     required this.fromCharacter,
-  }) : super(key: key);
+  });
 
   @override
   _TradeQRScannerPageState createState() => _TradeQRScannerPageState();
@@ -6625,6 +6881,13 @@ class _TradeQRScannerPageState extends State<TradeQRScannerPage> {
       scannedData = code;
     });
     
+    // Stop the camera immediately after scan (skip on web due to UnimplementedError)
+    try {
+      controller?.pauseCamera();
+    } catch (e) {
+      print('Camera pause not supported on this platform: $e');
+    }
+    
     _processScannedData(code);
   }
 
@@ -6632,239 +6895,41 @@ class _TradeQRScannerPageState extends State<TradeQRScannerPage> {
     try {
       // Check if the data looks like JSON
       if (!data.trim().startsWith('{') || !data.trim().endsWith('}')) {
-        _showError('This doesn\'t appear to be a valid player QR code. Please scan a player QR code.');
+        if (mounted) {
+          _showError('This doesn\'t appear to be a valid player QR code. Please scan a player QR code.');
+        }
         return;
       }
 
       // Parse the QR code data
       final Map<String, dynamic> playerData = json.decode(data);
       
-      // Handle profile QR code format (from generateQRCode function)
+      // Validate the QR code format
       if (playerData.containsKey('game') && playerData['game'] == 'Crucible' && playerData.containsKey('playerUid')) {
-        final String uid = playerData['playerUid'];
-        if (uid.isEmpty) {
-          _showError('QR code has empty player ID. Please scan a valid player QR code.');
-          return;
-        }
-        
-        // Fetch the player's characters from the backend
-        _fetchPlayerCharacters(uid, playerData['playerName'] ?? 'Unknown Player');
+        // Profile QR code format - return the data
+        Navigator.of(context).pop(playerData);
         return;
       }
       
-      // Handle old format with direct character data
       if (playerData.containsKey('uid') && playerData.containsKey('characters')) {
-        final String uid = playerData['uid'];
-        if (uid.isEmpty) {
-          _showError('QR code has empty player ID. Please scan a valid player QR code.');
-          return;
-        }
-        
-        // Check if trying to trade with yourself
-        final user = FirebaseAuth.instance.currentUser;
-        if (user != null && user.uid == uid) {
-          _showError('You cannot trade cores with yourself. Please scan another player\'s QR code.');
-          return;
-        }
-        
-        _showCharacterSelection(playerData);
+        // Old format with direct character data - return the data
+        Navigator.of(context).pop(playerData);
         return;
       }
       
-      _showError('This QR code is not a valid player profile. Please scan a player QR code from the Profile page.');
+      if (mounted) {
+        _showError('This QR code is not a valid player profile. Please scan a player QR code from the Profile page.');
+      }
     } catch (e) {
       print('QR Code parsing error: $e');
-      _showError('Invalid QR code format. Please scan a valid player QR code.\n\nError: ${e.toString()}');
-    }
-  }
-
-  void _showCharacterSelection(Map<String, dynamic> playerData) {
-    final String targetPlayerUid = playerData['uid'];
-    final List<dynamic> characters = playerData['characters'] ?? [];
-
-    if (characters.isEmpty) {
-      _showError('This player has no characters available for trading.');
-      return;
-    }
-
-    showDialog(
-      context: context,
-      builder: (BuildContext context) {
-        return AlertDialog(
-          title: Text('Select Target Character'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text('Choose which character to trade the ${widget.tierName} core to:'),
-              SizedBox(height: 16),
-              ...characters.map<Widget>((character) {
-                return ListTile(
-                  leading: Icon(Icons.person),
-                  title: Text('Character ${character['characterNumber']}'),
-                  subtitle: Text('${character['name'] ?? 'Unknown'} - ${character['cultivationTier'] ?? 'Unknown'}'),
-                  onTap: () {
-                    Navigator.of(context).pop();
-                    _confirmTrade(
-                      targetPlayerUid,
-                      character['characterNumber'].toString(),
-                      character['name'] ?? 'Unknown',
-                    );
-                  },
-                );
-              }).toList(),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () {
-                Navigator.of(context).pop();
-                _resetScanner();
-              },
-              child: Text('Cancel'),
-            ),
-          ],
-        );
-      },
-    );
-  }
-
-  void _confirmTrade(String targetPlayerUid, String targetCharacterNumber, String targetCharacterName) {
-    showDialog(
-      context: context,
-      builder: (BuildContext context) {
-        return AlertDialog(
-          title: Text('Confirm Trade'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text('Trade Details:'),
-              SizedBox(height: 16),
-              Container(
-                padding: EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: Colors.blue.shade50,
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: Colors.blue.shade300),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text('From: ${widget.fromCharacter.characterName} (Character ${widget.fromCharacter.characterNumber})'),
-                    Text('To: $targetCharacterName (Character $targetCharacterNumber)'),
-                    Text('Item: 1 ${widget.tierName} Core'),
-                  ],
-                ),
-              ),
-              SizedBox(height: 16),
-              Text('Are you sure you want to proceed with this trade?'),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: Text('Cancel'),
-            ),
-            ElevatedButton(
-              onPressed: () {
-                Navigator.of(context).pop();
-                _executeTrade(targetPlayerUid, targetCharacterNumber);
-              },
-              child: Text('Confirm Trade'),
-            ),
-          ],
-        );
-      },
-    );
-  }
-
-  void _executeTrade(String targetPlayerUid, String targetCharacterNumber) async {
-    try {
-      final user = FirebaseAuth.instance.currentUser;
-      if (user == null) {
-        _showError('You must be logged in to trade cores.');
-        return;
+      if (mounted) {
+        _showError('Invalid QR code format. Please scan a valid player QR code.\n\nError: ${e.toString()}');
       }
-
-      final idToken = await user.getIdToken();
-      final response = await http.post(
-        Uri.parse('${AppConfig.tradeMonsterCoreUrl}'),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer $idToken',
-        },
-        body: json.encode({
-          'tier': widget.tierName,
-          'fromCharacterNumber': widget.fromCharacter.characterNumber,
-          'toPlayerUid': targetPlayerUid,
-          'toCharacterNumber': targetCharacterNumber,
-        }),
-      );
-
-      if (response.statusCode == 200) {
-        final responseData = json.decode(response.body);
-        if (responseData['ok'] == true) {
-          _showSuccess(responseData);
-        } else {
-          _showError(responseData['error'] ?? 'Trade failed');
-        }
-      } else {
-        final errorData = json.decode(response.body);
-        _showError(errorData['error'] ?? 'Trade failed with status ${response.statusCode}');
-      }
-    } catch (e) {
-      _showError('Error executing trade: $e');
     }
-  }
-
-  void _showSuccess(Map<String, dynamic> responseData) {
-    showDialog(
-      context: context,
-      builder: (BuildContext context) {
-        return AlertDialog(
-          title: Row(
-            children: [
-              Icon(Icons.check_circle, color: Colors.green),
-              SizedBox(width: 8),
-              Text('Trade Successful'),
-            ],
-          ),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text('Your ${widget.tierName} core has been traded successfully!'),
-              SizedBox(height: 16),
-              Container(
-                padding: EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: Colors.green.shade50,
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: Colors.green.shade300),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text('Remaining ${widget.tierName} cores: ${responseData['sourceCountAfter']}'),
-                    Text('Target now has: ${responseData['targetCountAfter']} ${widget.tierName} core(s)'),
-                  ],
-                ),
-              ),
-            ],
-          ),
-          actions: [
-            ElevatedButton(
-              onPressed: () {
-                Navigator.of(context).pop();
-                Navigator.of(context).pop(); // Go back to character sheet
-              },
-              child: Text('OK'),
-            ),
-          ],
-        );
-      },
-    );
   }
 
   void _showError(String message) {
+    if (!mounted) return;
     showDialog(
       context: context,
       builder: (BuildContext context) {
@@ -6904,73 +6969,13 @@ class _TradeQRScannerPageState extends State<TradeQRScannerPage> {
       isScanning = true;
       scannedData = null;
     });
-    // Restart the camera if needed
-    controller?.resumeCamera();
-    print('QR scanner reset complete');
-  }
-
-  void _fetchPlayerCharacters(String playerUid, String playerName) async {
+    // Restart the camera if needed (skip on web due to UnimplementedError)
     try {
-      final user = FirebaseAuth.instance.currentUser;
-      if (user == null) {
-        _showError('You must be logged in to trade cores.');
-        return;
-      }
-
-      // Check if trying to trade with yourself
-      if (user.uid == playerUid) {
-        _showError('You cannot trade cores with yourself. Please scan another player\'s QR code.');
-        return;
-      }
-
-      final idToken = await user.getIdToken();
-      final response = await http.post(
-        Uri.parse('${AppConfig.getPlayerCharactersUrl}'),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer $idToken',
-        },
-        body: json.encode({
-          'targetPlayerUid': playerUid,
-        }),
-      );
-
-      if (response.statusCode == 200) {
-        final responseData = json.decode(response.body);
-        if (responseData['ok'] == true) {
-          final characters = responseData['characters'] ?? [];
-          if (characters.isEmpty) {
-            _showError('This player has no characters available for trading.');
-            return;
-          }
-          
-          // Show character selection with fetched data
-          _showCharacterSelection({
-            'uid': playerUid,
-            'characters': characters,
-            'playerName': playerName,
-          });
-        } else {
-          _showError(responseData['error'] ?? 'Failed to fetch player characters');
-        }
-      } else {
-        final errorData = json.decode(response.body);
-        _showError(errorData['error'] ?? 'Failed to fetch player characters');
-      }
+      controller?.resumeCamera();
     } catch (e) {
-      _showError('Error fetching player characters: $e');
+      print('Camera resume not supported on this platform: $e');
     }
-  }
-
-  void _testQRCode() {
-    // Test with a sample QR code data
-    final testData = '{"uid": "test123", "characters": [{"characterNumber": 1, "name": "Test Character", "cultivationTier": "Iron"}]}';
-    print('Testing with sample QR data: $testData');
-    setState(() {
-      isScanning = false;
-      scannedData = testData;
-    });
-    _processScannedData(testData);
+    print('QR scanner reset complete');
   }
 
   @override
@@ -6998,56 +7003,41 @@ class _TradeQRScannerPageState extends State<TradeQRScannerPage> {
             ),
           ),
           Container(
-            height: 120,
-            padding: EdgeInsets.all(12),
+            height: 100,
+            padding: EdgeInsets.all(8),
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 Icon(
                   Icons.qr_code_scanner,
-                  size: 32,
+                  size: 24,
                   color: Colors.blue,
                 ),
-                SizedBox(height: 8),
+                SizedBox(height: 4),
                 Text(
                   'Scan player QR code',
                   textAlign: TextAlign.center,
-                  style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500),
                 ),
                 if (scannedData != null) ...[
-                  SizedBox(height: 4),
+                  SizedBox(height: 2),
                   Text(
                     'Processing...',
                     style: TextStyle(
-                      color: Colors.orange,
+                      color: Colors.white,
                       fontWeight: FontWeight.bold,
-                      fontSize: 12,
+                      fontSize: 10,
                     ),
                   ),
                 ] else if (isScanning) ...[
-                  SizedBox(height: 8),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                    children: [
-                      ElevatedButton(
-                        onPressed: () {
-                          _testQRCode();
-                        },
-                        style: ElevatedButton.styleFrom(
-                          padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                        ),
-                        child: Text('Test QR', style: TextStyle(fontSize: 12)),
-                      ),
-                      ElevatedButton(
-                        onPressed: () {
-                          _resetScanner();
-                        },
-                        style: ElevatedButton.styleFrom(
-                          padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                        ),
-                        child: Text('Reset', style: TextStyle(fontSize: 12)),
-                      ),
-                    ],
+                  SizedBox(height: 4),
+                  ElevatedButton.icon(
+                    onPressed: _resetScanner,
+                    icon: Icon(Icons.refresh, size: 14),
+                    label: Text('Reset', style: TextStyle(fontSize: 10)),
+                    style: ElevatedButton.styleFrom(
+                      padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    ),
                   ),
                 ],
               ],
