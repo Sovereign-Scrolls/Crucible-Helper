@@ -1664,7 +1664,7 @@ class _EventsPageState extends State<EventsPage> {
                   ),
                   SizedBox(height: 16),
                   DropdownButtonFormField<EventAttendeeType>(
-                    value: selectedAttendeeType,
+                    initialValue: selectedAttendeeType,
                     style: TextStyle(color: Colors.white),
                     dropdownColor: Colors.grey[800],
                     decoration: InputDecoration(
@@ -2390,7 +2390,7 @@ class _CreateEventModalState extends State<_CreateEventModal> {
                                 ),
                                 SizedBox(height: 8),
                                 DropdownButtonFormField<Location>(
-                                  value: _selectedLocation,
+                                  initialValue: _selectedLocation,
                                   decoration: InputDecoration(
                                     border: OutlineInputBorder(),
                                     contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -2456,7 +2456,7 @@ class _CreateEventModalState extends State<_CreateEventModal> {
                                 ),
                                 SizedBox(height: 8),
                                 DropdownButtonFormField<EventType>(
-                                  value: _selectedType,
+                                  initialValue: _selectedType,
                                   decoration: InputDecoration(
                                     border: OutlineInputBorder(),
                                     contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -2834,7 +2834,7 @@ class _CreateLocationModalState extends State<_CreateLocationModal> {
                       ),
                       SizedBox(height: 8),
                       DropdownButtonFormField<String>(
-                        value: _selectedTimezone,
+                        initialValue: _selectedTimezone,
                         decoration: InputDecoration(
                           border: OutlineInputBorder(),
                           contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -3020,7 +3020,7 @@ class _CreateEventTypeModalState extends State<_CreateEventTypeModal> {
             children: [
               // Day of Week Selection
               DropdownButtonFormField<String>(
-                value: selectedDay,
+                initialValue: selectedDay,
                 style: TextStyle(color: Colors.white),
                 dropdownColor: Colors.grey[800],
                 decoration: InputDecoration(
@@ -3043,7 +3043,7 @@ class _CreateEventTypeModalState extends State<_CreateEventTypeModal> {
               ListTile(
                 title: Text('Start Time', style: TextStyle(color: Colors.white)),
                 subtitle: Text(
-                  startTime != null ? startTime.format(context) : 'Tap to select',
+                  'Tap to select',
                   style: TextStyle(color: Colors.grey),
                 ),
                 onTap: () async {
@@ -3060,7 +3060,7 @@ class _CreateEventTypeModalState extends State<_CreateEventTypeModal> {
               ListTile(
                 title: Text('End Time', style: TextStyle(color: Colors.white)),
                 subtitle: Text(
-                  endTime != null ? endTime.format(context) : 'Tap to select',
+                  'Tap to select',
                   style: TextStyle(color: Colors.grey),
                 ),
                 onTap: () async {
@@ -6472,7 +6472,7 @@ class _EditLocationModalState extends State<_EditLocationModal> {
                       ),
                       SizedBox(height: 8),
                       DropdownButtonFormField<String>(
-                        value: _selectedTimezone,
+                        initialValue: _selectedTimezone,
                         decoration: InputDecoration(
                           border: OutlineInputBorder(),
                           contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -7381,7 +7381,7 @@ class _EditEventModalState extends State<_EditEventModal> {
                       ),
                       SizedBox(height: 8),
                       DropdownButtonFormField<Location>(
-                        value: _selectedLocation,
+                        initialValue: _selectedLocation,
                         style: TextStyle(color: Colors.white),
                         dropdownColor: Colors.grey[800],
                         decoration: InputDecoration(
@@ -7419,7 +7419,7 @@ class _EditEventModalState extends State<_EditEventModal> {
                       ),
                       SizedBox(height: 8),
                       DropdownButtonFormField<EventType>(
-                        value: _selectedType,
+                        initialValue: _selectedType,
                         style: TextStyle(color: Colors.white),
                         dropdownColor: Colors.grey[800],
                         decoration: InputDecoration(
@@ -7783,7 +7783,7 @@ class _RegisterForEventModalState extends State<_RegisterForEventModal> {
           ),
           SizedBox(height: 8),
           DropdownButtonFormField<EventAttendeeType>(
-            value: _selectedAttendeeType,
+            initialValue: _selectedAttendeeType,
             style: TextStyle(color: Colors.white),
             dropdownColor: Colors.grey[800],
             decoration: InputDecoration(

@@ -1601,7 +1601,7 @@ class _QRScannerPageState extends State<QRScannerPage> {
                       labelText: 'Tier',
                       border: OutlineInputBorder(),
                     ),
-                    value: selectedTier,
+                    initialValue: selectedTier,
                     items: [
                       'Iron',
                       'Silver', 
@@ -2607,6 +2607,113 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
   Future<String?> _getLastSubmissionTimestamp() async {
     final prefs = await SharedPreferences.getInstance();
     return prefs.getString('last_submission_timestamp');
+  }
+
+  // Submit unsubmitted advancement to Google App Script
+  Future<void> _submitAdvancementToGoogleAppScript(BuildContext context) async {
+    print('DEBUG: Starting submission process...');
+    print('DEBUG: _unsubmittedAdvancement = $_unsubmittedAdvancement');
+    
+    if (_unsubmittedAdvancement == null || 
+        (_unsubmittedAdvancement!.affinityChanges.isEmpty && 
+         _unsubmittedAdvancement!.skillChanges.isEmpty && 
+         _unsubmittedAdvancement!.essenceChanges.isEmpty)) {
+      print('DEBUG: No unsubmitted changes to submit');
+      return;
+    }
+    
+    print('DEBUG: Found unsubmitted changes - proceeding with submission');
+
+    try {
+      // Get current user and ID token
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) {
+        throw Exception('User not authenticated');
+      }
+
+      // Get ID token
+      final idToken = await user.getIdToken();
+      if (idToken == null) {
+        throw Exception('Failed to get authentication token');
+      }
+
+      // Prepare the payload
+      final payload = {
+        'idToken': idToken,
+        ..._unsubmittedAdvancement!.toJson(),
+      };
+
+      // Submit to Google App Script
+      final response = await _submitToGoogleAppScript(payload);
+
+      print('DEBUG: Submission response: $response');
+      
+      if (response['ok'] == true) {
+        print('DEBUG: Submission successful - clearing unsubmitted changes');
+        // Success - record submission timestamp and clear the unsubmitted advancement
+        final submissionTimestamp = DateTime.now().toIso8601String();
+        await _saveSubmissionTimestamp(submissionTimestamp);
+        await _clearUnsubmittedAdvancement();
+        
+        // Show success message
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('✅ Advancement submitted successfully! Please wait for your character data to be updated.'),
+              backgroundColor: Colors.green,
+            ),
+          );
+        }
+      } else {
+        // Error - show error message
+        final errorMessage = response['message'] ?? 'Unknown error occurred';
+        print('DEBUG: Submission failed: $errorMessage');
+        throw Exception('Submission failed: $errorMessage');
+      }
+
+    } catch (e) {
+      print('Error submitting advancement: $e');
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('❌ Failed to submit advancement: ${e.toString()}'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  // Submit payload to Firebase Function (proxy to Google Apps Script)
+  Future<Map<String, dynamic>> _submitToGoogleAppScript(Map<String, dynamic> payload) async {
+    // Use Firebase Function as proxy to Google Apps Script
+    final String functionUrl = 'https://us-central1-crucible-helper.cloudfunctions.net/advancementIntake';
+    
+    try {
+      print('Submitting payload to: $functionUrl');
+      print('Payload: ${json.encode(payload)}');
+      
+      final response = await http.post(
+        Uri.parse(functionUrl),
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: json.encode(payload),
+      );
+
+      print('Response status: ${response.statusCode}');
+      print('Response body: ${response.body}');
+
+      if (response.statusCode == 200) {
+        final responseData = json.decode(response.body);
+        return responseData;
+      } else {
+        throw Exception('HTTP ${response.statusCode}: ${response.body}');
+      }
+    } catch (e) {
+      print('Error in _submitToGoogleAppScript: $e');
+      rethrow;
+    }
   }
 
   void _showStoredCores() async {
@@ -4333,67 +4440,115 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
           ],
         ),
         actions: [
-          IconButton(
-            icon: Icon(Icons.inventory),
-            onPressed: _showStoredCores,
-            tooltip: 'Stored Cores',
-          ),
-          IconButton(
-            icon: Icon(Icons.sync),
-            onPressed: _syncCharacterData,
-            tooltip: 'Sync Character Data',
-          ),
-          IconButton(
-            icon: Icon(_isEditMode ? Icons.save : Icons.edit),
-            onPressed: () async {
-              if (!_isEditMode) {
-                // Check if we can enter edit mode
-                final lastSubmissionTimestamp = await _getLastSubmissionTimestamp();
-                final characterGeneratedAt = widget.character.generatedAt;
-                
-                if (lastSubmissionTimestamp != null && characterGeneratedAt != null) {
-                  final submissionTime = DateTime.parse(lastSubmissionTimestamp);
-                  final characterTime = DateTime.parse(characterGeneratedAt);
-                  
-                  if (characterTime.isBefore(submissionTime)) {
-                    // Character data is older than last submission - show warning
-                    if (context.mounted) {
-                      showDialog(
-                        context: context,
-                        builder: (BuildContext context) {
-                          return AlertDialog(
-                            title: Text('Pending Processing'),
-                            content: Text('Your character advancement has been submitted and is being processed. Please wait for your character data to be updated before making new changes.'),
-                            actions: [
-                              TextButton(
-                                onPressed: () => Navigator.of(context).pop(),
-                                child: Text('OK'),
-                              ),
-                            ],
+          PopupMenuButton<String>(
+            icon: Icon(Icons.more_vert),
+            onSelected: (value) async {
+              switch (value) {
+                case 'submit':
+                  await _submitAdvancementToGoogleAppScript(context);
+                  break;
+                case 'cores':
+                  _showStoredCores();
+                  break;
+                case 'sync':
+                  _syncCharacterData();
+                  break;
+                case 'edit':
+                  if (!_isEditMode) {
+                    // Check if we can enter edit mode
+                    final lastSubmissionTimestamp = await _getLastSubmissionTimestamp();
+                    final characterGeneratedAt = widget.character.generatedAt;
+                    
+                    if (lastSubmissionTimestamp != null && characterGeneratedAt != null) {
+                      final submissionTime = DateTime.parse(lastSubmissionTimestamp);
+                      final characterTime = DateTime.parse(characterGeneratedAt);
+                      
+                      if (characterTime.isBefore(submissionTime)) {
+                        // Character data is older than last submission - show warning
+                        if (context.mounted) {
+                          showDialog(
+                            context: context,
+                            builder: (BuildContext context) {
+                              return AlertDialog(
+                                title: Text('Pending Processing'),
+                                content: Text('Your character advancement has been submitted and is being processed. Please wait for your character data to be updated before making new changes.'),
+                                actions: [
+                                  TextButton(
+                                    onPressed: () => Navigator.of(context).pop(),
+                                    child: Text('OK'),
+                                  ),
+                                ],
+                              );
+                            },
                           );
-                        },
-                      );
+                        }
+                        return;
+                      }
                     }
-                    return;
+                    
+                    // Enter edit mode
+                    setState(() {
+                      _isEditMode = true;
+                      _originalUnspentAffinityPoints = character.unspentAffinityPoints;
+                      _originalUnspentBuildPoints = character.build.unspent;
+                      _currentUnspentAffinityPoints = character.unspentAffinityPoints;
+                      _currentUnspentBuildPoints = character.build.unspent;
+                    });
+                  } else {
+                    // Exit edit mode
+                    setState(() {
+                      _isEditMode = false;
+                    });
                   }
-                }
-                
-                // Enter edit mode
-                setState(() {
-                  _isEditMode = true;
-                  _originalUnspentAffinityPoints = character.unspentAffinityPoints;
-                  _originalUnspentBuildPoints = character.build.unspent;
-                  _currentUnspentAffinityPoints = character.unspentAffinityPoints;
-                  _currentUnspentBuildPoints = character.build.unspent;
-                });
-              } else {
-                // Exit edit mode
-                setState(() {
-                  _isEditMode = false;
-                });
+                  break;
               }
             },
-            tooltip: _isEditMode ? 'Exit Edit Mode' : 'Enter Edit Mode',
+            itemBuilder: (context) {
+              print('DEBUG: _hasUnsubmittedChanges = $_hasUnsubmittedChanges, _isEditMode = $_isEditMode');
+              return [
+                if (_hasUnsubmittedChanges && !_isEditMode)
+                  PopupMenuItem(
+                    value: 'submit',
+                    child: Row(
+                      children: [
+                        Icon(Icons.upload, size: 20, color: Colors.green),
+                        SizedBox(width: 12),
+                        Text('Submit Advancement', style: TextStyle(color: Colors.green, fontWeight: FontWeight.bold)),
+                      ],
+                    ),
+                  ),
+              PopupMenuItem(
+                value: 'cores',
+                child: Row(
+                  children: [
+                    Icon(Icons.inventory, size: 20),
+                    SizedBox(width: 12),
+                    Text('Stored Cores'),
+                  ],
+                ),
+              ),
+              PopupMenuItem(
+                value: 'sync',
+                child: Row(
+                  children: [
+                    Icon(Icons.sync, size: 20),
+                    SizedBox(width: 12),
+                    Text('Sync Character Data'),
+                  ],
+                ),
+              ),
+              PopupMenuItem(
+                value: 'edit',
+                child: Row(
+                  children: [
+                    Icon(_isEditMode ? Icons.save : Icons.edit, size: 20),
+                    SizedBox(width: 12),
+                    Text(_isEditMode ? 'Exit Edit Mode' : 'Enter Edit Mode'),
+                  ],
+                ),
+              ),
+            ];
+            },
           ),
         ],
       ),
@@ -4487,13 +4642,17 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
                     Text('Affinities', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
                     if (_isEditMode) ...[
                       SizedBox(width: 8),
-                      IconButton(
-                        icon: Icon(Icons.add, color: Colors.amber, size: 20),
-                        onPressed: () {
-                          _showAvailableAffinities(context);
-                        },
-                        padding: EdgeInsets.zero,
-                        constraints: BoxConstraints(),
+                      SizedBox(
+                        width: 40,
+                        height: 40,
+                        child: IconButton(
+                          icon: Icon(Icons.add, color: Colors.amber, size: 20),
+                          onPressed: () {
+                            _showAvailableAffinities(context);
+                          },
+                          padding: EdgeInsets.all(8),
+                          constraints: BoxConstraints(minWidth: 40, minHeight: 40),
+                        ),
                       ),
                     ],
                   ],
@@ -4554,21 +4713,25 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
                                         ),
                                       ),
                                       if (_isEditMode)
-                                        IconButton(
-                                          icon: Icon(Icons.add, color: Colors.amber, size: 16),
-                                          onPressed: () => _showAffinityDetails(
-                                            context, 
-                                            name, 
-                                            detail,
-                                            availableAffinityPoints: character.unspentAffinityPoints,
-                                            onAffinityPointsChanged: (newPoints) {
-                                              setState(() {
-                                                // Handle affinity points change
-                                              });
-                                            },
+                                        SizedBox(
+                                          width: 32,
+                                          height: 32,
+                                          child: IconButton(
+                                            icon: Icon(Icons.add, color: Colors.amber, size: 16),
+                                            onPressed: () => _showAffinityDetails(
+                                              context, 
+                                              name, 
+                                              detail,
+                                              availableAffinityPoints: character.unspentAffinityPoints,
+                                              onAffinityPointsChanged: (newPoints) {
+                                                setState(() {
+                                                  // Handle affinity points change
+                                                });
+                                              },
+                                            ),
+                                            padding: EdgeInsets.all(4),
+                                            constraints: BoxConstraints(minWidth: 32, minHeight: 32),
                                           ),
-                                          padding: EdgeInsets.zero,
-                                          constraints: BoxConstraints(),
                                         ),
                                     ],
                                   ),
@@ -4594,13 +4757,17 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
                     Text('Skills', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
                     if (_isEditMode) ...[
                       SizedBox(width: 8),
-                      IconButton(
-                        icon: Icon(Icons.add, color: Colors.amber, size: 20),
-                        onPressed: () {
-                          _showAvailableAffinitiesForSkills(context);
-                        },
-                        padding: EdgeInsets.zero,
-                        constraints: BoxConstraints(),
+                      SizedBox(
+                        width: 40,
+                        height: 40,
+                        child: IconButton(
+                          icon: Icon(Icons.add, color: Colors.amber, size: 20),
+                          onPressed: () {
+                            _showAvailableAffinitiesForSkills(context);
+                          },
+                          padding: EdgeInsets.all(8),
+                          constraints: BoxConstraints(minWidth: 40, minHeight: 40),
+                        ),
                       ),
                     ],
                   ],
@@ -4658,20 +4825,11 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
                   
                   return InkWell(
                     onTap: () {
-                      if (_isEditMode && isPassiveOrAtWill) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                            content: Text('Cannot increase ${skill.frequency} skills'),
-                            backgroundColor: Colors.orange,
-                          ),
-                        );
-                      } else {
-                        _showSkillDetails(context, skill, onBuildPointsChanged: _isEditMode ? (newPoints) {
-                          setState(() {
-                            _currentUnspentBuildPoints = newPoints;
-                          });
-                        } : null);
-                      }
+                      _showSkillDetails(context, skill, onBuildPointsChanged: _isEditMode ? (newPoints) {
+                        setState(() {
+                          _currentUnspentBuildPoints = newPoints;
+                        });
+                      } : null);
                     },
                     child: Padding(
                       padding: const EdgeInsets.symmetric(vertical: 6.0),
@@ -4709,17 +4867,21 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
                             ),
                           ),
                           if (_isEditMode && !isPassiveOrAtWill)
-                            IconButton(
-                              icon: Icon(Icons.add, color: Colors.amber, size: 20),
-                              onPressed: () {
-                                _showSkillDetails(context, skill, onBuildPointsChanged: _isEditMode ? (newPoints) {
-                                  setState(() {
-                                    _currentUnspentBuildPoints = newPoints;
-                                  });
+                            SizedBox(
+                              width: 32,
+                              height: 32,
+                              child: IconButton(
+                                icon: Icon(Icons.add, color: Colors.amber, size: 20),
+                                onPressed: () {
+                                  _showSkillDetails(context, skill, onBuildPointsChanged: _isEditMode ? (newPoints) {
+                                    setState(() {
+                                      _currentUnspentBuildPoints = newPoints;
+                                    });
                                 } : null);
-                              },
-                              padding: EdgeInsets.zero,
-                              constraints: BoxConstraints(),
+                                },
+                                padding: EdgeInsets.all(4),
+                                constraints: BoxConstraints(minWidth: 32, minHeight: 32),
+                              ),
                             ),
                         ],
                       ),
@@ -4922,6 +5084,17 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
                 _clearUnsubmittedAdvancement();
               },
               child: Text('Clear Changes'),
+            ),
+            ElevatedButton(
+              onPressed: () async {
+                Navigator.of(context).pop();
+                await _submitAdvancementToGoogleAppScript(context);
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.green,
+                foregroundColor: Colors.white,
+              ),
+              child: Text('Submit Changes'),
             ),
           ],
         );
@@ -5274,30 +5447,45 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
                         if (_isEditMode)
-                          IconButton(
-                            icon: Icon(Icons.remove, color: Colors.amber, size: 16),
-                            onPressed: () {
-                              final originalExtra = widget.character.hitPoints['extra'] ?? 0;
-                              if (tempExtra > originalExtra) {
-                                setState(() => tempExtra--);
-                              }
-                            },
-                            padding: EdgeInsets.zero,
-                            constraints: BoxConstraints(),
+                          SizedBox(
+                            width: 40,
+                            height: 40,
+                            child: IconButton(
+                              icon: Icon(Icons.remove, color: Colors.amber, size: 20),
+                              onPressed: () {
+                                final originalExtra = widget.character.hitPoints['extra'] ?? 0;
+                                if (tempExtra > originalExtra) {
+                                  setState(() => tempExtra--);
+                                }
+                              },
+                              padding: EdgeInsets.all(8),
+                              constraints: BoxConstraints(minWidth: 40, minHeight: 40),
+                            ),
                           ),
-                        SizedBox(width: 8),
-                        Text('Direct Buy: $tempExtra', style: TextStyle(fontSize: 14)),
-                        SizedBox(width: 8),
+                        SizedBox(width: 12),
+                        SizedBox(
+                          width: 100,
+                          child: Text(
+                            'Direct Buy: $tempExtra', 
+                            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                            textAlign: TextAlign.center,
+                          ),
+                        ),
+                        SizedBox(width: 12),
                         if (_isEditMode)
-                          IconButton(
-                            icon: Icon(Icons.add, color: Colors.amber, size: 16),
-                            onPressed: () {
-                              if (tempExtra < maxDirectBuy) {
-                                setState(() => tempExtra++);
-                              }
-                            },
-                            padding: EdgeInsets.zero,
-                            constraints: BoxConstraints(),
+                          SizedBox(
+                            width: 40,
+                            height: 40,
+                            child: IconButton(
+                              icon: Icon(Icons.add, color: Colors.amber, size: 20),
+                              onPressed: () {
+                                if (tempExtra < maxDirectBuy) {
+                                  setState(() => tempExtra++);
+                                }
+                              },
+                              padding: EdgeInsets.all(8),
+                              constraints: BoxConstraints(minWidth: 40, minHeight: 40),
+                            ),
                           ),
                       ],
                     ),
@@ -5681,10 +5869,10 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
                               child: _isEditMode && isCurrentTier
                                   ? Row(
                                       mainAxisAlignment: MainAxisAlignment.center,
+                                      mainAxisSize: MainAxisSize.min,
                                       children: [
-                                        IconButton(
-                                          icon: Icon(Icons.remove, color: Colors.amber, size: 16),
-                                          onPressed: () {
+                                        GestureDetector(
+                                          onTap: () {
                                             // Don't allow going below current tier level
                                             if (level > currentTierLevel) {
                                               // Calculate cost difference (current level cost - previous level cost)
@@ -5702,15 +5890,28 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
                                               }
                                             }
                                           },
-                                          padding: EdgeInsets.zero,
-                                          constraints: BoxConstraints(),
+                                          child: Container(
+                                            width: 24,
+                                            height: 24,
+                                            decoration: BoxDecoration(
+                                              color: Colors.amber.withOpacity(0.2),
+                                              borderRadius: BorderRadius.circular(4),
+                                            ),
+                                            child: Icon(Icons.remove, color: Colors.amber, size: 16),
+                                          ),
                                         ),
-                                        SizedBox(width: 8),
-                                        Text('$level', textAlign: TextAlign.center),
-                                        SizedBox(width: 8),
-                                        IconButton(
-                                          icon: Icon(Icons.add, color: Colors.amber, size: 16),
-                                          onPressed: () {
+                                        SizedBox(width: 2),
+                                        Text(
+                                          '$level', 
+                                          textAlign: TextAlign.center,
+                                          style: TextStyle(
+                                            fontSize: 14,
+                                            fontWeight: FontWeight.bold,
+                                          ),
+                                        ),
+                                        SizedBox(width: 2),
+                                        GestureDetector(
+                                          onTap: () {
                                             // Don't allow going above 6 levels
                                             if (level < 6) {
                                               // Calculate cost difference (new level cost - current level cost)
@@ -5739,8 +5940,15 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
                                               }
                                             }
                                           },
-                                          padding: EdgeInsets.zero,
-                                          constraints: BoxConstraints(),
+                                          child: Container(
+                                            width: 24,
+                                            height: 24,
+                                            decoration: BoxDecoration(
+                                              color: Colors.amber.withOpacity(0.2),
+                                              borderRadius: BorderRadius.circular(4),
+                                            ),
+                                            child: Icon(Icons.add, color: Colors.amber, size: 16),
+                                          ),
                                         ),
                                       ],
                                     )
@@ -6163,132 +6371,311 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
                 ),
                 const SizedBox(height: 10),
                 Expanded(
-                  child: DefaultTabController(
-                    length: 3,
-                    initialIndex: _isEditMode ? 2 : 0, // Start on Cost tab (index 2) if in edit mode
-                    child: Column(
-                      children: [
-                        const TabBar(
-                          tabs: [
-                            Tab(text: 'Verbal'),
-                            Tab(text: 'Rules'),
-                            Tab(text: 'Cost'),
-                          ],
-                          labelColor: Colors.white,
-                        ),
-                        Expanded(
-                          child: TabBarView(
-                            children: [
-                              SingleChildScrollView(
-                                padding: const EdgeInsets.all(8),
-                                child: Text(verbal, style: TextStyle(fontSize: 16)),
+                  child: Builder(
+                    builder: (context) {
+                      // Determine if we should show the Verbal tab
+                      final hasVerbals = verbal.isNotEmpty;
+                      final tabCount = hasVerbals ? 3 : 2;
+                      final initialIndex = _isEditMode ? (hasVerbals ? 2 : 1) : (hasVerbals ? 0 : 0);
+                      
+                      return DefaultTabController(
+                        length: tabCount,
+                        initialIndex: initialIndex,
+                        child: Column(
+                          children: [
+                            TabBar(
+                              tabs: hasVerbals 
+                                ? [
+                                    Tab(text: 'Verbal'),
+                                    Tab(text: 'Rules'),
+                                    Tab(text: 'Cost'),
+                                  ]
+                                : [
+                                    Tab(text: 'Rules'),
+                                    Tab(text: 'Cost'),
+                                  ],
+                              labelColor: Colors.white,
+                            ),
+                            Expanded(
+                              child: TabBarView(
+                                children: hasVerbals
+                                  ? [
+                                      SingleChildScrollView(
+                                        padding: const EdgeInsets.all(8),
+                                        child: Text(verbal, style: TextStyle(fontSize: 16)),
+                                      ),
+                                      SingleChildScrollView(
+                                        padding: const EdgeInsets.all(8),
+                                        child: Text(rules, style: TextStyle(fontSize: 16)),
+                                      ),
+                                      _isEditMode
+                                        ? StatefulBuilder(
+                                            builder: (context, setState) {
+                                              final currentCost = calculateSkillCost(baseCost, editableSkillLevel);
+                                              final nextLevelCost = calculateSkillCost(baseCost, editableSkillLevel + 1);
+                                              final previousLevelCost = calculateSkillCost(baseCost, editableSkillLevel - 1);
+                                              final costDifference = nextLevelCost - currentCost;
+                                              final costRefund = currentCost - previousLevelCost;
+                                              
+                                              return Column(
+                                                children: [
+                                                  SizedBox(height: 16),
+                                                  Container(
+                                                    padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                                                    child: Row(
+                                                      mainAxisAlignment: MainAxisAlignment.center,
+                                                      mainAxisSize: MainAxisSize.min,
+                                                      children: [
+                                                        SizedBox(
+                                                          width: 48,
+                                                          height: 48,
+                                                          child: IconButton(
+                                                            icon: Icon(Icons.remove, color: Colors.amber, size: 24),
+                                                            onPressed: () {
+                                                              if (editableSkillLevel > skill.level) {
+                                                                setState(() {
+                                                                  editableSkillLevel--;
+                                                                  currentAvailableBuildPoints += costRefund;
+                                                                });
+                                                                if (onBuildPointsChanged != null) {
+                                                                  onBuildPointsChanged(currentAvailableBuildPoints);
+                                                                }
+                                                              }
+                                                            },
+                                                            padding: EdgeInsets.all(12),
+                                                            constraints: BoxConstraints(minWidth: 48, minHeight: 48),
+                                                          ),
+                                                        ),
+                                                        SizedBox(width: 20),
+                                                        SizedBox(
+                                                          width: 80,
+                                                          child: Text(
+                                                            'Level: $editableSkillLevel',
+                                                            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                                                            textAlign: TextAlign.center,
+                                                          ),
+                                                        ),
+                                                        SizedBox(width: 20),
+                                                        SizedBox(
+                                                          width: 48,
+                                                          height: 48,
+                                                          child: IconButton(
+                                                            icon: Icon(
+                                                              Icons.add, 
+                                                              color: (skill.frequency == 'At Will' || skill.frequency == 'Passive') 
+                                                                  ? Colors.grey 
+                                                                  : Colors.amber, 
+                                                              size: 24
+                                                            ),
+                                                            onPressed: () {
+                                                              // Check if this is an At Will or Passive skill
+                                                              if (skill.frequency == 'At Will' || skill.frequency == 'Passive') {
+                                                                ScaffoldMessenger.of(context).showSnackBar(
+                                                                  SnackBar(
+                                                                    content: Text('Cannot increase ${skill.frequency} skills'),
+                                                                    backgroundColor: Colors.orange,
+                                                                  ),
+                                                                );
+                                                              } else if (editableSkillLevel >= maxLevel) {
+                                                                ScaffoldMessenger.of(context).showSnackBar(
+                                                                  SnackBar(
+                                                                    content: Text('Cannot exceed maximum level of $maxLevel'),
+                                                                    backgroundColor: Colors.red,
+                                                                  ),
+                                                                );
+                                                              } else if (currentAvailableBuildPoints >= costDifference) {
+                                                                setState(() {
+                                                                  editableSkillLevel++;
+                                                                  currentAvailableBuildPoints -= costDifference.toInt();
+                                                                });
+                                                                if (onBuildPointsChanged != null) {
+                                                                  onBuildPointsChanged(currentAvailableBuildPoints);
+                                                                }
+                                                              } else {
+                                                                ScaffoldMessenger.of(context).showSnackBar(
+                                                                  SnackBar(
+                                                                    content: Text('Not enough build points! Need $costDifference, have $currentAvailableBuildPoints'),
+                                                                    backgroundColor: Colors.red,
+                                                                  ),
+                                                                );
+                                                              }
+                                                            },
+                                                            padding: EdgeInsets.all(12),
+                                                            constraints: BoxConstraints(minWidth: 48, minHeight: 48),
+                                                          ),
+                                                        ),
+                                                      ],
+                                                    ),
+                                                  ),
+                                                  SizedBox(height: 16),
+                                                  Text(
+                                                    'Base Cost: $baseCost build points',
+                                                    style: TextStyle(fontSize: 14, color: Colors.grey),
+                                                  ),
+                                                  SizedBox(height: 8),
+                                                  Text(
+                                                    'Cost: $currentCost build points',
+                                                    style: TextStyle(fontSize: 16),
+                                                  ),
+                                                  SizedBox(height: 8),
+                                                  Text(
+                                                    'Available: $currentAvailableBuildPoints build points',
+                                                    style: TextStyle(fontSize: 14, color: Colors.grey),
+                                                  ),
+                                                ],
+                                              );
+                                            },
+                                          )
+                                        : Center(
+                                            child: Text(
+                                              'Skill Build Total: $totalCost (${cost.join(" + ")})',
+                                              style: TextStyle(fontSize: 16),
+                                            ),
+                                          ),
+                                  ]
+                                  : [
+                                      SingleChildScrollView(
+                                        padding: const EdgeInsets.all(8),
+                                        child: Text(rules, style: TextStyle(fontSize: 16)),
+                                      ),
+                                      _isEditMode
+                                        ? StatefulBuilder(
+                                            builder: (context, setState) {
+                                              final currentCost = calculateSkillCost(baseCost, editableSkillLevel);
+                                              final nextLevelCost = calculateSkillCost(baseCost, editableSkillLevel + 1);
+                                              final previousLevelCost = calculateSkillCost(baseCost, editableSkillLevel - 1);
+                                              final costDifference = nextLevelCost - currentCost;
+                                              final costRefund = currentCost - previousLevelCost;
+                                              
+                                              return Column(
+                                                children: [
+                                                  SizedBox(height: 16),
+                                                  Container(
+                                                    padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                                                    child: Row(
+                                                      mainAxisAlignment: MainAxisAlignment.center,
+                                                      mainAxisSize: MainAxisSize.min,
+                                                      children: [
+                                                        Container(
+                                                          width: 48,
+                                                          height: 48,
+                                                          child: IconButton(
+                                                            icon: Icon(Icons.remove, color: Colors.amber, size: 24),
+                                                            onPressed: () {
+                                                              if (editableSkillLevel > skill.level) {
+                                                                setState(() {
+                                                                  editableSkillLevel--;
+                                                                  currentAvailableBuildPoints += costRefund;
+                                                                });
+                                                                if (onBuildPointsChanged != null) {
+                                                                  onBuildPointsChanged(currentAvailableBuildPoints);
+                                                                }
+                                                              }
+                                                            },
+                                                            padding: EdgeInsets.all(12),
+                                                            constraints: BoxConstraints(minWidth: 48, minHeight: 48),
+                                                          ),
+                                                        ),
+                                                        SizedBox(width: 20),
+                                                        Container(
+                                                          width: 80,
+                                                          child: Text(
+                                                            'Level: $editableSkillLevel',
+                                                            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                                                            textAlign: TextAlign.center,
+                                                          ),
+                                                        ),
+                                                        SizedBox(width: 20),
+                                                        Container(
+                                                          width: 48,
+                                                          height: 48,
+                                                          child: IconButton(
+                                                            icon: Icon(
+                                                              Icons.add, 
+                                                              color: (skill.frequency == 'At Will' || skill.frequency == 'Passive') 
+                                                                  ? Colors.grey 
+                                                                  : Colors.amber, 
+                                                              size: 24
+                                                            ),
+                                                            onPressed: () {
+                                                              // Check if this is an At Will or Passive skill
+                                                              if (skill.frequency == 'At Will' || skill.frequency == 'Passive') {
+                                                                ScaffoldMessenger.of(context).showSnackBar(
+                                                                  SnackBar(
+                                                                    content: Text('Cannot increase ${skill.frequency} skills'),
+                                                                    backgroundColor: Colors.orange,
+                                                                  ),
+                                                                );
+                                                              } else if (editableSkillLevel >= maxLevel) {
+                                                                ScaffoldMessenger.of(context).showSnackBar(
+                                                                  SnackBar(
+                                                                    content: Text('Cannot exceed maximum level of $maxLevel'),
+                                                                    backgroundColor: Colors.red,
+                                                                  ),
+                                                                );
+                                                              } else if (currentAvailableBuildPoints >= costDifference) {
+                                                                setState(() {
+                                                                  editableSkillLevel++;
+                                                                  currentAvailableBuildPoints -= costDifference.toInt();
+                                                                });
+                                                                if (onBuildPointsChanged != null) {
+                                                                  onBuildPointsChanged(currentAvailableBuildPoints);
+                                                                }
+                                                              } else {
+                                                                ScaffoldMessenger.of(context).showSnackBar(
+                                                                  SnackBar(
+                                                                    content: Text('Not enough build points! Need $costDifference, have $currentAvailableBuildPoints'),
+                                                                    backgroundColor: Colors.red,
+                                                                  ),
+                                                                );
+                                                              }
+                                                            },
+                                                            padding: EdgeInsets.all(12),
+                                                            constraints: BoxConstraints(minWidth: 48, minHeight: 48),
+                                                          ),
+                                                        ),
+                                                      ],
+                                                    ),
+                                                  ),
+                                                  SizedBox(height: 16),
+                                                  Text(
+                                                    'Base Cost: $baseCost build points',
+                                                    style: TextStyle(fontSize: 14, color: Colors.grey),
+                                                  ),
+                                                  SizedBox(height: 8),
+                                                  Text(
+                                                    'Cost: $currentCost build points',
+                                                    style: TextStyle(fontSize: 16),
+                                                  ),
+                                                  SizedBox(height: 8),
+                                                  Text(
+                                                    'Available: $currentAvailableBuildPoints build points',
+                                                    style: TextStyle(fontSize: 14, color: Colors.grey),
+                                                  ),
+                                                ],
+                                              );
+                                            },
+                                          )
+                                        : Center(
+                                            child: Text(
+                                              'Skill Build Total: $totalCost (${cost.join(" + ")})',
+                                              style: TextStyle(fontSize: 16),
+                                            ),
+                                          ),
+                                    ],
                               ),
-                              SingleChildScrollView(
-                                padding: const EdgeInsets.all(8),
-                                child: Text(rules, style: TextStyle(fontSize: 16)),
-                              ),
-                              _isEditMode
-                                ? StatefulBuilder(
-                                    builder: (context, setState) {
-                                      final currentCost = calculateSkillCost(baseCost, editableSkillLevel);
-                                      final nextLevelCost = calculateSkillCost(baseCost, editableSkillLevel + 1);
-                                      final previousLevelCost = calculateSkillCost(baseCost, editableSkillLevel - 1);
-                                      final costDifference = nextLevelCost - currentCost;
-                                      final costRefund = currentCost - previousLevelCost;
-                                      
-                                      return Column(
-                                        children: [
-                                          SizedBox(height: 16),
-                                          Row(
-                                            mainAxisAlignment: MainAxisAlignment.center,
-                                            children: [
-                                              IconButton(
-                                                icon: Icon(Icons.remove, color: Colors.amber, size: 20),
-                                                onPressed: () {
-                                                  if (editableSkillLevel > skill.level) {
-                                                    setState(() {
-                                                      editableSkillLevel--;
-                                                      currentAvailableBuildPoints += costRefund;
-                                                    });
-                                                    if (onBuildPointsChanged != null) {
-                                                      onBuildPointsChanged(currentAvailableBuildPoints);
-                                                    }
-                                                  }
-                                                },
-                                              ),
-                                              SizedBox(width: 16),
-                                              Text(
-                                                'Level: $editableSkillLevel',
-                                                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                                              ),
-                                              SizedBox(width: 16),
-                                              IconButton(
-                                                icon: Icon(Icons.add, color: Colors.amber, size: 20),
-                                                onPressed: () {
-                                                  if (editableSkillLevel >= maxLevel) {
-                                                    ScaffoldMessenger.of(context).showSnackBar(
-                                                      SnackBar(
-                                                        content: Text('Cannot exceed maximum level of $maxLevel'),
-                                                        backgroundColor: Colors.red,
-                                                      ),
-                                                    );
-                                                  } else if (currentAvailableBuildPoints >= costDifference) {
-                                                    setState(() {
-                                                      editableSkillLevel++;
-                                                      currentAvailableBuildPoints -= costDifference.toInt();
-                                                    });
-                                                    if (onBuildPointsChanged != null) {
-                                                      onBuildPointsChanged(currentAvailableBuildPoints);
-                                                    }
-                                                  } else {
-                                                    ScaffoldMessenger.of(context).showSnackBar(
-                                                      SnackBar(
-                                                        content: Text('Not enough build points! Need $costDifference, have $currentAvailableBuildPoints'),
-                                                        backgroundColor: Colors.red,
-                                                      ),
-                                                    );
-                                                  }
-                                                },
-                                              ),
-                                            ],
-                                          ),
-                                          SizedBox(height: 16),
-                                          Text(
-                                            'Base Cost: $baseCost build points',
-                                            style: TextStyle(fontSize: 14, color: Colors.grey),
-                                          ),
-                                          SizedBox(height: 8),
-                                          Text(
-                                            'Cost: $currentCost build points',
-                                            style: TextStyle(fontSize: 16),
-                                          ),
-                                          SizedBox(height: 8),
-                                          Text(
-                                            'Available: $currentAvailableBuildPoints build points',
-                                            style: TextStyle(fontSize: 14, color: Colors.grey),
-                                          ),
-                                        ],
-                                      );
-                                    },
-                                  )
-                                : Center(
-                                    child: Text(
-                                      'Skill Build Total: $totalCost (${cost.join(" + ")})',
-                                      style: TextStyle(fontSize: 16),
-                                    ),
-                                  ),
-                            ],
                           ),
-                        ),
-                      ],
-                    ),
-                  ),
+                        ],
+                      ),
+                    );
+                  },
                 ),
-              ],
-            ),
+              ),
+            ],
           ),
-          actions: [
-            if (_isEditMode)
+        ),
+        actions: [
+          if (_isEditMode)
               TextButton(
                 onPressed: () async {
                   // Calculate level change
@@ -6340,10 +6727,40 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
       if (cachedRules != null) {
         final rules = json.decode(cachedRules);
         
-        // Try to find in Affinity Skills first
+        // Search Common Skills
+        if (skillType == 'Common') {
+          final skills = rules['Common Skills'] as List<dynamic>? ?? [];
+          final skill = skills.firstWhere(
+            (s) => s['Name'] == skillName,
+            orElse: () => null,
+          );
+          if (skill != null) {
+            return Map<String, dynamic>.from(skill);
+          }
+        }
+        
+        // Search Race Skills
+        final races = rules['Races'] as List<dynamic>? ?? [];
+        final race = races.firstWhere(
+          (r) => r['Name'] == characterRace,
+          orElse: () => null,
+        );
+        
+        if (race != null && race['Race Skills'] != null) {
+          final skills = race['Race Skills'] as List<dynamic>;
+          final skill = skills.firstWhere(
+            (s) => s['Name'] == skillName,
+            orElse: () => null,
+          );
+          if (skill != null) {
+            return Map<String, dynamic>.from(skill);
+          }
+        }
+        
+        // Try to find in Affinity Skills
         final affinitySkills = rules['Affinity Skills'] as List<dynamic>? ?? [];
         final affinitySkill = affinitySkills.firstWhere(
-          (s) => s['Name'] == skillName,
+          (s) => s['Name'] == skillName && s['Affinity'] == skillType,
           orElse: () => null,
         );
         
