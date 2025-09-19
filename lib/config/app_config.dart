@@ -62,6 +62,13 @@ class AppConfig {
   static String get getCharactersUrl => 
     'https://$firebaseRegion-$firebaseProjectId.cloudfunctions.net/getCharacters';
 
+  // Admin search and fetch endpoints (must exist in Functions)
+  static String get searchCharactersUrl => 
+    'https://$firebaseRegion-$firebaseProjectId.cloudfunctions.net/searchCharacters';
+
+  static String get getCharacterByIdUrl => 
+    'https://$firebaseRegion-$firebaseProjectId.cloudfunctions.net/getCharacterById';
+
   static String get fixCharacterPlayerUidUrl => 
     'https://$firebaseRegion-$firebaseProjectId.cloudfunctions.net/fixCharacterPlayerUid';
 
@@ -79,6 +86,25 @@ class AppConfig {
 
   static String get testCharacterStructureUrl => 
     'https://$firebaseRegion-$firebaseProjectId.cloudfunctions.net/testCharacterStructure';
+
+  // Discord OAuth endpoints
+  static String get getDiscordAuthorizeUrl =>
+    'https://$firebaseRegion-$firebaseProjectId.cloudfunctions.net/getDiscordAuthorizeUrl';
+
+  static String get discordOAuthCallbackUrl =>
+    'https://$firebaseRegion-$firebaseProjectId.cloudfunctions.net/discordOAuthCallback';
+
+  static String get getDiscordLinkStatusUrl =>
+    'https://$firebaseRegion-$firebaseProjectId.cloudfunctions.net/getDiscordLinkStatus';
+
+  static String get createDiscordLinkCodeUrl =>
+    'https://$firebaseRegion-$firebaseProjectId.cloudfunctions.net/createDiscordLinkCode';
+
+  static String get verifyDiscordLinkByChannelUrl =>
+    'https://$firebaseRegion-$firebaseProjectId.cloudfunctions.net/verifyDiscordLinkByChannel';
+
+  static String get disconnectDiscordUrl =>
+    'https://$firebaseRegion-$firebaseProjectId.cloudfunctions.net/disconnectDiscord';
 
   // Development/Production flags
   static const bool isDevelopment = bool.fromEnvironment(

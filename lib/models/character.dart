@@ -35,29 +35,55 @@ class Character {
   int get unspentAffinityPoints => affinityPoints['affinityTierPointUnspent'] ?? 0;
 
   factory Character.fromJson(Map<String, dynamic> json, {String? id}) {
+    final dynamic rawNumber = json['characterNumber'];
+    int parsedNumber = 0;
+    if (rawNumber is int) {
+      parsedNumber = rawNumber;
+    } else if (rawNumber is String) {
+      parsedNumber = int.tryParse(rawNumber) ?? 0;
+    }
+
+    final Map<String, dynamic> rawBuild = (json['build'] is Map<String, dynamic>)
+        ? Map<String, dynamic>.from(json['build'])
+        : <String, dynamic>{};
+    final Map<String, dynamic> rawHitPoints = (json['hitPoints'] is Map<String, dynamic>)
+        ? Map<String, dynamic>.from(json['hitPoints'])
+        : <String, dynamic>{};
+    final Map<String, dynamic> rawAffinities = (json['affinities'] is Map<String, dynamic>)
+        ? Map<String, dynamic>.from(json['affinities'])
+        : <String, dynamic>{};
+    final Map<String, dynamic> rawAffinityPoints = (json['affinityPoints'] is Map<String, dynamic>)
+        ? Map<String, dynamic>.from(json['affinityPoints'])
+        : <String, dynamic>{};
+    final List<dynamic> rawSkills = (json['skills'] is List)
+        ? (json['skills'] as List<dynamic>)
+        : <dynamic>[];
 
     return Character(
-      id: id,
-      playerName: json['playerName'],
-      characterName: json['characterName'],
-      characterNumber: json['characterNumber'],
-      race: json['race'],
-      build: Build.fromJson(json['build']),
+      id: id ?? (json['id']?.toString()),
+      playerName: (json['playerName'] ?? 'Unknown') as String,
+      characterName: (json['characterName'] ?? 'Unknown') as String,
+      characterNumber: parsedNumber,
+      race: (json['race'] ?? 'Unknown') as String,
+      build: Build.fromJson(rawBuild),
       dr: Map<String, dynamic>.from(json['dr'] ?? {}),
-      affinityPoints: json['affinityPoints'] ?? {},
-      hitPoints: json['hitPoints'],
-      cultivationTier: json['cultivationTier'],
-      skills: (json['skills'] as List<dynamic>)
+      affinityPoints: rawAffinityPoints,
+      hitPoints: rawHitPoints,
+      cultivationTier: (json['cultivationTier'] ?? 'Unknown') as String,
+      skills: rawSkills
+          .whereType<Map<String, dynamic>>()
           .map((skill) => Skill.fromJson(skill))
           .toList(),
-      affinities: (json['affinities'] as Map<String, dynamic>).map(
+      affinities: rawAffinities.map(
         (key, value) => MapEntry(
           key,
-          AffinityDetail.fromJson(value as Map<String, dynamic>),
+          value is Map<String, dynamic>
+              ? AffinityDetail.fromJson(value)
+              : AffinityDetail.fromJson(<String, dynamic>{'effectLevel': 0}),
         ),
       ),
-      generatedAt: json['generatedAt'],
-      playerUid: json['playerUid'],
+      generatedAt: json['generatedAt'] as String?,
+      playerUid: json['playerUid'] as String?,
     );
   }
 
@@ -102,13 +128,13 @@ class Skill {
 
   factory Skill.fromJson(Map<String, dynamic> json) {
     return Skill(
-      name: json['name'],
-      type: json['type'],
-      level: json['level'],
-      frequency: json['frequency'],
-      verbal: json['verbal'],
-      description: json['description'],
-      delivery: json['delivery'],
+      name: (json['name'] ?? 'Unknown') as String,
+      type: (json['type'] ?? 'Common') as String,
+      level: (json['level'] is num) ? (json['level'] as num).toInt() : 0,
+      frequency: (json['frequency'] ?? 'Passive') as String,
+      verbal: json['verbal'] as String?,
+      description: json['description'] as String?,
+      delivery: json['delivery'] as String?,
     );
   }
 
@@ -172,12 +198,20 @@ class Build {
   });
 
   factory Build.fromJson(Map<String, dynamic> json) {
+    final Map<String, dynamic> raw = json;
+    final Map<String, dynamic> rawStarting = (raw['starting'] is Map<String, dynamic>)
+        ? Map<String, dynamic>.from(raw['starting'])
+        : <String, dynamic>{};
+    final List<dynamic> rawGains = (raw['gains'] is List)
+        ? (raw['gains'] as List<dynamic>)
+        : <dynamic>[];
     return Build(
-      total: json['total'] ?? 0,
-      unspent: json['unspent'] ?? 0,
-      needToAscend: json['needToAscend'] ?? 0,
-      starting: StartingBuild.fromJson(json['starting']),
-      gains: (json['gains'] as List<dynamic>? ?? [])
+      total: (raw['total'] is num) ? (raw['total'] as num).toInt() : 0,
+      unspent: (raw['unspent'] is num) ? (raw['unspent'] as num).toInt() : 0,
+      needToAscend: (raw['needToAscend'] is num) ? (raw['needToAscend'] as num).toInt() : 0,
+      starting: StartingBuild.fromJson(rawStarting),
+      gains: rawGains
+          .whereType<Map<String, dynamic>>()
           .map((gain) => BuildGain.fromJson(gain))
           .toList(),
     );
@@ -202,9 +236,10 @@ class StartingBuild {
   StartingBuild({required this.amount, required this.date});
 
   factory StartingBuild.fromJson(Map<String, dynamic> json) {
+    final Map<String, dynamic> raw = json;
     return StartingBuild(
-      amount: json['amount'],
-      date: json['date'],
+      amount: (raw['amount'] is num) ? (raw['amount'] as num).toInt() : 0,
+      date: (raw['date'] ?? '') as String,
     );
   }
 
@@ -231,10 +266,10 @@ class BuildGain {
 
   factory BuildGain.fromJson(Map<String, dynamic> json) {
     return BuildGain(
-      amount: json['amount'],
-      reason: json['reason'],
-      note: json['note'],
-      date: json['date'],
+      amount: (json['amount'] is num) ? (json['amount'] as num).toInt() : 0,
+      reason: (json['reason'] ?? '') as String,
+      note: (json['note'] ?? '') as String,
+      date: (json['date'] ?? '') as String,
     );
   }
 

@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:google_sign_in/google_sign_in.dart';
+import 'package:flutter/foundation.dart';
 import '../main.dart';
+import '../shared/rules_service.dart';
 
 class LoginPage extends StatefulWidget {
   const LoginPage({super.key});
@@ -26,27 +27,22 @@ class _LoginPageState extends State<LoginPage> {
           context,
           MaterialPageRoute(builder: (_) => HomePage()),
         );
+        // Warm the rules cache after navigation (user is signed in)
+        // Errors are ignored so login UX is not blocked
+        RulesService.fetchAndCacheRules().catchError((_) {});
       }
     });
   }
 
   Future<void> signInWithGoogle() async {
     try {
-      final GoogleSignIn googleSignIn = GoogleSignIn(
-        clientId: '999937639575-nmo32r5cua8g8iuhc33tnia1iickqsit.apps.googleusercontent.com',
-        scopes: ['email'],
-      );
-
-      final GoogleSignInAccount? googleUser = await googleSignIn.signIn();
-      if (googleUser == null) return; // user canceled
-
-      final GoogleSignInAuthentication googleAuth = await googleUser.authentication;
-      final credential = GoogleAuthProvider.credential(
-        idToken: googleAuth.idToken,
-        accessToken: googleAuth.accessToken,
-      );
-
-      await _auth.signInWithCredential(credential);
+      final provider = GoogleAuthProvider();
+      provider.addScope('email');
+      if (kIsWeb) {
+        await _auth.signInWithPopup(provider);
+      } else {
+        await _auth.signInWithProvider(provider);
+      }
     } catch (e, stack) {
       print('Sign-In Error: $e');
       print('Stacktrace: $stack');
@@ -57,7 +53,6 @@ class _LoginPageState extends State<LoginPage> {
   }
 
   Future<void> signOut() async {
-    await GoogleSignIn().signOut();
     await _auth.signOut();
   }
 

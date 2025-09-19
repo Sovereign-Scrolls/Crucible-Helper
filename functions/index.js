@@ -24,7 +24,710 @@ const config = require("./config.json");
 // Declare secrets
 const DISCORD_TOKEN = defineSecret("DISCORD_TOKEN");
 const GAME_SECRET = defineSecret("GAME_SECRET");
+// Discord OAuth: Get authorization URL
+exports.getDiscordAuthorizeUrl = onRequest(async (req, res) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
 
+  try {
+    const clientId = config.discord.client_id;
+    const redirectUri = encodeURIComponent(config.discord.redirect_uri);
+    const scope = encodeURIComponent('identify guilds.join');
+    const responseType = 'code';
+    const prompt = 'consent';
+
+    const url = `https://discord.com/api/oauth2/authorize?client_id=${clientId}&redirect_uri=${redirectUri}&response_type=${responseType}&scope=${scope}&prompt=${prompt}`;
+    return res.status(200).json({ ok: true, url });
+  } catch (e) {
+    console.error('getDiscordAuthorizeUrl error', e);
+    return res.status(500).json({ ok: false, error: 'server_error' });
+  }
+});
+
+// Discord OAuth callback: exchange code, store user, and optionally join guild
+exports.discordOAuthCallback = onRequest({ secrets: [DISCORD_TOKEN] }, async (req, res) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
+
+  try {
+    const code = req.query.code || req.body?.code;
+    const state = req.query.state || req.body?.state; // optional: could include Firebase UID
+    if (!code) return res.status(400).json({ ok: false, error: 'missing_code' });
+
+    // Exchange code for tokens
+    const params = new URLSearchParams();
+    params.append('client_id', config.discord.client_id);
+    params.append('client_secret', config.discord.client_secret);
+    params.append('grant_type', 'authorization_code');
+    params.append('code', code);
+    params.append('redirect_uri', config.discord.redirect_uri);
+
+    const tokenResp = await axios.post('https://discord.com/api/oauth2/token', params, {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    });
+
+    const accessToken = tokenResp.data.access_token;
+    const tokenType = tokenResp.data.token_type; // should be 'Bearer'
+
+    // Fetch user identity
+    const userResp = await axios.get('https://discord.com/api/users/@me', {
+      headers: { Authorization: `${tokenType} ${accessToken}` },
+    });
+    const discordUser = userResp.data; // { id, username, discriminator, global_name, avatar, ... }
+
+    // If state includes Firebase ID token, verify and get UID to associate
+    let uid = null;
+    if (state) {
+      try {
+        const decoded = await getAuth().verifyIdToken(String(state));
+        uid = decoded.uid;
+      } catch (e) {
+        console.log('State not a valid Firebase ID token, skipping user association');
+      }
+    }
+
+    // If not provided via state, allow Authorization header with Firebase ID token
+    if (!uid && req.headers.authorization) {
+      const idToken = req.headers.authorization.split(' ')[1];
+      const decoded = await getAuth().verifyIdToken(idToken);
+      uid = decoded.uid;
+    }
+
+    // Store mapping in Firestore under players/{uid}/discord
+    if (uid) {
+      const playerRef = db.collection('players').doc(uid);
+      await playerRef.set({ lastUpdated: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      await playerRef.collection('integrations').doc('discord').set({
+        discordId: discordUser.id,
+        username: discordUser.username,
+        discriminator: discordUser.discriminator,
+        globalName: discordUser.global_name || null,
+        avatar: discordUser.avatar || null,
+        linkedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+
+      // Optionally join guild using bot token
+      try {
+        const guildId = config.discord.guild_id;
+        if (guildId) {
+          await axios.put(
+            `https://discord.com/api/v10/guilds/${guildId}/members/${discordUser.id}`,
+            { access_token: accessToken },
+            { headers: { Authorization: `Bot ${DISCORD_TOKEN.value()}` } }
+          );
+        }
+      } catch (joinErr) {
+        console.log('Guild join failed or skipped:', joinErr.response?.data || joinErr.message);
+      }
+    }
+
+    // Respond with a minimal HTML page that can close the popup and pass result back
+    const successHtml = `<!doctype html><html><body><script>try{window.opener && window.opener.postMessage({type:'discord_linked', ok:true}, '*');}catch(e){} window.close();</script>Linked. You can close this window.</body></html>`;
+    res.set('Content-Type', 'text/html');
+    return res.status(200).send(successHtml);
+  } catch (e) {
+    console.error('discordOAuthCallback error', e.response?.data || e.message);
+    const errorHtml = `<!doctype html><html><body><script>try{window.opener && window.opener.postMessage({type:'discord_linked', ok:false, error:'${(e.response?.data?.error || e.message).toString().replace(/'/g, '')}'}, '*');}catch(err){} window.close();</script>Failed. You can close this window.</body></html>`;
+    res.set('Content-Type', 'text/html');
+    return res.status(500).send(errorHtml);
+  }
+});
+
+// Get Discord link status for current user
+exports.getDiscordLinkStatus = onRequest(async (req, res) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
+
+  if (!req.headers.authorization) {
+    return res.status(401).json({ ok: false, error: 'Missing authorization header' });
+  }
+  try {
+    const idToken = req.headers.authorization.split(' ')[1];
+    const decoded = await getAuth().verifyIdToken(idToken);
+    const uid = decoded.uid;
+    const doc = await db.collection('players').doc(uid).collection('integrations').doc('discord').get();
+    return res.status(200).json({ ok: true, linked: doc.exists, data: doc.exists ? doc.data() : null });
+  } catch (e) {
+    console.error('getDiscordLinkStatus error', e);
+    return res.status(500).json({ ok: false, error: 'server_error' });
+  }
+});
+
+// Disconnect Discord link for current user
+exports.disconnectDiscord = onRequest(async (req, res) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
+  if (!req.headers.authorization) {
+    return res.status(401).json({ ok: false, error: 'Missing authorization header' });
+  }
+  try {
+    const idToken = req.headers.authorization.split(' ')[1];
+    const decoded = await getAuth().verifyIdToken(idToken);
+    const uid = decoded.uid;
+    const ref = db.collection('players').doc(uid).collection('integrations').doc('discord');
+    await ref.delete();
+    return res.status(200).json({ ok: true, disconnected: true });
+  } catch (e) {
+    console.error('disconnectDiscord error', e);
+    return res.status(500).json({ ok: false, error: 'server_error' });
+  }
+});
+
+// Create a one-time link code for the current user
+exports.createDiscordLinkCode = onRequest({ secrets: [DISCORD_TOKEN] }, async (req, res) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
+  if (!req.headers.authorization) return res.status(401).json({ ok: false, error: 'Missing authorization header' });
+  try {
+    const idToken = req.headers.authorization.split(' ')[1];
+    const decoded = await getAuth().verifyIdToken(idToken);
+    const uid = decoded.uid;
+    const code = crypto.randomBytes(4).toString('hex');
+    const ref = db.collection('discord_link_codes').doc(code);
+    await ref.set({
+      uid,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      used: false,
+    });
+
+    // Clean up the verification channel and post instruction message
+    try {
+      const channelId = config.discord.link_channel_id;
+      if (channelId) {
+        // Fetch recent messages
+        const msgsResp = await axios.get(`https://discord.com/api/v10/channels/${channelId}/messages?limit=100`, {
+          headers: { Authorization: `Bot ${DISCORD_TOKEN.value()}` }
+        });
+        const messages = msgsResp.data || [];
+
+        // Delete all non-pinned messages
+        for (const m of messages) {
+          if (!m.pinned) {
+            try {
+              await axios.delete(`https://discord.com/api/v10/channels/${channelId}/messages/${m.id}`, {
+                headers: { Authorization: `Bot ${DISCORD_TOKEN.value()}` }
+              });
+            } catch (delErr) {
+              console.log('Skip delete message', m.id, delErr.response?.status || delErr.message);
+            }
+          }
+        }
+
+        // Post concise instruction message and pin it
+        const channelName = config.discord.link_channel_name || 'verification';
+        const parts = [];
+        parts.push(`# ${channelName}`);
+        parts.push('This channel is reserved for the Crucible Helper app to link Discord users.');
+        parts.push('Please do not chat here.');
+        parts.push('To link: In the app, get your code and post it here. Messages are removed after verification.');
+        const instructionContent = parts.join('\n');
+        try {
+          const postResp = await axios.post(`https://discord.com/api/v10/channels/${channelId}/messages`, {
+            content: instructionContent
+          }, {
+            headers: {
+              Authorization: `Bot ${DISCORD_TOKEN.value()}`,
+              'Content-Type': 'application/json'
+            }
+          });
+          const posted = postResp.data;
+          try {
+            await axios.put(`https://discord.com/api/v10/channels/${channelId}/pins/${posted.id}`, null, {
+              headers: { Authorization: `Bot ${DISCORD_TOKEN.value()}` }
+            });
+          } catch (pinErr) {
+            console.log('Pin failed (continuing):', pinErr.response?.status || pinErr.message);
+          }
+        } catch (postErr) {
+          console.log('Instruction post failed (continuing):', postErr.response?.status || postErr.message);
+        }
+      }
+    } catch (channelErr) {
+      console.log('Channel cleanup failed (continuing):', channelErr.response?.status || channelErr.message);
+    }
+    return res.status(200).json({ ok: true, code, channelId: config.discord.link_channel_id, channelName: config.discord.link_channel_name || null, inviteUrl: config.discord.invite_url || null });
+  } catch (e) {
+    console.error('createDiscordLinkCode error', e);
+    return res.status(500).json({ ok: false, error: 'server_error' });
+  }
+});
+
+// Verify a code by scanning messages in a specific channel
+exports.verifyDiscordLinkByChannel = onRequest({ secrets: [DISCORD_TOKEN] }, async (req, res) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
+  if (!req.headers.authorization) return res.status(401).json({ ok: false, error: 'Missing authorization header' });
+  try {
+    const idToken = req.headers.authorization.split(' ')[1];
+    const decoded = await getAuth().verifyIdToken(idToken);
+    const uid = decoded.uid;
+    const { code } = req.body || {};
+    if (!code) return res.status(400).json({ ok: false, error: 'missing_code' });
+
+    const codeDoc = await db.collection('discord_link_codes').doc(String(code)).get();
+    if (!codeDoc.exists || codeDoc.data().used) {
+      return res.status(400).json({ ok: false, error: 'invalid_or_used_code' });
+    }
+    if (codeDoc.data().uid !== uid) {
+      return res.status(403).json({ ok: false, error: 'code_not_for_user' });
+    }
+
+    const channelId = config.discord.link_channel_id;
+    if (!channelId) return res.status(500).json({ ok: false, error: 'link_channel_not_configured' });
+
+    // Fetch recent messages and look for the code
+    const resp = await axios.get(`https://discord.com/api/v10/channels/${channelId}/messages?limit=100`, {
+      headers: { Authorization: `Bot ${DISCORD_TOKEN.value()}` }
+    });
+    const messages = resp.data || [];
+    const hit = messages.find((m) => typeof m.content === 'string' && m.content.includes(code));
+    if (!hit) {
+      return res.status(404).json({ ok: false, error: 'code_not_found_in_channel' });
+    }
+
+    const discordUser = hit.author; // { id, username, ... }
+
+    // Store mapping under player integrations
+    const playerRef = db.collection('players').doc(uid);
+    await playerRef.set({ lastUpdated: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    await playerRef.collection('integrations').doc('discord').set({
+      discordId: discordUser.id,
+      username: discordUser.username,
+      discriminator: discordUser.discriminator,
+      globalName: discordUser.global_name || null,
+      linkedAt: admin.firestore.FieldValue.serverTimestamp(),
+      linkMethod: 'channel_code'
+    }, { merge: true });
+
+    // Mark code used
+    await db.collection('discord_link_codes').doc(String(code)).update({ used: true, usedAt: admin.firestore.FieldValue.serverTimestamp() });
+
+    // Attempt to delete the user's verification message to keep channel clean
+    try {
+      await axios.delete(`https://discord.com/api/v10/channels/${channelId}/messages/${hit.id}`, {
+        headers: { Authorization: `Bot ${DISCORD_TOKEN.value()}` }
+      });
+    } catch (cleanupErr) {
+      console.log('Cleanup delete failed (continuing):', cleanupErr.response?.status || cleanupErr.message);
+    }
+
+    return res.status(200).json({ ok: true, linked: true, discordId: discordUser.id });
+  } catch (e) {
+    console.error('verifyDiscordLinkByChannel error', e.response?.data || e.message);
+    return res.status(500).json({ ok: false, error: 'server_error' });
+  }
+});
+
+
+// Sync Rules DB from Google Sheets to Firestore
+exports.syncRulesDb = onRequest(async (req, res) => {
+  // CORS
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return;
+  }
+
+  try {
+    // Optional auth: allow only signed-in users; super-admin check can be added if needed
+    // Mirror syncMasterLogs behavior: no auth required, rely on project permissions/CORS
+
+    // Inputs
+    let spreadsheetId = (req.query.spreadsheetId || req.body?.spreadsheetId || config.google_sheets.rules_spreadsheet_id || config.google_sheets.pc_db_spreadsheet_id).toString();
+    const sanitizeSpreadsheetId = (raw) => {
+      if (!raw) return raw;
+      const dIdx = raw.indexOf('/d/');
+      if (dIdx >= 0) {
+        const after = raw.substring(dIdx + 3);
+        const endSlash = after.indexOf('/');
+        return endSlash >= 0 ? after.substring(0, endSlash) : after;
+      }
+      const qIdx = raw.indexOf('?');
+      if (qIdx >= 0) raw = raw.substring(0, qIdx);
+      const slashIdx = raw.indexOf('/');
+      if (slashIdx >= 0) raw = raw.substring(0, slashIdx);
+      return raw;
+    };
+    spreadsheetId = sanitizeSpreadsheetId(spreadsheetId);
+    const clearExisting = ((req.query.clear ?? req.body?.clear ?? 'true').toString().toLowerCase() !== 'false');
+
+    // Google Sheets API
+    const auth = new googleapis.auth.GoogleAuth({
+      scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
+      keyFile: './service-account-key.json',
+    });
+    const sheets = googleapis.sheets({ version: 'v4', auth });
+
+    // Fetch sheet metadata for robust name resolution
+    const meta = await sheets.spreadsheets.get({ spreadsheetId });
+    const sheetTitles = (meta.data.sheets || [])
+      .map(s => s.properties?.title)
+      .filter(Boolean);
+    const normalize = (s) => String(s).toLowerCase().replace(/[^a-z0-9]/g, '');
+    const titleByNorm = new Map(sheetTitles.map(t => [normalize(t), t]));
+    const resolveSheetTitle = (desired, variants = []) => {
+      const candidates = [desired, ...variants];
+      for (const c of candidates) {
+        if (sheetTitles.includes(c)) return c;
+        const norm = normalize(c);
+        if (titleByNorm.has(norm)) return titleByNorm.get(norm);
+      }
+      return null;
+    };
+    const warnings = [];
+
+    const readSheet = async (sheetName, rangeA1 = 'A:ZZ') => {
+      // Always quote sheet names to handle spaces/special chars; escape single quotes by doubling
+      const safeSheet = `'${String(sheetName).replace(/'/g, "''")}'`;
+      const range = `${safeSheet}!${rangeA1}`;
+      const resp = await sheets.spreadsheets.values.get({ spreadsheetId, range });
+      const values = resp.data.values || [];
+      if (values.length === 0) return { headers: [], rows: [] };
+      return { headers: values[0], rows: values.slice(1) };
+    };
+
+    const toObject = (headers, row) => {
+      const obj = {};
+      for (let i = 0; i < headers.length; i++) {
+        const key = headers[i] ?? `col_${i}`;
+        obj[key] = (row[i] ?? '').toString().trim();
+      }
+      return obj;
+    };
+
+    const parseBool = (val) => {
+      if (typeof val !== 'string') return false;
+      const t = val.trim().toLowerCase();
+      return t === 'true' || t === 'yes' || t === 'y' || t === '1';
+    };
+
+    const sanitizeDocId = (value, fallback) => {
+      let id = String(value ?? '').trim();
+      if (id === '' || id === '.' || id === '..') id = String(fallback ?? 'doc');
+      // Firestore doc IDs cannot contain '/'
+      id = id.replace(/\//g, ' - ');
+      // Collapse whitespace
+      id = id.replace(/\s+/g, ' ').trim();
+      // Enforce max length (Firestore supports up to 1500)
+      if (id.length > 1500) id = id.substring(0, 1500);
+      return id;
+    };
+
+    const sanitizeCollectionId = (value, fallback) => {
+      // Same restrictions as doc IDs for safety
+      return sanitizeDocId(value, fallback);
+    };
+
+    const rulesRoot = db.collection('Rules');
+
+    // Optional clearing of existing docs to mirror Master Logs behavior
+    const clearAllDocs = async (collectionRef) => {
+      let cleared = 0;
+      const snapshot = await collectionRef.get();
+      const docs = snapshot.docs;
+      for (let i = 0; i < docs.length; i += 450) {
+        const batch = db.batch();
+        for (let j = i; j < Math.min(i + 450, docs.length); j++) {
+          batch.delete(docs[j].ref);
+        }
+        await batch.commit();
+        cleared += Math.min(450, docs.length - i);
+      }
+      return cleared;
+    };
+
+    // If clearing is requested, remove subcollections first
+    let cleared = 0;
+    if (clearExisting) {
+      cleared += await clearAllDocs(rulesRoot.doc('Affinities').collection('All'));
+      cleared += await clearAllDocs(rulesRoot.doc('Races').collection('All'));
+      cleared += await clearAllDocs(rulesRoot.doc('Skills').collection('Common'));
+      cleared += await clearAllDocs(rulesRoot.doc('Skills').collection('Races'));
+      // Clear dynamic Skills subcollections: Common, Races, and any affinity-named collections
+      const skillsDocRef = rulesRoot.doc('Skills');
+      cleared += await clearAllDocs(skillsDocRef.collection('Common'));
+      cleared += await clearAllDocs(skillsDocRef.collection('Races'));
+      // Legacy subcollection name used previously
+      cleared += await clearAllDocs(skillsDocRef.collection('Affinities'));
+      // Delete any other subcollections under Skills (affinity-named)
+      if (typeof skillsDocRef.listCollections === 'function') {
+        const subcols = await skillsDocRef.listCollections();
+        for (const col of subcols) {
+          if (col.id === 'Common' || col.id === 'Races' || col.id === 'Affinities') continue;
+          cleared += await clearAllDocs(col);
+        }
+      }
+      cleared += await clearAllDocs(rulesRoot.doc('Body Essence - DR').collection('All'));
+      cleared += await clearAllDocs(rulesRoot.doc('Cultivation Tiers').collection('All'));
+      cleared += await clearAllDocs(rulesRoot.doc('Status Effects').collection('All'));
+      cleared += await clearAllDocs(rulesRoot.doc('Frequency').collection('All'));
+      cleared += await clearAllDocs(rulesRoot.doc('Duration').collection('All'));
+      cleared += await clearAllDocs(rulesRoot.doc('Delivery').collection('All'));
+    }
+
+    // 1) Affinities
+    const affinityTitle = resolveSheetTitle('Affinity', ['Affinities']);
+    let affHeaders = [], affRows = [];
+    if (affinityTitle) {
+      const sheet = await readSheet(affinityTitle);
+      affHeaders = sheet.headers; affRows = sheet.rows;
+    } else {
+      warnings.push("Missing sheet: Affinity");
+    }
+    if (affRows.length) {
+      const batch = db.batch();
+      for (let i = 0; i < affRows.length; i++) {
+        const obj = toObject(affHeaders, affRows[i]);
+        const name = obj.Name || obj.Affinity || obj.name || `Affinity_${i+1}`;
+        const docId = sanitizeDocId(name, `Affinity_${i+1}`);
+        const docRef = rulesRoot.doc('Affinities').collection('All').doc(docId);
+        batch.set(docRef, {
+          Multiplier: Number(obj.Multiplier ?? obj.multiplier ?? 0) || 0,
+          Unique: parseBool(obj.Unique ?? obj.unique ?? 'false'),
+          _sheetRow: i + 2,
+        });
+      }
+      await batch.commit();
+    }
+
+    // 2) Races and Race-Affinity options
+    const raceTitle = resolveSheetTitle('Race', ['Races']);
+    const raceAffinityTitle = resolveSheetTitle('Race- Affinity', ['Race - Affinity', 'Race Affinity', 'Race Affinities']);
+    const raceSheet = raceTitle ? await readSheet(raceTitle) : { headers: [], rows: [] };
+    const raceAffinitySheet = raceAffinityTitle ? await readSheet(raceAffinityTitle) : { headers: [], rows: [] };
+    if (!raceTitle) warnings.push("Missing sheet: Race");
+    if (!raceAffinityTitle) warnings.push("Missing sheet: Race- Affinity");
+    // Build map of race -> array of allowed affinities
+    const raceToAffinities = new Map();
+    if (raceAffinitySheet.rows.length) {
+      for (let i = 0; i < raceAffinitySheet.rows.length; i++) {
+        const obj = toObject(raceAffinitySheet.headers, raceAffinitySheet.rows[i]);
+        const raceName = obj.Race || obj.race || obj.Name;
+        const affinityOption = obj['Affinity Option'] || obj['Affinity'] || obj.affinity || '';
+        if (!raceName) continue;
+        const curr = raceToAffinities.get(raceName) || [];
+        if (affinityOption) curr.push(affinityOption);
+        raceToAffinities.set(raceName, curr);
+      }
+    }
+    if (raceSheet.rows.length) {
+      const batch = db.batch();
+      for (let i = 0; i < raceSheet.rows.length; i++) {
+        const obj = toObject(raceSheet.headers, raceSheet.rows[i]);
+        const name = obj.Name || obj.Race || obj.name || `Race_${i+1}`;
+        const docId = sanitizeDocId(name, `Race_${i+1}`);
+        const docRef = rulesRoot.doc('Races').collection('All').doc(docId);
+        batch.set(docRef, {
+          Unique: parseBool(obj.Unique ?? obj.unique ?? 'false'),
+          Description: obj.Description ?? obj.description ?? '',
+          'Costume Requirements': obj['Costume Requirements'] ?? obj.costumeRequirements ?? '',
+          Notes: obj.Notes ?? obj.notes ?? '',
+          AffinityOptions: raceToAffinities.get(name) || [],
+          _sheetRow: i + 2,
+        });
+      }
+      await batch.commit();
+    }
+
+    // 3) Skills: Common, Race Skills, Affinity Skills
+    const commonSkillsTitle = resolveSheetTitle('Common Skills', ['Common']);
+    const raceSkillsTitle = resolveSheetTitle('Race Skill', ['Race Skills']);
+    const affinitySkillsTitle = resolveSheetTitle('Affinity Skills', ['Affinity Skill']);
+    const commonSkills = commonSkillsTitle ? await readSheet(commonSkillsTitle) : { headers: [], rows: [] };
+    const raceSkills = raceSkillsTitle ? await readSheet(raceSkillsTitle) : { headers: [], rows: [] };
+    const affinitySkills = affinitySkillsTitle ? await readSheet(affinitySkillsTitle) : { headers: [], rows: [] };
+    if (!commonSkillsTitle) warnings.push("Missing sheet: Common Skills");
+    if (!raceSkillsTitle) warnings.push("Missing sheet: Race Skill");
+    if (!affinitySkillsTitle) warnings.push("Missing sheet: Affinity Skills");
+
+    const writeSkills = async (categoryName, sheet) => {
+      if (!sheet.rows.length) return 0;
+      const baseCol = rulesRoot.doc('Skills').collection(categoryName);
+      let written = 0;
+      for (let start = 0; start < sheet.rows.length; start += 400) {
+        const batch = db.batch();
+        const slice = sheet.rows.slice(start, start + 400);
+        for (let i = 0; i < slice.length; i++) {
+          const rowIndex = start + i;
+          const obj = toObject(sheet.headers, slice[i]);
+          const name = obj.Name || obj.name || `Skill_${categoryName}_${rowIndex+1}`;
+          const docId = sanitizeDocId(name, `Skill_${categoryName}_${rowIndex+1}`);
+          const prereqName = obj['Skill Prerequisite'] || obj.skillPrerequisite || '';
+          const prereqCategory = obj['Prerequisite Category'] || obj['Skill Prerequisite Category'] || obj.prerequisiteCategory || '';
+          // Write all columns as attributes as well
+          const attributes = { ...obj };
+          const docRef = baseCol.doc(docId);
+          batch.set(docRef, {
+            ...attributes,
+            SkillPrerequisite: prereqName,
+            SkillPrerequisiteCategory: prereqCategory, // Affinity | Race | Common
+            _sheetRow: rowIndex + 2,
+          }, { merge: true });
+          written++;
+        }
+        await batch.commit();
+      }
+      return written;
+    };
+
+    // Write Common and Race skills as before
+    const commonWritten = await writeSkills('Common', commonSkills);
+    const raceWritten = await writeSkills('Races', raceSkills);
+
+    // Route Affinity skills into subcollections named after each Affinity
+    let affinityWritten = 0;
+    if (affinitySkills.rows.length) {
+      const skillsDocRef = rulesRoot.doc('Skills');
+      for (let start = 0; start < affinitySkills.rows.length; start += 400) {
+        const batch = db.batch();
+        const slice = affinitySkills.rows.slice(start, start + 400);
+        for (let i = 0; i < slice.length; i++) {
+          const rowIndex = start + i;
+          const obj = toObject(affinitySkills.headers, slice[i]);
+          const name = obj.Name || obj.name || `Skill_Affinity_${rowIndex+1}`;
+          const docId = sanitizeDocId(name, `Skill_Affinity_${rowIndex+1}`);
+          const prereqName = obj['Skill Prerequisite'] || obj.skillPrerequisite || '';
+          const prereqCategory = obj['Prerequisite Category'] || obj['Skill Prerequisite Category'] || obj.prerequisiteCategory || '';
+          // Determine target affinity subcollection
+          const affinityNameRaw = obj.Affinity || obj['Affinity'] || obj['Affinity Name'] || 'Unknown';
+          const subcollectionId = sanitizeCollectionId(affinityNameRaw, 'Unknown');
+          const docRef = skillsDocRef.collection(subcollectionId).doc(docId);
+          batch.set(docRef, {
+            ...obj,
+            SkillPrerequisite: prereqName,
+            SkillPrerequisiteCategory: prereqCategory,
+            _sheetRow: rowIndex + 2,
+          }, { merge: true });
+          affinityWritten++;
+        }
+        await batch.commit();
+      }
+    }
+
+    const skillsWritten = commonWritten + raceWritten + affinityWritten;
+
+    // 4) Body Essence - DR
+    const bodyTitle = resolveSheetTitle('Body Essence-DR Chart', ['Body Essence - DR Chart', 'Body Essence DR Chart']);
+    const bodySheet = bodyTitle ? await readSheet(bodyTitle) : { headers: [], rows: [] };
+    if (!bodyTitle) warnings.push("Missing sheet: Body Essence-DR Chart");
+    if (bodySheet.rows.length) {
+      const batch = db.batch();
+      for (let i = 0; i < bodySheet.rows.length; i++) {
+        const obj = toObject(bodySheet.headers, bodySheet.rows[i]);
+        const docRef = rulesRoot.doc('Body Essence - DR').collection('All').doc(`Body ${i + 1}`);
+        batch.set(docRef, { ...obj, _sheetRow: i + 2 }, { merge: true });
+      }
+      await batch.commit();
+    }
+
+    // 5) Cultivation Tiers
+    const tierTitle = resolveSheetTitle('Cultivation Tier', ['Cultivation Tiers']);
+    const tierSheet = tierTitle ? await readSheet(tierTitle) : { headers: [], rows: [] };
+    if (!tierTitle) warnings.push("Missing sheet: Cultivation Tier");
+    if (tierSheet.rows.length) {
+      const batch = db.batch();
+      for (let i = 0; i < tierSheet.rows.length; i++) {
+        const obj = toObject(tierSheet.headers, tierSheet.rows[i]);
+        const name = obj.Name || obj.Tier || obj.name || `Tier_${i + 1}`;
+        const docId = sanitizeDocId(name, `Tier_${i + 1}`);
+        const docRef = rulesRoot.doc('Cultivation Tiers').collection('All').doc(docId);
+        batch.set(docRef, { ...obj, _sheetRow: i + 2 }, { merge: true });
+      }
+      await batch.commit();
+    }
+
+    // 6) Status Effects
+    const statusTitle = resolveSheetTitle('Status Effects', ['Status Effect']);
+    const statusSheet = statusTitle ? await readSheet(statusTitle) : { headers: [], rows: [] };
+    if (!statusTitle) warnings.push("Missing sheet: Status Effects");
+    if (statusSheet.rows.length) {
+      const batch = db.batch();
+      for (let i = 0; i < statusSheet.rows.length; i++) {
+        const obj = toObject(statusSheet.headers, statusSheet.rows[i]);
+        const name = obj.Name || obj.name || `Status_${i + 1}`;
+        const docId = sanitizeDocId(name, `Status_${i + 1}`);
+        const docRef = rulesRoot.doc('Status Effects').collection('All').doc(docId);
+        batch.set(docRef, { ...obj, _sheetRow: i + 2 }, { merge: true });
+      }
+      await batch.commit();
+    }
+
+    // 7) Frequency, Duration, Delivery enumerations
+    const freqTitle = resolveSheetTitle('Frequency');
+    const durTitle = resolveSheetTitle('Duration');
+    const delTitle = resolveSheetTitle('Delivery');
+    const freqSheet = freqTitle ? await readSheet(freqTitle) : { headers: [], rows: [] };
+    const durSheet = durTitle ? await readSheet(durTitle) : { headers: [], rows: [] };
+    const delSheet = delTitle ? await readSheet(delTitle) : { headers: [], rows: [] };
+    if (!freqTitle) warnings.push("Missing sheet: Frequency");
+    if (!durTitle) warnings.push("Missing sheet: Duration");
+    if (!delTitle) warnings.push("Missing sheet: Delivery");
+    const writeEnum = async (collectionName, sheet) => {
+      if (!sheet.rows.length) return 0;
+      const batch = db.batch();
+      let count = 0;
+      for (let i = 0; i < sheet.rows.length; i++) {
+        const obj = toObject(sheet.headers, sheet.rows[i]);
+        const name = obj.Name || obj.name || obj.Value || obj.value || `Item_${i + 1}`;
+        const docId = sanitizeDocId(name, `Item_${i + 1}`);
+        const docRef = rulesRoot.doc(collectionName).collection('All').doc(docId);
+        batch.set(docRef, { ...obj, _sheetRow: i + 2 }, { merge: true });
+        count++;
+      }
+      await batch.commit();
+      return count;
+    };
+    const enumsWritten =
+      (await writeEnum('Frequency', freqSheet)) +
+      (await writeEnum('Duration', durSheet)) +
+      (await writeEnum('Delivery', delSheet));
+
+    // 8) README last updated (cell B1)
+    const readmeTitle = resolveSheetTitle('README', ['Readme', 'ReadMe']);
+    let lastUpdated = '';
+    if (readmeTitle) {
+      const cellRange = `'${String(readmeTitle).replace(/'/g, "''")}'!B1:B1`;
+      const readmeResp = await sheets.spreadsheets.values.get({ spreadsheetId, range: cellRange });
+      lastUpdated = (readmeResp.data.values?.[0]?.[0] || '').toString().trim();
+    }
+    await rulesRoot.doc('Last Updated').set({ date: lastUpdated, _syncedAt: new Date().toISOString() }, { merge: true });
+
+    return res.status(200).json({
+      ok: true,
+      message: 'Rules DB synced',
+      spreadsheetId,
+      sheetTitles,
+      warnings,
+      counts: {
+        affinities: affRows.length,
+        races: raceSheet.rows.length,
+        skills: skillsWritten,
+        bodyEssenceDR: bodySheet.rows.length,
+        tiers: tierSheet.rows.length,
+        statusEffects: statusSheet.rows.length,
+        enums: enumsWritten,
+      },
+      cleared,
+    });
+  } catch (error) {
+    console.error('Error syncing Rules DB:', error);
+    res.status(500).json({ ok: false, error: 'server_error', message: error.message });
+  }
+});
 
 // Advancement Intake Function - Proxy to Google Apps Script
 exports.advancementIntake = onRequest(async (req, res) => {
@@ -118,6 +821,124 @@ exports.createDiscordChannel = onRequest(
     }
   }
 );
+
+// Sync Master Logs from Google Sheets to Firestore
+exports.syncMasterLogs = onRequest(async (req, res) => {
+  // CORS for manual invocation from browser if needed
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return;
+  }
+
+  try {
+    const containerDocId = (req.query.containerDocId || req.body?.containerDocId || 'root').toString();
+    const sheetName = (req.query.sheetName || req.body?.sheetName || config.google_sheets.pc_db_master_logs_sheet_name || 'Master Logs').toString();
+    let spreadsheetId = (req.query.spreadsheetId || req.body?.spreadsheetId || config.google_sheets.pc_db_spreadsheet_id || config.google_sheets.checkin_spreadsheet_id).toString();
+    // Sanitize spreadsheetId in case a full URL or "/edit?..." suffix was provided
+    const sanitizeSpreadsheetId = (raw) => {
+      if (!raw) return raw;
+      // If URL format, try to extract between '/d/' and next '/'
+      const dIdx = raw.indexOf('/d/');
+      if (dIdx >= 0) {
+        const after = raw.substring(dIdx + 3);
+        const endSlash = after.indexOf('/');
+        return endSlash >= 0 ? after.substring(0, endSlash) : after;
+      }
+      // Otherwise strip query or path suffixes
+      const qIdx = raw.indexOf('?');
+      if (qIdx >= 0) raw = raw.substring(0, qIdx);
+      const slashIdx = raw.indexOf('/');
+      if (slashIdx >= 0) raw = raw.substring(0, slashIdx);
+      return raw;
+    };
+    spreadsheetId = sanitizeSpreadsheetId(spreadsheetId);
+    const clearExisting = ((req.query.clear ?? req.body?.clear ?? 'true').toString().toLowerCase() !== 'false');
+
+    // Initialize Google Sheets API client
+    const auth = new googleapis.auth.GoogleAuth({
+      scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+      keyFile: './service-account-key.json'
+    });
+    const sheets = googleapis.sheets({ version: 'v4', auth });
+
+    // Read all rows (21 columns A:U based on provided header)
+    const range = `${sheetName}!A:U`;
+    const valuesResp = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range
+    });
+    const values = valuesResp.data.values || [];
+
+    if (!values.length) {
+      return res.status(200).json({ ok: true, message: 'No rows found', written: 0, cleared: 0 });
+    }
+
+    const headers = values[0];
+    const rows = values.slice(1);
+
+    const targetCollection = db.collection('Master Logs').doc(containerDocId).collection('All');
+
+    let cleared = 0;
+    if (clearExisting) {
+      // Delete existing docs in batches
+      const snapshot = await targetCollection.get();
+      const docs = snapshot.docs;
+      for (let i = 0; i < docs.length; i += 450) {
+        const batch = db.batch();
+        for (let j = i; j < Math.min(i + 450, docs.length); j++) {
+          batch.delete(docs[j].ref);
+        }
+        await batch.commit();
+        cleared += Math.min(450, docs.length - i);
+      }
+    }
+
+    // Helper to map a sheet row to an object using the header row
+    const toObject = (headerArr, rowArr) => {
+      const obj = {};
+      for (let i = 0; i < headerArr.length; i++) {
+        const key = headerArr[i] ?? `col_${i}`;
+        obj[key] = rowArr[i] ?? '';
+      }
+      return obj;
+    };
+
+    // Write rows in batches
+    let written = 0;
+    for (let start = 0; start < rows.length; start += 400) {
+      const batch = db.batch();
+      const slice = rows.slice(start, start + 400);
+      for (let idx = 0; idx < slice.length; idx++) {
+        const globalRowIndex = start + idx + 2; // +2 to account for header row and 1-based indexing
+        const data = toObject(headers, slice[idx]);
+        data._rowNumber = globalRowIndex;
+        data._sheet = sheetName;
+        data._syncedAt = new Date().toISOString();
+        // Use deterministic doc id by row number for idempotency
+        const docRef = targetCollection.doc(`r${globalRowIndex}`);
+        batch.set(docRef, data, { merge: true });
+        written++;
+      }
+      await batch.commit();
+    }
+
+    return res.status(200).json({
+      ok: true,
+      message: 'Master Logs sync complete',
+      spreadsheetId,
+      sheetName,
+      containerDocId,
+      cleared,
+      written
+    });
+  } catch (error) {
+    console.error('Error syncing Master Logs:', error);
+    return res.status(500).json({ ok: false, error: error.message });
+  }
+});
 
 exports.createDiscordEvent = onRequest({ secrets: [DISCORD_TOKEN] }, async (req, res) => {
   const {
@@ -4447,6 +5268,201 @@ exports.getPlayerCharacters = onRequest(async (req, res) => {
   }
 });
 
+// Search characters by playerName, characterName, or characterNumber (Super Admin only)
+exports.searchCharacters = onRequest(async (req, res) => {
+  // Enable CORS
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return;
+  }
+
+  // Auth required
+  if (!req.headers.authorization) {
+    return res.status(401).json({ ok: false, error: 'Missing authorization header' });
+  }
+
+  const idToken = req.headers.authorization.split(' ')[1];
+  try {
+    const decodedToken = await getAuth().verifyIdToken(idToken);
+    const uid = decodedToken.uid;
+
+    // Verify super admin
+    const superAdminDoc = await db
+      .collection('roles')
+      .doc('superadmin')
+      .collection('members')
+      .doc(uid)
+      .get();
+
+    if (!superAdminDoc.exists) {
+      return res.status(403).json({ ok: false, error: 'forbidden' });
+    }
+
+    const { playerName, characterName, characterNumber } = req.query;
+    if (!playerName && !characterName && !characterNumber) {
+      return res.status(400).json({ ok: false, error: 'At least one search parameter is required' });
+    }
+
+    // Prefer a single where filter, then filter remaining parameters in memory
+    const primaryField = characterNumber ? 'characterNumber' : (playerName ? 'playerName' : (characterName ? 'characterName' : null));
+    let snap;
+    try {
+      if (primaryField) {
+        const value = primaryField === 'characterNumber' ? String(characterNumber) : (primaryField === 'playerName' ? String(playerName) : String(characterName));
+        snap = await db.collectionGroup('characters').where(primaryField, '==', value).limit(200).get();
+      } else {
+        snap = await db.collectionGroup('characters').limit(200).get();
+      }
+    } catch (err) {
+      // Fallback: scan players collection if collection group index is missing
+      console.warn('collectionGroup query failed, falling back to player scan:', err.message);
+      const playersSnap = await db.collection('players').limit(50).get();
+      const docs = [];
+      for (const playerDoc of playersSnap.docs) {
+        const chars = await playerDoc.ref.collection('characters').limit(50).get();
+        chars.forEach(d => docs.push(d));
+      }
+      snap = { docs };
+    }
+
+    const qPlayer = (playerName || '').toString().toLowerCase();
+    const qChar = (characterName || '').toString().toLowerCase();
+    const qNum = (characterNumber || '').toString();
+
+    const characters = [];
+    snap.docs.forEach(doc => {
+      const data = doc.data();
+      const playerRef = doc.ref.parent.parent; // players/{uid}
+      const parentUid = playerRef ? playerRef.id : data.playerUid;
+      const charNum = (data.characterNumber || doc.id || '').toString();
+      const pName = (data.playerName || 'Unknown').toString();
+      const cName = (data.characterName || 'Unknown').toString();
+
+      // In-memory filters (case-insensitive contains for names, exact for number)
+      if (qNum && charNum !== qNum) return;
+      if (qPlayer && !pName.toLowerCase().includes(qPlayer)) return;
+      if (qChar && !cName.toLowerCase().includes(qChar)) return;
+
+      characters.push({
+        id: `${parentUid}_${charNum}`,
+        playerUid: parentUid,
+        characterNumber: charNum,
+        playerName: pName,
+        characterName: cName,
+        race: data.race || 'Unknown',
+        cultivationTier: data.cultivationTier || 'Unknown',
+      });
+    });
+
+    return res.status(200).json({ ok: true, characters });
+  } catch (error) {
+    console.error('Error in searchCharacters:', error);
+    return res.status(500).json({ ok: false, error: 'server_error', message: error.message });
+  }
+});
+
+// Get full character by composite ID {uid}_{characterNumber} (Super Admin only)
+exports.getCharacterById = onRequest(async (req, res) => {
+  // Enable CORS
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return;
+  }
+
+  if (!req.headers.authorization) {
+    return res.status(401).json({ ok: false, error: 'Missing authorization header' });
+  }
+
+  const idToken = req.headers.authorization.split(' ')[1];
+  try {
+    const decodedToken = await getAuth().verifyIdToken(idToken);
+    const uid = decodedToken.uid;
+
+    // Verify super admin
+    const superAdminDoc = await db
+      .collection('roles')
+      .doc('superadmin')
+      .collection('members')
+      .doc(uid)
+      .get();
+
+    if (!superAdminDoc.exists) {
+      return res.status(403).json({ ok: false, error: 'forbidden' });
+    }
+
+    const { characterId } = req.query;
+    if (!characterId || typeof characterId !== 'string') {
+      return res.status(400).json({ ok: false, error: 'characterId is required' });
+    }
+
+    const [playerUid, charNum] = characterId.split('_');
+    if (!playerUid || !charNum) {
+      return res.status(400).json({ ok: false, error: 'invalid_character_id' });
+    }
+
+    let character = null;
+
+    // 1) Prefer Storage pc.json for full fidelity
+    try {
+      // Try to obtain player email from players doc; fallback to auth record
+      let email = null;
+      const playerDoc = await db.collection('players').doc(playerUid).get();
+      if (playerDoc.exists) {
+        email = playerDoc.data().email || null;
+      }
+      if (!email) {
+        try {
+          const userRecord = await getAuth().getUser(playerUid);
+          email = userRecord.email || null;
+        } catch (_) {}
+      }
+
+      if (email) {
+        const bucket = getStorage().bucket();
+        const file = bucket.file(`users/${email}/pc.json`);
+        const [exists] = await file.exists();
+        if (exists) {
+          const [fileContent] = await file.download();
+          const pc = JSON.parse(fileContent.toString());
+          character = pc;
+        }
+      }
+    } catch (storageErr) {
+      console.warn('⚠️ getCharacterById storage read failed:', storageErr.message);
+    }
+
+    // 2) Fallback to Firestore document
+    if (!character) {
+      const docRef = db.collection('players').doc(playerUid).collection('characters').doc(charNum);
+      const docSnap = await docRef.get();
+      if (docSnap.exists) {
+        character = docSnap.data();
+      } else {
+        return res.status(404).json({ ok: false, error: 'not_found' });
+      }
+    }
+
+    // 3) Normalize response shape
+    character = character || {};
+    character.id = characterId;
+    character.playerUid = playerUid;
+    const parsedNum = parseInt((character.characterNumber ?? charNum), 10);
+    character.characterNumber = isNaN(parsedNum) ? 0 : parsedNum;
+
+    return res.status(200).json({ ok: true, character });
+  } catch (error) {
+    console.error('Error in getCharacterById:', error);
+    return res.status(500).json({ ok: false, error: 'server_error', message: error.message });
+  }
+});
 // Function to ensure character structure exists in Firestore
 async function ensureCharacterStructure(uid, characterNumber = 'main') {
   const playerRef = db.collection('players').doc(uid);
@@ -4612,68 +5628,25 @@ async function ensureCharacterStructure(uid, characterNumber = 'main') {
       throw itemsError;
     }
     
-    // Ensure cores subcollection exists
-    console.log(`💎 Ensuring cores subcollection exists for character ${characterNumber} (v4 - STEP BY STEP)...`);
+    // Ensure default core item docs exist under items collection (no nested cores subcollection)
+    console.log(`💎 Ensuring core item documents exist under items for character ${characterNumber}...`);
     try {
-      // Use the itemsRef that's now available at function scope
-      console.log(`🔍 Debug: Using itemsRef from function scope: ${typeof itemsRef}`);
-      console.log(`🔍 Debug: itemsRef has collection method: ${typeof itemsRef.collection}`);
-      
-      // Use the working itemsRef but ensure it's a proper collection reference
-      console.log(`🔍 Debug: Using itemsRef from function scope: ${typeof itemsRef}`);
-      console.log(`🔍 Debug: itemsRef has collection method: ${typeof itemsRef.collection}`);
-      
-      // Try to get the collection method from the prototype
-      console.log(`🔍 Debug: itemsRef prototype methods:`, Object.getOwnPropertyNames(Object.getPrototypeOf(itemsRef)));
-      
-      // Create cores subcollection using the working itemsRef
-      const coresRef = itemsRef.collection('cores');
-      console.log(`🔍 Debug: coresRef created: ${typeof coresRef}`);
-      console.log(`🔍 Debug: About to query cores metadata document...`);
-      
-      const coresDoc = await coresRef.doc('metadata').get();
-      console.log(`🔍 Debug: cores metadata document queried successfully`);
-      
-      if (!coresDoc.exists) {
-        console.log(`💎 Creating cores subcollection for character ${characterNumber}`);
-        await coresRef.doc('metadata').set({
-          created: admin.firestore.FieldValue.serverTimestamp(),
-          lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
-          totalCores: 0
-        });
-        console.log(`✅ Cores subcollection created successfully`);
-      } else {
-        console.log(`✅ Cores subcollection already exists`);
-      }
-    } catch (coresError) {
-      console.error(`❌ Error creating cores subcollection:`, coresError);
-      throw coresError;
-    }
-    
-    // Ensure tier-based subcollections exist
-    console.log(`🏆 Ensuring tier subcollections exist...`);
-    try {
-      const tiers = ['Iron', 'Copper', 'Silver', 'Gold', 'Platinum', 'Diamond', 'Mythic'];
-      for (const tier of tiers) {
-        console.log(`🏆 Checking ${tier} tier subcollection...`);
-        const tierRef = coresRef.collection(tier);
-        const tierDoc = await tierRef.doc('metadata').get();
-        
-        if (!tierDoc.exists) {
-          console.log(`🏆 Creating ${tier} tier subcollection for character ${characterNumber}`);
-          await tierRef.doc('metadata').set({
-            created: admin.firestore.FieldValue.serverTimestamp(),
-            lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
-            totalCores: 0
-          });
-          console.log(`✅ ${tier} tier subcollection created successfully`);
+      const nowTs = admin.firestore.FieldValue.serverTimestamp();
+      const coreItemDocs = ['coreIron', 'coreSilver', 'coreGold', 'coreJade', 'coreSaint', 'coreSovereign'];
+      for (const docName of coreItemDocs) {
+        const docRef = itemsRef.doc(docName);
+        const docSnap = await docRef.get();
+        if (!docSnap.exists) {
+          console.log(`📝 Creating ${docName} document for character ${characterNumber}`);
+          await docRef.set({ count: 0, lastUpdated: nowTs });
         } else {
-          console.log(`✅ ${tier} tier subcollection already exists`);
+          await docRef.set({ lastUpdated: nowTs }, { merge: true });
         }
       }
-    } catch (tierError) {
-      console.error(`❌ Error creating tier subcollections:`, tierError);
-      throw tierError;
+      console.log(`✅ Core item documents ensured under items`);
+    } catch (coresError) {
+      console.error(`❌ Error ensuring core item documents:`, coresError);
+      throw coresError;
     }
     
     console.log(`✅ Character structure ensured for player ${uid}, character ${characterNumber}`);
@@ -4683,15 +5656,13 @@ async function ensureCharacterStructure(uid, characterNumber = 'main') {
     const finalPlayerDoc = await playerRef.get();
     const finalCharacterDoc = await characterRef.get();
     const finalItemsDoc = await charactersRef.doc(characterNumber).collection('items').doc('metadata').get();
-    const finalCoresDoc = await itemsRef.collection('cores').doc('metadata').get();
-    const finalIronDoc = await coresRef.collection('Iron').doc('metadata').get();
+    const finalCoreIronDoc = await itemsRef.doc('coreIron').get();
     
     console.log(`🎯 Final verification results:`);
     console.log(`  - Player exists: ${finalPlayerDoc.exists}`);
     console.log(`  - Character exists: ${finalCharacterDoc.exists}`);
     console.log(`  - Items exists: ${finalItemsDoc.exists}`);
-    console.log(`  - Cores exists: ${finalCoresDoc.exists}`);
-    console.log(`  - Iron tier exists: ${finalIronDoc.exists}`);
+    console.log(`  - coreIron doc exists: ${finalCoreIronDoc.exists}`);
     
     return characterNumber;
     
@@ -4815,11 +5786,8 @@ exports.testCharacterStructure = onRequest(async (req, res) => {
     const itemsRef = characterRef.collection('items');
     const itemsDoc = await itemsRef.doc('metadata').get();
 
-    const coresRef = itemsRef.collection('cores');
-    const coresDoc = await coresRef.doc('metadata').get();
-
-    const ironRef = coresRef.collection('Iron');
-    const ironDoc = await ironRef.doc('metadata').get();
+    // Align verification with items/<coreTier> document schema
+    const finalCoreIronDoc = await itemsRef.doc('coreIron').get();
 
     return res.status(200).json({
       ok: true,
@@ -4829,15 +5797,15 @@ exports.testCharacterStructure = onRequest(async (req, res) => {
         playerExists: playerDoc.exists,
         characterExists: characterDoc.exists,
         itemsExists: itemsDoc.exists,
-        coresExists: coresDoc.exists,
-        ironTierExists: ironDoc.exists
+        coresExists: finalCoreIronDoc.exists,
+        ironTierExists: finalCoreIronDoc.exists
       },
       paths: {
         player: `players/${uid}`,
         character: `players/${uid}/characters/${characterNumber}`,
         items: `players/${uid}/characters/${characterNumber}/items`,
-        cores: `players/${uid}/characters/${characterNumber}/items/cores`,
-        ironTier: `players/${uid}/characters/${characterNumber}/items/cores/Iron`
+        cores: `players/${uid}/characters/${characterNumber}/items/coreIron`,
+        ironTier: `players/${uid}/characters/${characterNumber}/items/coreIron`
       }
     });
 
@@ -5019,22 +5987,18 @@ exports.initializeUserStructure = onRequest(async (req, res) => {
       console.log(`✅ Items subcollection already exists`);
     }
 
-    // Create basic cores subcollection if it doesn't exist
-    const coresRef = itemsRef.collection('cores');
-    const coresDoc = await coresRef.doc('metadata').get();
-    
+    // Ensure core documents exist directly under items collection (no cores subcollection)
     let coresCreated = false;
-    if (!coresDoc.exists) {
-      console.log(`💎 Creating cores subcollection for character ${characterNumber}`);
-      await coresRef.doc('metadata').set({
-        created: admin.firestore.FieldValue.serverTimestamp(),
-        lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
-        totalCores: 0
-      });
-      coresCreated = true;
-      console.log(`✅ Cores subcollection created`);
-    } else {
-      console.log(`✅ Cores subcollection already exists`);
+    const nowTs = admin.firestore.FieldValue.serverTimestamp();
+    const coreItemDocs = ['coreIron', 'coreSilver', 'coreGold', 'coreJade', 'coreSaint', 'coreSovereign'];
+    for (const docName of coreItemDocs) {
+      const docRef = itemsRef.doc(docName);
+      const docSnap = await docRef.get();
+      if (!docSnap.exists) {
+        console.log(`💎 Creating ${docName} document for character ${characterNumber}`);
+        await docRef.set({ count: 0, lastUpdated: nowTs });
+        coresCreated = true;
+      }
     }
 
     console.log(`🎯 User structure initialization completed for ${uid}`);

@@ -15,21 +15,23 @@ dependencies:
   http: ^1.1.0
   crypto: ^3.0.3
 
-  firebase_core: ^3.13.0
-  firebase_auth: ^5.5.2
-  firebase_storage: ^12.4.5
-  google_sign_in: ^6.2.1
+  firebase_core: ^4.1.0
+  firebase_auth: ^6.0.2
+  firebase_storage: ^13.0.1
+  google_sign_in: ^7.2.0
   shared_preferences: ^2.2.2 
   qr_code_scanner_plus: ^2.0.10+1
-  cloud_firestore: ^5.6.12
+  cloud_firestore: ^6.0.1
   url_launcher: ^6.2.5
-  geolocator: ^10.1.0
+  geolocator: ^14.0.2
   path_provider: ^2.1.2
+  hive: ^2.2.3
+  hive_flutter: ^1.1.0
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
-  flutter_lints: ^5.0.0
+  flutter_lints: ^6.0.0
 
 flutter:
   uses-material-design: true

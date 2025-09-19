@@ -333,9 +333,12 @@ class _EventsPageState extends State<EventsPage> {
         final data = json.decode(response.body);
         if (data['ok'] == true) {
           final eventsList = data['events'] as List;
-          final loadedEvents = eventsList.map((eventData) {
-            return Event.fromFirestore(eventData, eventData['id']);
-          }).toList();
+          final now = DateTime.now();
+          final loadedEvents = eventsList
+              .map((eventData) => Event.fromFirestore(eventData, eventData['id']))
+              .where((e) => !e.endDateTime.isBefore(now))
+              .toList()
+            ..sort((a, b) => a.startDateTime.compareTo(b.startDateTime));
 
           setState(() {
             events = loadedEvents;
@@ -362,6 +365,144 @@ class _EventsPageState extends State<EventsPage> {
     }
   }
 
+  Future<void> _loadPastEvents() async {
+    try {
+      setState(() {
+        isLoading = true;
+      });
+
+      final user = _auth.currentUser;
+      if (user == null) {
+        setState(() {
+          isLoading = false;
+        });
+        return;
+      }
+
+      final idToken = await user.getIdToken();
+
+      final response = await http.get(
+        Uri.parse('https://us-central1-crucible-helper.cloudfunctions.net/getEvents'),
+        headers: {
+          'Authorization': 'Bearer $idToken',
+          'Content-Type': 'application/json',
+        },
+      );
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        if (data['ok'] == true) {
+          final eventsList = List<Map<String, dynamic>>.from(data['events'] as List);
+          final now = DateTime.now();
+          final past = eventsList
+              .map((e) => Event.fromFirestore(e, e['id']))
+              .where((e) => e.endDateTime.isBefore(now))
+              .toList()
+            ..sort((a, b) => b.startDateTime.compareTo(a.startDateTime));
+
+          setState(() {
+            isLoading = false;
+          });
+
+          _showPastEventsList(past);
+        } else {
+          setState(() {
+            isLoading = false;
+          });
+        }
+      } else {
+        setState(() {
+          isLoading = false;
+        });
+      }
+    } catch (error) {
+      print('❌ Error loading past events: $error');
+      setState(() {
+        isLoading = false;
+      });
+    }
+  }
+
+  void _showPastEventsModal() {
+    _loadPastEvents();
+  }
+
+  void _showPastEventsList(List<Event> pastEvents) {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return Dialog(
+          backgroundColor: Colors.grey[900],
+          child: SizedBox(
+            width: MediaQuery.of(context).size.width * 0.9,
+            height: MediaQuery.of(context).size.height * 0.8,
+            child: Column(
+              children: [
+                Container(
+                  padding: EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: Colors.blueGrey.withOpacity(0.15),
+                    borderRadius: BorderRadius.only(
+                      topLeft: Radius.circular(8),
+                      topRight: Radius.circular(8),
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(Icons.history, color: Colors.amber),
+                      SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'Past Events',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 20,
+                            fontWeight: FontWeight.bold,
+                            fontFamily: 'Cinzel',
+                          ),
+                        ),
+                      ),
+                      IconButton(
+                        icon: Icon(Icons.close, color: Colors.white),
+                        onPressed: () => Navigator.of(context).pop(),
+                      ),
+                    ],
+                  ),
+                ),
+                Expanded(
+                  child: ListView.separated(
+                    padding: EdgeInsets.all(16),
+                    itemCount: pastEvents.length,
+                    separatorBuilder: (_, __) => Divider(color: Colors.grey[800]),
+                    itemBuilder: (context, index) {
+                      final event = pastEvents[index];
+                      return ListTile(
+                        contentPadding: EdgeInsets.symmetric(vertical: 8, horizontal: 8),
+                        title: Text(
+                          event.type,
+                          style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                        ),
+                        subtitle: Text(
+                          '${event.dateRange} • ${event.location}',
+                          style: TextStyle(color: Colors.grey[400]),
+                        ),
+                        trailing: Icon(Icons.chevron_right, color: Colors.amber),
+                        onTap: () {
+                          Navigator.of(context).pop();
+                          _showRegistrationDetailsModal(event);
+                        },
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   Future<void> _loadLocationsAndTypes() async {
     try {
       final user = _auth.currentUser;
@@ -378,6 +519,7 @@ class _EventsPageState extends State<EventsPage> {
         },
       );
 
+      if (!mounted) return;
       if (locationsResponse.statusCode == 200) {
         final locationsData = json.decode(locationsResponse.body);
         if (locationsData['ok'] == true) {
@@ -386,6 +528,7 @@ class _EventsPageState extends State<EventsPage> {
             return Location.fromFirestore(locationData, locationData['id']);
           }).toList();
 
+          if (!mounted) return;
           setState(() {
             locations = loadedLocations;
           });
@@ -401,6 +544,7 @@ class _EventsPageState extends State<EventsPage> {
         },
       );
 
+      if (!mounted) return;
       if (typesResponse.statusCode == 200) {
         final typesData = json.decode(typesResponse.body);
         if (typesData['ok'] == true) {
@@ -409,6 +553,7 @@ class _EventsPageState extends State<EventsPage> {
             return EventType.fromFirestore(typeData, typeData['id']);
           }).toList();
 
+          if (!mounted) return;
           setState(() {
             eventTypes = loadedTypes;
           });
@@ -424,6 +569,7 @@ class _EventsPageState extends State<EventsPage> {
         },
       );
 
+      if (!mounted) return;
       if (attendeeTypesResponse.statusCode == 200) {
         final attendeeTypesData = json.decode(attendeeTypesResponse.body);
         if (attendeeTypesData['ok'] == true) {
@@ -432,6 +578,7 @@ class _EventsPageState extends State<EventsPage> {
             return EventAttendeeType.fromFirestore(attendeeTypeData, attendeeTypeData['id']);
           }).toList();
 
+          if (!mounted) return;
           setState(() {
             attendeeTypes = loadedAttendeeTypes;
           });
@@ -758,6 +905,63 @@ class _EventsPageState extends State<EventsPage> {
                           ),
                         ),
                       ),
+                      if (isSuperAdmin)
+                        PopupMenuButton<String>(
+                          icon: Icon(Icons.more_vert, color: Colors.white),
+                          onSelected: (value) {
+                            switch (value) {
+                              case 'edit_event':
+                                Navigator.of(context).pop();
+                                _showEditEventModal(event);
+                                break;
+                              case 'delete_event':
+                                Navigator.of(context).pop();
+                                _showDeleteEventConfirmation(event);
+                                break;
+                              case 'edit_registration':
+                                Navigator.of(context).pop();
+                                _showEditRegistrationModal(event);
+                                break;
+                            }
+                          },
+                          itemBuilder: (context) {
+                            final items = <PopupMenuEntry<String>>[
+                              PopupMenuItem(
+                                value: 'edit_event',
+                                child: Row(
+                                  children: [
+                                    Icon(Icons.edit, size: 18),
+                                    SizedBox(width: 8),
+                                    Text('Edit Event'),
+                                  ],
+                                ),
+                              ),
+                              PopupMenuItem(
+                                value: 'delete_event',
+                                child: Row(
+                                  children: [
+                                    Icon(Icons.delete, size: 18),
+                                    SizedBox(width: 8),
+                                    Text('Delete Event'),
+                                  ],
+                                ),
+                              ),
+                            ];
+                            if (event.registrationActivated) {
+                              items.insert(0, PopupMenuItem(
+                                value: 'edit_registration',
+                                child: Row(
+                                  children: [
+                                    Icon(Icons.edit_calendar, size: 18),
+                                    SizedBox(width: 8),
+                                    Text('Edit Registration'),
+                                  ],
+                                ),
+                              ));
+                            }
+                            return items;
+                          },
+                        ),
                       IconButton(
                         icon: Icon(Icons.close, color: Colors.white),
                         onPressed: () => Navigator.of(context).pop(),
@@ -844,23 +1048,19 @@ class _EventsPageState extends State<EventsPage> {
                         // Buttons
                         Column(
                           children: [
-                            // Admin Registration Button
-                            if (isSuperAdmin) ...[
+                            // Admin Registration Button (only when not yet active)
+                            if (isSuperAdmin && !event.registrationActivated) ...[
                               SizedBox(
                                 width: double.infinity,
                                 child: ElevatedButton.icon(
                                   onPressed: () {
                                     Navigator.of(context).pop(); // Close details modal
-                                    if (event.registrationActivated) {
-                                      _showEditRegistrationModal(event); // Edit registration
-                                    } else {
-                                      _showActivateRegistrationModal(event); // Activate registration
-                                    }
+                                    _showActivateRegistrationModal(event); // Activate registration
                                   },
-                                  icon: Icon(event.registrationActivated ? Icons.edit : Icons.add),
-                                  label: Text(event.registrationActivated ? 'Edit Registration' : 'Activate Registration'),
+                                  icon: Icon(Icons.add),
+                                  label: Text('Activate Registration'),
                                   style: ElevatedButton.styleFrom(
-                                    backgroundColor: event.registrationActivated ? Colors.blue : Colors.green,
+                                    backgroundColor: Colors.green,
                                     foregroundColor: Colors.white,
                                     padding: EdgeInsets.symmetric(vertical: 16),
                                     shape: RoundedRectangleBorder(
@@ -940,29 +1140,6 @@ class _EventsPageState extends State<EventsPage> {
                               ),
                               SizedBox(height: 12),
                             ],
-                            // Edit Event Button (Admin only)
-                            if (isSuperAdmin) ...[
-                              SizedBox(
-                                width: double.infinity,
-                                child: ElevatedButton.icon(
-                                  onPressed: () {
-                                    Navigator.of(context).pop(); // Close details modal
-                                    _showEditEventModal(event); // Show edit event modal
-                                  },
-                                  icon: Icon(Icons.edit),
-                                  label: Text('Edit Event'),
-                                  style: ElevatedButton.styleFrom(
-                                    backgroundColor: Colors.orange,
-                                    foregroundColor: Colors.white,
-                                    padding: EdgeInsets.symmetric(vertical: 16),
-                                    shape: RoundedRectangleBorder(
-                                      borderRadius: BorderRadius.circular(8),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                              SizedBox(height: 12),
-                            ],
                             // Check In Button (Admin only)
                             if (isSuperAdmin) ...[
                               SizedBox(
@@ -1017,29 +1194,7 @@ class _EventsPageState extends State<EventsPage> {
                                 SizedBox(height: 12),
                               ],
                             ],
-                            // Delete Event Button (Admin only)
-                            if (isSuperAdmin) ...[
-                              SizedBox(
-                                width: double.infinity,
-                                child: ElevatedButton.icon(
-                                  onPressed: () {
-                                    Navigator.of(context).pop(); // Close details modal
-                                    _showDeleteEventConfirmation(event); // Show delete confirmation
-                                  },
-                                  icon: Icon(Icons.delete),
-                                  label: Text('Delete Event'),
-                                  style: ElevatedButton.styleFrom(
-                                    backgroundColor: Colors.red,
-                                    foregroundColor: Colors.white,
-                                    padding: EdgeInsets.symmetric(vertical: 16),
-                                    shape: RoundedRectangleBorder(
-                                      borderRadius: BorderRadius.circular(8),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                              SizedBox(height: 12),
-                            ],
+                            // Edit/Delete moved to header menu for admins
 
                           ],
                         ),
@@ -1108,13 +1263,21 @@ class _EventsPageState extends State<EventsPage> {
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
         if (data['ok'] == true) {
+          // Optimistically remove the event from the current list
+          if (mounted) {
+            setState(() {
+              events.removeWhere((e) => e.id == event.id);
+            });
+          }
+
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: Text('Event deleted successfully!'),
               backgroundColor: Colors.green,
             ),
           );
-          _loadEvents(); // Refresh the events list
+          // Refresh the events list in the background to stay in sync
+          _loadEvents();
         } else {
           throw Exception(data['error'] ?? 'Failed to delete event');
         }
@@ -2082,34 +2245,87 @@ class _EventsPageState extends State<EventsPage> {
         backgroundColor: Colors.grey[900],
         elevation: 0,
         actions: [
-          // Add Event button for super admins
-          if (isSuperAdmin && !isLoadingPermissions)
-            TextButton.icon(
-              icon: Icon(Icons.add, color: Colors.amber),
-              label: Text('Add Event', style: TextStyle(color: Colors.amber)),
-              onPressed: _showCreateEventModal,
-            ),
-          // Edit Event Type button for super admins
-          if (isSuperAdmin && !isLoadingPermissions)
-            TextButton.icon(
-              icon: Icon(Icons.category, color: Colors.amber),
-              label: Text('Edit Event Type', style: TextStyle(color: Colors.amber)),
-              onPressed: _showEventTypeListModal,
-            ),
-          // Edit Locations button for super admins
-          if (isSuperAdmin && !isLoadingPermissions)
-            TextButton.icon(
-              icon: Icon(Icons.location_on, color: Colors.amber),
-              label: Text('Edit Locations', style: TextStyle(color: Colors.amber)),
-              onPressed: _showLocationListModal,
-            ),
-          // Sync to Discord button for super admins
-          if (isSuperAdmin && !isLoadingPermissions)
-            TextButton.icon(
-              icon: Icon(Icons.sync, color: Colors.amber),
-              label: Text('Sync to Discord', style: TextStyle(color: Colors.amber)),
-              onPressed: _syncEventsToDiscord,
-            ),
+          PopupMenuButton<String>(
+            icon: Icon(Icons.more_vert, color: Colors.amber),
+            onSelected: (value) {
+              switch (value) {
+                case 'past_events':
+                  _showPastEventsModal();
+                  break;
+                case 'add_event':
+                  _showCreateEventModal();
+                  break;
+                case 'edit_event_type':
+                  _showEventTypeListModal();
+                  break;
+                case 'edit_locations':
+                  _showLocationListModal();
+                  break;
+                case 'sync_discord':
+                  _syncEventsToDiscord();
+                  break;
+              }
+            },
+            itemBuilder: (context) {
+              final items = <PopupMenuEntry<String>>[
+                PopupMenuItem(
+                  value: 'past_events',
+                  child: Row(
+                    children: [
+                      Icon(Icons.history, size: 18),
+                      SizedBox(width: 8),
+                      Text('Past Events'),
+                    ],
+                  ),
+                ),
+              ];
+              if (isSuperAdmin && !isLoadingPermissions) {
+                items.addAll([
+                  PopupMenuItem(
+                    value: 'add_event',
+                    child: Row(
+                      children: [
+                        Icon(Icons.add, size: 18),
+                        SizedBox(width: 8),
+                        Text('Add Event'),
+                      ],
+                    ),
+                  ),
+                  PopupMenuItem(
+                    value: 'edit_event_type',
+                    child: Row(
+                      children: [
+                        Icon(Icons.category, size: 18),
+                        SizedBox(width: 8),
+                        Text('Edit Event Type'),
+                      ],
+                    ),
+                  ),
+                  PopupMenuItem(
+                    value: 'edit_locations',
+                    child: Row(
+                      children: [
+                        Icon(Icons.location_on, size: 18),
+                        SizedBox(width: 8),
+                        Text('Edit Locations'),
+                      ],
+                    ),
+                  ),
+                  PopupMenuItem(
+                    value: 'sync_discord',
+                    child: Row(
+                      children: [
+                        Icon(Icons.sync, size: 18),
+                        SizedBox(width: 8),
+                        Text('Sync to Discord'),
+                      ],
+                    ),
+                  ),
+                ]);
+              }
+              return items;
+            },
+          ),
         ],
       ),
       body: isLoading
@@ -4708,9 +4924,7 @@ class _EventCardState extends State<_EventCard> {
     final isPast = widget.event.endDateTime.isBefore(now);
 
     return GestureDetector(
-      onTap: (hasAdminPermissions || (widget.event.registrationActivated && !isLoadingPermissions)) 
-          ? () => widget.onCheckIn(widget.event)
-          : null,
+      onTap: () => widget.onCheckIn(widget.event),
       child: Card(
         margin: EdgeInsets.only(bottom: 16),
         color: Colors.grey[900],

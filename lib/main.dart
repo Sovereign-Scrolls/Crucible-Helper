@@ -6,6 +6,7 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:hive_flutter/hive_flutter.dart';
 import 'firebase_options.dart';
 import 'shared/rules_service.dart';
 import 'dart:html' as html;
@@ -18,7 +19,11 @@ import 'dart:io';
 import 'models/character.dart'; 
 import 'pages/login_page.dart';
 import 'pages/events_page.dart';
+import 'pages/rules_page.dart';
+import 'pages/death_timer_page.dart';
 import 'config/app_config.dart';
+
+final RouteObserver<ModalRoute<void>> routeObserver = RouteObserver<ModalRoute<void>>();
 
 // Data structures for unsubmitted advancement
 class AffinityChange {
@@ -143,26 +148,26 @@ Character? cachedCharacter;
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await Hive.initFlutter();
   await Firebase.initializeApp(
     options: DefaultFirebaseOptions.currentPlatform,
   );
 
-  try {
-    await RulesService.fetchAndCacheRules();
-    print('✅ rules.json successfully cached.');
-  } catch (e) {
-    print('❌ Error caching rules.json: $e');
-  }
+  // Route Flutter framework errors to terminal
+  FlutterError.onError = (FlutterErrorDetails details) {
+    FlutterError.presentError(details);
+    print('❌ [FlutterError] ${details.exceptionAsString()}');
+    if (details.stack != null) {
+      print(details.stack);
+    }
+  };
 
-  // Add console command to reset check-in state for debugging
+  // Add console command to reset check-in state for debugging (web only)
   if (kIsWeb) {
     html.window.console.log('🔧 Debug commands available:');
     html.window.console.log('  - resetCheckInState() - Reset stuck check-in state');
-    
     html.window.console.log('🔄 Adding resetCheckInState function to window...');
     html.window.console.log('🔄 Type "resetCheckInState()" in console to reset check-in state');
-    
-    // Add the function to the global window object
     html.window.console.log('🔄 Function added successfully');
   }
 
@@ -178,6 +183,7 @@ class CrucibleHelperApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       title: 'Crucible Helper',
       theme: ThemeData.dark(),
+      navigatorObservers: [routeObserver],
       home: LoginPage(), // Start at the login page
     );
   }
@@ -437,6 +443,7 @@ class _HomePageState extends State<HomePage> {
 
   @override
   Widget build(BuildContext context) {
+    final isWide = MediaQuery.of(context).size.width >= 900;
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
@@ -452,79 +459,140 @@ class _HomePageState extends State<HomePage> {
           ),
         ],
       ),
-      body: SafeArea(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            // Active Events Section
-            if (activeEvents.isNotEmpty) _buildActiveEventsSection(),
-            
-            Expanded(
-              child: Center(
-                child: LayoutBuilder(
-                  builder: (context, constraints) {
-                    double screenHeight = constraints.maxHeight;
-                    double logoSize = screenHeight * 0.25; // 25% of the screen height
-
-                    if (logoSize > 200) {
-                      logoSize = 200; // Cap it at 200px so it doesn't get too big
-                    }
-
-                    return Image.asset(
-                      'assets/logo.png',
-                      height: logoSize,
-                    );
-                  },
+      floatingActionButton: isWide ? null : FloatingActionButton.large(
+        tooltip: 'Character',
+        onPressed: () {
+          if (character != null) {
+            Navigator.push(context, MaterialPageRoute(
+              builder: (_) => CharacterSheetPage(character: character!),
+            ));
+          } else {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('Character data not loaded yet')),
+            );
+          }
+        },
+        child: Icon(Icons.person),
+      ),
+      floatingActionButtonLocation: FloatingActionButtonLocation.centerDocked,
+      bottomNavigationBar: isWide ? null : BottomAppBar(
+        shape: const CircularNotchedRectangle(),
+        notchMargin: 8,
+        color: Colors.grey[900],
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12.0),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Row(children: [
+                IconButton(
+                  tooltip: 'Scan',
+                  icon: Icon(Icons.qr_code_scanner),
+                  onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => QRScannerPage())),
                 ),
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.only(bottom: 24.0),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                IconButton(
+                  tooltip: 'Death',
+                  icon: Icon(Icons.timer),
+                  onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => DeathTimerPage())),
+                ),
+              ]),
+              Row(children: [
+                IconButton(
+                  tooltip: 'Events',
+                  icon: Icon(Icons.calendar_today),
+                  onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => EventsPage())),
+                ),
+                IconButton(
+                  tooltip: 'Rules',
+                  icon: Icon(Icons.menu_book),
+                  onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => RulesPage())),
+                ),
+              ]),
+            ],
+          ),
+        ),
+      ),
+      body: SafeArea(
+        child: isWide
+            ? Row(
                 children: [
-                  _HomeButton(
-                    icon: Icons.person,
-                    label: 'Character',
-                    onPressed: () {
-                      if (character != null) {
-                        Navigator.push(context, MaterialPageRoute(
-                          builder: (_) => CharacterSheetPage(character: character!),
-                        ));
-                      } else {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(content: Text('Character data not loaded yet')),
-                        );
+                  NavigationRail(
+                    backgroundColor: Colors.black,
+                    selectedIndex: -1,
+                    labelType: NavigationRailLabelType.all,
+                    leading: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 12.0),
+                      child: ElevatedButton.icon(
+                        icon: Icon(Icons.person),
+                        label: Text('Character'),
+                        onPressed: () {
+                          if (character != null) {
+                            Navigator.push(context, MaterialPageRoute(
+                              builder: (_) => CharacterSheetPage(character: character!),
+                            ));
+                          } else {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text('Character data not loaded yet')),
+                            );
+                          }
+                        },
+                      ),
+                    ),
+                    destinations: const [
+                      NavigationRailDestination(icon: Icon(Icons.qr_code_scanner), label: Text('Scan')),
+                      NavigationRailDestination(icon: Icon(Icons.timer), label: Text('Death')),
+                      NavigationRailDestination(icon: Icon(Icons.calendar_today), label: Text('Events')),
+                      NavigationRailDestination(icon: Icon(Icons.menu_book), label: Text('Rules')),
+                    ],
+                    onDestinationSelected: (idx) {
+                      switch (idx) {
+                        case 0:
+                          Navigator.push(context, MaterialPageRoute(builder: (_) => QRScannerPage()));
+                          break;
+                        case 1:
+                          Navigator.push(context, MaterialPageRoute(builder: (_) => DeathTimerPage()));
+                          break;
+                        case 2:
+                          Navigator.push(context, MaterialPageRoute(builder: (_) => EventsPage()));
+                          break;
+                        case 3:
+                          Navigator.push(context, MaterialPageRoute(builder: (_) => RulesPage()));
+                          break;
                       }
                     },
                   ),
-                  _HomeButton(
-                    icon: Icons.qr_code_scanner,
-                    label: 'Scan',
-                    onPressed: () {
-                      Navigator.push(context, MaterialPageRoute(builder: (_) => QRScannerPage()));
-                    },
-                  ),
-                  _HomeButton(
-                    icon: Icons.timer,
-                    label: 'Death',
-                    onPressed: () {
-                      Navigator.push(context, MaterialPageRoute(builder: (_) => DeathTimerPage()));
-                    },
-                  ),
-                  _HomeButton(
-                    icon: Icons.calendar_today,
-                    label: 'Events',
-                    onPressed: () {
-                      Navigator.push(context, MaterialPageRoute(builder: (_) => EventsPage()));
-                    },
-                  ),
+                  const VerticalDivider(width: 1),
+                  Expanded(child: _buildHomeCenterContent()),
                 ],
-              ),
-            )
-          ],
-        ),
+              )
+            : _buildHomeCenterContent(),
       ),
+    );
+  }
+
+  Widget _buildHomeCenterContent() {
+    return Column(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        if (activeEvents.isNotEmpty) _buildActiveEventsSection(),
+        Expanded(
+          child: Center(
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                double screenHeight = constraints.maxHeight;
+                double logoSize = screenHeight * 0.25;
+                if (logoSize > 200) {
+                  logoSize = 200;
+                }
+                return Image.asset(
+                  'assets/logo.png',
+                  height: logoSize,
+                );
+              },
+            ),
+          ),
+        ),
+      ],
     );
   }
 
@@ -2494,6 +2562,7 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
   final List<String> _skillSortOptions = ['Alphabetical', 'Type', 'Frequency'];
   Map<String, dynamic>? rulesJson;
   bool _isEditMode = false;
+  bool _isSuperAdmin = false;
   
   // Track unspent points for edit mode
   int _originalUnspentAffinityPoints = 0;
@@ -2508,9 +2577,11 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
   @override
   void initState() {
     super.initState();
-    currentHP = widget.character.hitPoints['total'];
+    final dynamic rawTotalHp = widget.character.hitPoints['total'];
+    currentHP = rawTotalHp is num ? rawTotalHp.toInt() : 0;
     _loadSkillSortPreference();
     _loadUnsubmittedAdvancement();
+    _checkSuperAdminPermissions();
 
     RulesService.loadCachedRules().then((cached) {
       if (cached == null) {
@@ -2532,6 +2603,34 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
         });
       }
     });
+  }
+
+  Future<void> _checkSuperAdminPermissions() async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) return;
+
+      final idToken = await user.getIdToken();
+      final response = await http.post(
+        Uri.parse(AppConfig.checkSuperAdminUrl),
+        headers: {
+          'Authorization': 'Bearer $idToken',
+          'Content-Type': 'application/json',
+        },
+        body: json.encode({'uid': user.uid}),
+      );
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        if (mounted) {
+          setState(() {
+            _isSuperAdmin = data['isSuperAdmin'] ?? false;
+          });
+        }
+      }
+    } catch (e) {
+      // ignore
+    }
   }
 
   // SharedPreferences functions for unsubmitted advancement
@@ -4395,8 +4494,11 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
     }
 
     final character = widget.character;
+    final currentUid = FirebaseAuth.instance.currentUser?.uid;
+    final bool isOtherCharacter = character.playerUid != null && character.playerUid != currentUid;
 
     return Scaffold(
+      backgroundColor: isOtherCharacter ? Colors.grey[900] : Colors.black,
       appBar: AppBar(
         title: Row(
           children: [
@@ -4452,6 +4554,9 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
                   break;
                 case 'sync':
                   _syncCharacterData();
+                  break;
+                case 'open_other':
+                  _showOpenOtherCharacterDialog();
                   break;
                 case 'edit':
                   if (!_isEditMode) {
@@ -4517,37 +4622,48 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
                       ],
                     ),
                   ),
-              PopupMenuItem(
-                value: 'cores',
-                child: Row(
-                  children: [
-                    Icon(Icons.inventory, size: 20),
-                    SizedBox(width: 12),
-                    Text('Stored Cores'),
-                  ],
+                PopupMenuItem(
+                  value: 'cores',
+                  child: Row(
+                    children: [
+                      Icon(Icons.inventory, size: 20),
+                      SizedBox(width: 12),
+                      Text('Stored Cores'),
+                    ],
+                  ),
                 ),
-              ),
-              PopupMenuItem(
-                value: 'sync',
-                child: Row(
-                  children: [
-                    Icon(Icons.sync, size: 20),
-                    SizedBox(width: 12),
-                    Text('Sync Character Data'),
-                  ],
+                PopupMenuItem(
+                  value: 'sync',
+                  child: Row(
+                    children: [
+                      Icon(Icons.sync, size: 20),
+                      SizedBox(width: 12),
+                      Text('Sync Character Data'),
+                    ],
+                  ),
                 ),
-              ),
-              PopupMenuItem(
-                value: 'edit',
-                child: Row(
-                  children: [
-                    Icon(_isEditMode ? Icons.save : Icons.edit, size: 20),
-                    SizedBox(width: 12),
-                    Text(_isEditMode ? 'Exit Edit Mode' : 'Enter Edit Mode'),
-                  ],
+                if (_isSuperAdmin)
+                  PopupMenuItem(
+                    value: 'open_other',
+                    child: Row(
+                      children: [
+                        Icon(Icons.manage_search, size: 20),
+                        SizedBox(width: 12),
+                        Text('Open Other Character'),
+                      ],
+                    ),
+                  ),
+                PopupMenuItem(
+                  value: 'edit',
+                  child: Row(
+                    children: [
+                      Icon(_isEditMode ? Icons.save : Icons.edit, size: 20),
+                      SizedBox(width: 12),
+                      Text(_isEditMode ? 'Exit Edit Mode' : 'Enter Edit Mode'),
+                    ],
+                  ),
                 ),
-              ),
-            ];
+              ];
             },
           ),
         ],
@@ -5103,6 +5219,189 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
   }
 
   // Helper methods
+  void _showOpenOtherCharacterDialog() {
+    final playerController = TextEditingController();
+    final characterNameController = TextEditingController();
+    final characterNumberController = TextEditingController();
+
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          backgroundColor: Colors.grey[900],
+          title: Text('Open Other Character', style: TextStyle(color: Colors.white)),
+          content: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Player Name', style: TextStyle(color: Colors.grey)),
+                TextField(controller: playerController, style: TextStyle(color: Colors.white)),
+                SizedBox(height: 12),
+                Text('Character Name', style: TextStyle(color: Colors.grey)),
+                TextField(controller: characterNameController, style: TextStyle(color: Colors.white)),
+                SizedBox(height: 12),
+                Text('Character Number', style: TextStyle(color: Colors.grey)),
+                TextField(controller: characterNumberController, keyboardType: TextInputType.number, style: TextStyle(color: Colors.white)),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () async {
+                Navigator.of(context).pop();
+                await _openOtherCharacter(
+                  playerName: playerController.text.trim(),
+                  characterName: characterNameController.text.trim(),
+                  characterNumber: characterNumberController.text.trim(),
+                );
+              },
+              child: Text('Search'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Future<void> _openOtherCharacter({String? playerName, String? characterName, String? characterNumber}) async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) return;
+
+      final idToken = await user.getIdToken();
+
+      final query = {
+        if (playerName != null && playerName.isNotEmpty) 'playerName': playerName,
+        if (characterName != null && characterName.isNotEmpty) 'characterName': characterName,
+        if (characterNumber != null && characterNumber.isNotEmpty) 'characterNumber': characterNumber,
+      };
+
+      if (query.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Enter at least one search field')),
+        );
+        return;
+      }
+
+      final uri = Uri.parse(AppConfig.searchCharactersUrl).replace(queryParameters: query);
+      final response = await http.get(
+        uri,
+        headers: {
+          'Authorization': 'Bearer $idToken',
+          'Content-Type': 'application/json',
+        },
+      );
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        if (data['ok'] == true) {
+          final results = List<Map<String, dynamic>>.from(data['characters'] as List);
+          // Log to terminal for visibility
+          print('🔎 [openOtherCharacter.search] Found ${results.length} result(s) for query: '
+              'playerName="$playerName" characterName="$characterName" characterNumber="$characterNumber"');
+          if (results.isEmpty) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('No matching characters found')),
+            );
+            return;
+          }
+          _showCharacterPickDialog(results);
+        } else {
+          throw Exception(data['error'] ?? 'Search failed');
+        }
+      } else {
+        throw Exception('HTTP ${response.statusCode}: ${response.body}');
+      }
+    } catch (e, st) {
+      print('❌ [openOtherCharacter.search] $e');
+      print(st);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error searching: $e')),
+      );
+    }
+  }
+
+  void _showCharacterPickDialog(List<Map<String, dynamic>> results) {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          backgroundColor: Colors.grey[900],
+          title: Text('Select Character', style: TextStyle(color: Colors.white)),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: ListView.builder(
+              shrinkWrap: true,
+              itemCount: results.length,
+              itemBuilder: (context, index) {
+                final c = results[index];
+                final display = '${c['playerName'] ?? 'Unknown'} • ${c['characterName'] ?? 'Character'} • #${c['characterNumber'] ?? '?'}';
+                return ListTile(
+                  title: Text(display, style: TextStyle(color: Colors.white)),
+                  onTap: () async {
+                    Navigator.of(context).pop();
+                    final selectedId = (c['id'] ?? c['characterId'])?.toString();
+                    if (selectedId == null || selectedId.isEmpty) {
+                      if (!mounted) return;
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text('Invalid character id in result')),
+                      );
+                      return;
+                    }
+                    await _loadAndOpenCharacter(selectedId);
+                  },
+                );
+              },
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _loadAndOpenCharacter(String characterId) async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) return;
+
+      final idToken = await user.getIdToken();
+      final response = await http.get(
+        Uri.parse(AppConfig.getCharacterByIdUrl).replace(queryParameters: {'characterId': characterId}),
+        headers: {
+          'Authorization': 'Bearer $idToken',
+          'Content-Type': 'application/json',
+        },
+      );
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        if (data['ok'] == true) {
+          final characterJson = data['character'];
+          final character = Character.fromJson(characterJson);
+          if (!mounted) return;
+          Navigator.of(context).push(
+            MaterialPageRoute(
+              builder: (_) => CharacterSheetPage(character: character),
+            ),
+          );
+        } else {
+          throw Exception(data['error'] ?? 'Failed to load character');
+        }
+      } else {
+        throw Exception('HTTP ${response.statusCode}: ${response.body}');
+      }
+    } catch (e, st) {
+      print('❌ [openOtherCharacter.getById:$characterId] $e');
+      print(st);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error loading character: $e')),
+      );
+    }
+  }
   Widget _StatBox({required String label, required String value, required VoidCallback onTap, bool isEditMode = false}) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.center,
@@ -5110,23 +5409,24 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
         Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Text(label, style: TextStyle(fontSize: 16)),
-            SizedBox(width: 4),
             GestureDetector(
               onTap: onTap,
-              child: Icon(Icons.info_outline, size: 16, color: Colors.grey[300]),
+              child: Text(label, style: TextStyle(fontSize: 16)),
             ),
           ],
         ),
-        Container(
-          padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-          decoration: BoxDecoration(
-            border: Border.all(color: isEditMode ? Colors.amber : Colors.white),
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: Text(
-            value,
-            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+        GestureDetector(
+          onTap: onTap,
+          child: Container(
+            padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            decoration: BoxDecoration(
+              border: Border.all(color: isEditMode ? Colors.amber : Colors.white),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Text(
+              value,
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            ),
           ),
         ),
       ],
@@ -5566,8 +5866,11 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
   }
 
   int _getDRForTier(String tier) {
-    final dr = widget.character.dr;
-    return dr['dr$tier'] ?? 0;
+    final key = 'dr${tier[0].toUpperCase()}${tier.substring(1).toLowerCase()}';
+    final raw = widget.character.dr[key] ?? 0;
+    if (raw is int) return raw;
+    if (raw is num) return raw.toInt();
+    return 0;
   }
 
   // Helper methods for essence calculations
@@ -6085,7 +6388,8 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
 
   void _showAvailableAffinitiesForSkills(BuildContext context) async {
     // Get all affinities the character has (including unsubmitted ones)
-    final allAffinities = widget.character.affinities.keys.toList();
+    final allAffinities = {'Common', widget.character.race, ...widget.character.affinities.keys}
+        .toList();
     
     if (allAffinities.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -6096,7 +6400,7 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
 
     showDialog(
       context: context,
-      builder: (_) => AlertDialog(
+      builder: (dialogContext) => AlertDialog(
         title: Text('Select Affinity for New Skill'),
         content: SizedBox(
           width: 400,
@@ -6108,7 +6412,7 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
               return ListTile(
                 title: Text(affinityName),
                 onTap: () {
-                  Navigator.pop(context);
+                  Navigator.of(dialogContext).pop();
                   _showAvailableSkillsForAffinity(context, affinityName);
                 },
               );
@@ -6117,7 +6421,7 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context),
+            onPressed: () => Navigator.of(dialogContext).pop(),
             child: Text('Cancel'),
           ),
         ],
@@ -6133,17 +6437,49 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
       final cachedRules = await RulesService.loadCachedRules();
       if (cachedRules != null) {
         final rules = json.decode(cachedRules);
-        final affinitySkills = rules['Affinity Skills'] as List<dynamic>? ?? [];
-        
-        // Filter skills for this affinity
-        for (final skill in affinitySkills) {
-          if (skill['Affinity'] == affinityName) {
+        if (affinityName == 'Common') {
+          // Include Common Skills
+          final commonSkills = rules['Common Skills'] as List<dynamic>? ?? [];
+          for (final skill in commonSkills) {
             availableSkills.add({
               'name': skill['Name'],
-              'type': affinityName,
+              'type': 'Common',
               'frequency': skill['Frequency'] ?? 'At Will',
               'delivery': skill['Delivery'] ?? 'None',
             });
+          }
+        } else if (affinityName == widget.character.race) {
+          // Include Race Skills for the character's race
+          final races = rules['Races'] as List<dynamic>? ?? [];
+          final race = races.firstWhere(
+            (r) => r['Name'] == widget.character.race,
+            orElse: () => null,
+          );
+          if (race != null) {
+            final raceSkills = race['Race Skills'] as List<dynamic>? ?? [];
+            for (final skill in raceSkills) {
+              availableSkills.add({
+                'name': skill['Name'],
+                'type': widget.character.race,
+                'frequency': skill['Frequency'] ?? 'At Will',
+                'delivery': skill['Delivery'] ?? 'None',
+              });
+            }
+          }
+        } else {
+          // Default: Affinity Skills
+          final affinitySkills = rules['Affinity Skills'] as List<dynamic>? ?? [];
+          
+          // Filter skills for this affinity
+          for (final skill in affinitySkills) {
+            if (skill['Affinity'] == affinityName) {
+              availableSkills.add({
+                'name': skill['Name'],
+                'type': affinityName,
+                'frequency': skill['Frequency'] ?? 'At Will',
+                'delivery': skill['Delivery'] ?? 'None',
+              });
+            }
           }
         }
       }
@@ -6166,7 +6502,7 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
 
     showDialog(
       context: context,
-      builder: (_) => AlertDialog(
+      builder: (dialogContext) => AlertDialog(
         title: Text('Available Skills for $affinityName'),
         content: SizedBox(
           width: 400,
@@ -6179,7 +6515,7 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
                 title: Text(skill['name']),
                 subtitle: Text('${skill['frequency']} • ${skill['delivery']}'),
                 onTap: () {
-                  Navigator.pop(context);
+                  Navigator.of(dialogContext).pop();
                   _addNewSkill(context, skill);
                 },
               );
@@ -6188,7 +6524,7 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context),
+            onPressed: () => Navigator.of(dialogContext).pop(),
             child: Text('Cancel'),
           ),
         ],
@@ -6556,7 +6892,7 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
                                                       mainAxisAlignment: MainAxisAlignment.center,
                                                       mainAxisSize: MainAxisSize.min,
                                                       children: [
-                                                        Container(
+                                                        SizedBox(
                                                           width: 48,
                                                           height: 48,
                                                           child: IconButton(
@@ -6577,7 +6913,7 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
                                                           ),
                                                         ),
                                                         SizedBox(width: 20),
-                                                        Container(
+                                                        SizedBox(
                                                           width: 80,
                                                           child: Text(
                                                             'Level: $editableSkillLevel',
@@ -6586,7 +6922,7 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
                                                           ),
                                                         ),
                                                         SizedBox(width: 20),
-                                                        Container(
+                                                        SizedBox(
                                                           width: 48,
                                                           height: 48,
                                                           child: IconButton(
@@ -6787,17 +7123,7 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
   }
 }
 
-class DeathTimerPage extends StatelessWidget {
-  const DeathTimerPage({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: Text('Death Timer')),
-      body: Center(child: Text('Death Timer - Coming Soon')),
-    );
-  }
-}
+// Removed old placeholder DeathTimerPage; real implementation is in pages/death_timer_page.dart
 
 // QR Code Display Widget
 class _QRCodeDisplay extends StatefulWidget {
@@ -7035,11 +7361,86 @@ class _ProfilePageState extends State<ProfilePage> {
   final FirebaseAuth _auth = FirebaseAuth.instance;
   Character? character;
   bool isLoading = true;
+  bool discordLinked = false;
+  String? discordDisplay;
+  String? discordLinkCode;
+  String? discordInviteUrl;
+  String? _discordChannelName;
+  static const String _prefsDiscordLinkedKey = 'discord_linked';
+  static const String _prefsDiscordDisplayKey = 'discord_display';
+
+  Future<void> _disconnectDiscord() async {
+    // Show loading while disconnecting
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        content: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)),
+            SizedBox(width: 12),
+            Text('Disconnecting...'),
+          ],
+        ),
+      ),
+    );
+    try {
+      final user = _auth.currentUser;
+      if (user == null) return;
+      final idToken = await user.getIdToken();
+      final resp = await http.post(
+        Uri.parse(AppConfig.disconnectDiscordUrl),
+        headers: {
+          'Authorization': 'Bearer $idToken',
+          'Content-Type': 'application/json',
+        },
+      );
+      // Close loading dialog if open
+      if (Navigator.of(context).canPop()) {
+        Navigator.of(context).pop();
+      }
+      if (resp.statusCode == 200) {
+        setState(() {
+          discordLinked = false;
+          discordDisplay = null;
+          discordLinkCode = null;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Discord disconnected')));
+      } else {
+        if (Navigator.of(context).canPop()) {
+          Navigator.of(context).pop();
+        }
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to disconnect')));
+      }
+    } catch (_) {
+      if (Navigator.of(context).canPop()) {
+        Navigator.of(context).pop();
+      }
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error disconnecting')));
+    }
+  }
 
   @override
   void initState() {
     super.initState();
+    _loadCachedDiscordLinkState();
     fetchCharacterFromFirebase();
+    _refreshDiscordLinkStatus();
+  }
+
+  Future<void> _loadCachedDiscordLinkState() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final cachedLinked = prefs.getBool(_prefsDiscordLinkedKey);
+      final cachedDisplay = prefs.getString(_prefsDiscordDisplayKey);
+      if (cachedLinked != null) {
+        setState(() {
+          discordLinked = cachedLinked;
+          discordDisplay = cachedDisplay;
+        });
+      }
+    } catch (_) {}
   }
 
   Future<bool> fetchCharacterFromFirebase() async {
@@ -7074,6 +7475,238 @@ class _ProfilePageState extends State<ProfilePage> {
       isLoading = false;
     });
     return false;
+  }
+
+  Future<void> _refreshDiscordLinkStatus() async {
+    try {
+      final user = _auth.currentUser;
+      if (user == null) return;
+      final tokenMaybe = await user.getIdToken();
+      final idToken = tokenMaybe ?? '';
+      final resp = await http.get(Uri.parse(AppConfig.getDiscordLinkStatusUrl), headers: {
+        'Authorization': 'Bearer $idToken',
+        'Content-Type': 'application/json',
+      });
+      if (resp.statusCode == 200) {
+        final body = json.decode(resp.body);
+        final linked = body['linked'] == true;
+        final newDisplay = (linked && body['data'] != null)
+            ? (body['data']['globalName'] ?? body['data']['username'] ?? 'Discord User')
+            : null;
+        setState(() {
+          discordLinked = linked;
+          discordDisplay = newDisplay;
+        });
+        try {
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.setBool(_prefsDiscordLinkedKey, linked);
+          if (newDisplay != null) {
+            await prefs.setString(_prefsDiscordDisplayKey, newDisplay);
+          } else {
+            await prefs.remove(_prefsDiscordDisplayKey);
+          }
+        } catch (_) {}
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _connectDiscord() async {
+    // Show loading while backend prepares channel and code
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        content: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)),
+            SizedBox(width: 12),
+            Text('Preparing link...'),
+          ],
+        ),
+      ),
+    );
+    try {
+      final user = _auth.currentUser;
+      if (user == null) return;
+      final idToken = await user.getIdToken();
+      final resp = await http.post(
+        Uri.parse(AppConfig.createDiscordLinkCodeUrl),
+        headers: {
+          'Authorization': 'Bearer $idToken',
+          'Content-Type': 'application/json',
+        },
+      );
+      // Close loading dialog if open
+      if (Navigator.of(context).canPop()) {
+        Navigator.of(context).pop();
+      }
+      if (resp.statusCode == 200) {
+        final body = json.decode(resp.body);
+        setState(() { 
+          discordLinkCode = body['code']; 
+          discordInviteUrl = (body['inviteUrl'] is String && (body['inviteUrl'] ?? '').toString().isNotEmpty)
+            ? body['inviteUrl']
+            : null;
+          // Store channel name if present
+          final cn = body['channelName'];
+          if (cn is String && cn.isNotEmpty) {
+            _discordChannelName = cn;
+          }
+          // Optimistically set linked UI state if we previously knew it was linked
+          // (No change here; we just keep the cached state until verification updates it.)
+        });
+        if (discordLinkCode != null) {
+          _showDiscordLinkModal();
+        }
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to prepare link.')));
+      }
+    } catch (_) {
+      if (Navigator.of(context).canPop()) {
+        Navigator.of(context).pop();
+      }
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error preparing link.')));
+    }
+  }
+
+  Future<bool> _verifyDiscordLink() async {
+    // Show loading while verifying
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        content: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)),
+            SizedBox(width: 12),
+            Text('Verifying...'),
+          ],
+        ),
+      ),
+    );
+    try {
+      final user = _auth.currentUser;
+      if (user == null || discordLinkCode == null) return false;
+      final idToken = await user.getIdToken();
+      final resp = await http.post(
+        Uri.parse(AppConfig.verifyDiscordLinkByChannelUrl),
+        headers: {
+          'Authorization': 'Bearer $idToken',
+          'Content-Type': 'application/json',
+        },
+        body: json.encode({ 'code': discordLinkCode }),
+      );
+      if (resp.statusCode == 200) {
+        if (Navigator.of(context).canPop()) {
+          Navigator.of(context).pop();
+        }
+        _refreshDiscordLinkStatus();
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Discord linked')));
+        return true;
+      } else {
+        if (Navigator.of(context).canPop()) {
+          Navigator.of(context).pop();
+        }
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Code not found yet. Post the code in the channel and try again.')));
+        return false;
+      }
+    } catch (_) {
+      if (Navigator.of(context).canPop()) {
+        Navigator.of(context).pop();
+      }
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error verifying. Please try again.')));
+      return false;
+    }
+  }
+
+  void _showDiscordLinkModal() {
+    final code = discordLinkCode ?? '';
+    final channelName = _discordChannelName ?? '#bot-verification';
+    showDialog(
+      context: context,
+      barrierDismissible: true,
+      builder: (ctx) {
+        return AlertDialog(
+          title: Row(
+            children: [
+              Icon(Icons.link),
+              SizedBox(width: 8),
+              Text('Link Discord'),
+            ],
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Follow these steps:'),
+              SizedBox(height: 8),
+              Text('1) Join our Discord server${discordInviteUrl != null ? ' using the invite link.' : '.'}'),
+              if (discordInviteUrl != null) ...[
+                SizedBox(height: 6),
+                ElevatedButton(
+                  onPressed: () {
+                    try { html.window.open(discordInviteUrl!, '_blank'); } catch (_) {}
+                  },
+                  child: Text('Open Discord Invite'),
+                ),
+              ],
+              SizedBox(height: 12),
+              Text('2) In the verification channel $channelName, send this code:'),
+              SizedBox(height: 6),
+              Container(
+                width: double.infinity,
+                padding: EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  border: Border.all(color: Colors.grey.shade400),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: SelectableText(code, style: TextStyle(fontFamily: 'monospace', fontSize: 16)),
+              ),
+              SizedBox(height: 8),
+              Row(
+                children: [
+                  OutlinedButton(
+                    onPressed: () async {
+                      await Clipboard.setData(ClipboardData(text: code));
+                      if (mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Code copied')));
+                      }
+                    },
+                    child: Text('Copy Code'),
+                  ),
+                  SizedBox(width: 8),
+                  OutlinedButton(
+                    onPressed: () {
+                      try { html.window.open('https://discord.com/app', '_blank'); } catch (_) {}
+                    },
+                    child: Text('Open Discord'),
+                  ),
+                ],
+              ),
+              SizedBox(height: 12),
+              Text('3) Return here and press Verify.'),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: Text('Close'),
+            ),
+            ElevatedButton(
+              onPressed: () async {
+                final ok = await _verifyDiscordLink();
+                if (mounted && ok) {
+                  Navigator.of(ctx).pop();
+                }
+              },
+              child: Text('Verify'),
+            ),
+          ],
+        );
+      },
+    );
   }
 
   Future<String?> _downloadQRCode(String email) async {
@@ -7181,6 +7814,36 @@ class _ProfilePageState extends State<ProfilePage> {
               Text('No character data available', style: TextStyle(color: Colors.grey)),
               SizedBox(height: 20),
             ],
+            SizedBox(height: 12),
+            // Discord link status and button
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(Icons.link, color: discordLinked ? Colors.green : Colors.grey),
+                SizedBox(width: 8),
+                Text(discordLinked ? (discordDisplay ?? 'Discord linked') : 'Discord not linked'),
+                SizedBox(width: 12),
+                if (!discordLinked) ...[
+                  ElevatedButton(
+                    onPressed: _connectDiscord,
+                    child: Text(discordLinkCode == null ? 'Link Discord' : 'Link Discord'),
+                  ),
+                ] else ...[
+                  ElevatedButton(
+                    onPressed: _disconnectDiscord,
+                    style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+                    child: Text('Disconnect Discord'),
+                  ),
+                ],
+                if (!discordLinked && discordLinkCode != null) ...[
+                  SizedBox(width: 8),
+                  OutlinedButton(
+                    onPressed: _verifyDiscordLink,
+                    child: Text('Verify'),
+                  ),
+                ]
+              ],
+            ),
             
             ElevatedButton(
               onPressed: () async {
