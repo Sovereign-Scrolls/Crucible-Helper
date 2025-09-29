@@ -80,6 +80,25 @@ service cloud.firestore {
                 }
               }
 
+              // Allow authenticated users to read their own player and character data
+              match /players/{playerId} {
+                // Player doc itself (if needed)
+                allow read: if request.auth != null && request.auth.uid == playerId;
+                allow write: if false;
+
+                // Characters under the player
+                match /characters/{characterId} {
+                  allow read: if request.auth != null && request.auth.uid == playerId;
+                  allow write: if false;
+
+                  // All nested subcollections and docs needed by the New Sheet
+                  match /{subcollection=**}/{docId} {
+                    allow read: if request.auth != null && request.auth.uid == playerId;
+                    allow write: if false;
+                  }
+                }
+              }
+
               // Deny all other access
               match /{document=**} {
                 allow read, write: if false;

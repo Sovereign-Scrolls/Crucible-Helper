@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter/foundation.dart';
 import 'dart:convert';
+import '../config/app_config.dart';
 import 'dart:async';
 
 
@@ -922,6 +923,11 @@ class _EventsPageState extends State<EventsPage> {
                                 Navigator.of(context).pop();
                                 _showEditRegistrationModal(event);
                                 break;
+                              // NPC shifts are defined by Event Type and not edited per-event
+                              case 'manage_cleanup_shifts':
+                                Navigator.of(context).pop();
+                                _showManageShiftsModalForEvent(event, 'cleanup');
+                                break;
                             }
                           },
                           itemBuilder: (context) {
@@ -958,6 +964,19 @@ class _EventsPageState extends State<EventsPage> {
                                   ],
                                 ),
                               ));
+                              // Super admins get manage shift actions on the event details menu
+                              items.addAll([
+                                PopupMenuItem(
+                                  value: 'manage_cleanup_shifts',
+                                  child: Row(
+                                    children: [
+                                      Icon(Icons.cleaning_services, size: 18),
+                                      SizedBox(width: 8),
+                                      Text('Manage Cleanup Shifts'),
+                                    ],
+                                  ),
+                                ),
+                              ]);
                             }
                             return items;
                           },
@@ -1071,8 +1090,8 @@ class _EventsPageState extends State<EventsPage> {
                               ),
                               SizedBox(height: 12),
                             ],
-                            // User Registration Button (only show if not already registered and not super admin)
-                            if (event.registrationActivated && !isSuperAdmin && !(eventRegistrationStatus[event.id] ?? false)) ...[
+                            // Registration Button (show for everyone if registration is active and user not already registered)
+                            if (event.registrationActivated && !(eventRegistrationStatus[event.id] ?? false)) ...[
                               SizedBox(
                                 width: double.infinity,
                                 child: ElevatedButton.icon(
@@ -1405,6 +1424,30 @@ class _EventsPageState extends State<EventsPage> {
         ),
       );
     }
+  }
+
+  void _showManageShiftsModal(String type) async {
+    // Use first event for now; could enhance to choose an event
+    if (events.isEmpty) return;
+    final isNpc = type == 'npc';
+    showDialog(
+      context: context,
+      builder: (_) => _ManageShiftsModal(
+        event: events.first,
+        shiftType: isNpc ? 'npc' : 'cleanup',
+      ),
+    );
+  }
+
+  void _showManageShiftsModalForEvent(Event event, String type) {
+    final isNpc = type == 'npc';
+    showDialog(
+      context: context,
+      builder: (_) => _ManageShiftsModal(
+        event: event,
+        shiftType: isNpc ? 'npc' : 'cleanup',
+      ),
+    );
   }
 
   Widget _buildEventDetail(String label, String value) {
@@ -2264,6 +2307,10 @@ class _EventsPageState extends State<EventsPage> {
                 case 'sync_discord':
                   _syncEventsToDiscord();
                   break;
+                // NPC shifts are defined by Event Type and not edited per-event
+                case 'manage_cleanup_shifts':
+                  _showManageShiftsModal('cleanup');
+                  break;
               }
             },
             itemBuilder: (context) {
@@ -2281,6 +2328,16 @@ class _EventsPageState extends State<EventsPage> {
               ];
               if (isSuperAdmin && !isLoadingPermissions) {
                 items.addAll([
+                  PopupMenuItem(
+                    value: 'manage_cleanup_shifts',
+                    child: Row(
+                      children: [
+                        Icon(Icons.cleaning_services, size: 18),
+                        SizedBox(width: 8),
+                        Text('Manage Cleanup Shifts'),
+                      ],
+                    ),
+                  ),
                   PopupMenuItem(
                     value: 'add_event',
                     child: Row(
@@ -5850,6 +5907,9 @@ class _EditEventTypeModalState extends State<_EditEventTypeModal> {
   final _numberOfNpcShiftsController = TextEditingController();
   List<Map<String, dynamic>> _npcShifts = [];
   List<EventAttendeeType> _attendeeTypes = [];
+  final _numberOfCleanupShiftsController = TextEditingController();
+  List<String> _cleanupShifts = [];
+  List<String> _payOptions = [];
   bool _isLoading = false;
 
   @override
@@ -5865,6 +5925,9 @@ class _EditEventTypeModalState extends State<_EditEventTypeModal> {
     _defaultPreregCostController.text = widget.eventType.defaultPreregCost.toString();
     _numberOfNpcShiftsController.text = widget.eventType.numberOfNpcShifts.toString();
     _npcShifts = List<Map<String, dynamic>>.from(widget.eventType.npcShifts);
+    _numberOfCleanupShiftsController.text = widget.eventType.numberOfCleanupShifts.toString();
+    _cleanupShifts = List<String>.from(widget.eventType.cleanupShifts);
+    _payOptions = List<String>.from(widget.eventType.payOptions);
   }
 
   Future<void> _loadAttendeeTypes() async {
@@ -5906,6 +5969,7 @@ class _EditEventTypeModalState extends State<_EditEventTypeModal> {
     _defaultCostController.dispose();
     _defaultPreregCostController.dispose();
     _numberOfNpcShiftsController.dispose();
+    _numberOfCleanupShiftsController.dispose();
     super.dispose();
   }
 
@@ -6014,6 +6078,90 @@ class _EditEventTypeModalState extends State<_EditEventTypeModal> {
                       'startTime': startTime!.toIso8601String(),
                       'endTime': endTime!.toIso8601String(),
                     });
+                  });
+                  Navigator.of(context).pop();
+                }
+              },
+              child: Text('Add'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  void _addCleanupShift() {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        final controller = TextEditingController();
+        return AlertDialog(
+          backgroundColor: Colors.grey[900],
+          title: Text(
+            'Add Cleanup Shift',
+            style: TextStyle(color: Colors.white, fontFamily: 'Cinzel'),
+          ),
+          content: TextField(
+            controller: controller,
+            style: TextStyle(color: Colors.white),
+            decoration: InputDecoration(
+              hintText: 'e.g., Monster Camp cleanup',
+              hintStyle: TextStyle(color: Colors.grey),
+              border: OutlineInputBorder(),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () {
+                if (controller.text.isNotEmpty) {
+                  setState(() {
+                    _cleanupShifts.add(controller.text);
+                  });
+                  Navigator.of(context).pop();
+                }
+              },
+              child: Text('Add'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  void _addPayOption() {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        final controller = TextEditingController();
+        return AlertDialog(
+          backgroundColor: Colors.grey[900],
+          title: Text(
+            'Add Pay Option',
+            style: TextStyle(color: Colors.white, fontFamily: 'Cinzel'),
+          ),
+          content: TextField(
+            controller: controller,
+            style: TextStyle(color: Colors.white),
+            decoration: InputDecoration(
+              hintText: 'e.g., Credit Card, Cash, etc.',
+              hintStyle: TextStyle(color: Colors.grey),
+              border: OutlineInputBorder(),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () {
+                if (controller.text.isNotEmpty) {
+                  setState(() {
+                    _payOptions.add(controller.text);
                   });
                   Navigator.of(context).pop();
                 }
@@ -6227,41 +6375,154 @@ class _EditEventTypeModalState extends State<_EditEventTypeModal> {
                         ],
                       ),
                       SizedBox(height: 8),
-                      // Temporarily disabled NPC shifts display due to format issue
-                      // if (_npcShifts.isNotEmpty) ...[
-                      //   Container(
-                      //     padding: EdgeInsets.all(12),
-                      //     decoration: BoxDecoration(
-                      //       color: Colors.grey[800],
-                      //       borderRadius: BorderRadius.circular(8),
-                      //     ),
-                      //     child: Column(
-                      //       children: _npcShifts.asMap().entries.map((entry) {
-                      //         final index = entry.key;
-                      //         final shift = entry.value;
-                      //         return ListTile(
-                      //           title: Text(
-                      //             'Shift ${index + 1}',
-                      //             style: TextStyle(color: Colors.white),
-                      //           ),
-                      //           subtitle: Text(
-                      //             '${DateTime.parse(shift['startTime']).toString().substring(0, 16)} - ${DateTime.parse(shift['endTime']).toString().substring(0, 16)}',
-                      //             style: TextStyle(color: Colors.grey),
-                      //           ),
-                      //           trailing: IconButton(
-                      //             icon: Icon(Icons.delete, color: Colors.red),
-                      //             onPressed: () {
-                      //               setState(() {
-                      //                 _npcShifts.removeAt(index);
-                      //               });
-                      //             },
-                      //           ),
-                      //         );
-                      //       }).toList(),
-                      //     ),
-                      //   ),
-                      // ],
+                      if (_npcShifts.isNotEmpty) ...[
+                        Container(
+                          padding: EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: Colors.grey[800],
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Column(
+                            children: _npcShifts.asMap().entries.map((entry) {
+                              final index = entry.key;
+                              final shift = entry.value;
+                              return ListTile(
+                                title: Text(
+                                  'Shift ${index + 1}',
+                                  style: TextStyle(color: Colors.white),
+                                ),
+                                subtitle: Text(
+                                  _formatNpcShiftTime(shift),
+                                  style: TextStyle(color: Colors.grey),
+                                ),
+                                trailing: IconButton(
+                                  icon: Icon(Icons.delete, color: Colors.red),
+                                  onPressed: () {
+                                    setState(() {
+                                      _npcShifts.removeAt(index);
+                                    });
+                                  },
+                                ),
+                              );
+                            }).toList(),
+                          ),
+                        ),
+                      ],
                       SizedBox(height: 24),
+                      // Number of Cleanup Shifts
+                      _buildTextField(
+                        controller: _numberOfCleanupShiftsController,
+                        label: 'Number of Cleanup Shifts Required',
+                        hint: '0',
+                        keyboardType: TextInputType.number,
+                        validator: (value) {
+                          if (value == null || value.isEmpty) {
+                            return 'Number of cleanup shifts is required';
+                          }
+                          if (int.tryParse(value) == null) {
+                            return 'Please enter a valid number';
+                          }
+                          return null;
+                        },
+                      ),
+                      SizedBox(height: 24),
+                      // Cleanup Shifts Section
+                      Row(
+                        children: [
+                          Text(
+                            'Cleanup Shifts',
+                            style: TextStyle(
+                              color: Colors.amber,
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          Spacer(),
+                          IconButton(
+                            icon: Icon(Icons.add, color: Colors.amber),
+                            onPressed: _addCleanupShift,
+                          ),
+                        ],
+                      ),
+                      SizedBox(height: 8),
+                      if (_cleanupShifts.isNotEmpty) ...[
+                        Container(
+                          padding: EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: Colors.grey[800],
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Column(
+                            children: _cleanupShifts.asMap().entries.map((entry) {
+                              final index = entry.key;
+                              final shift = entry.value;
+                              return ListTile(
+                                title: Text(
+                                  shift,
+                                  style: TextStyle(color: Colors.white),
+                                ),
+                                trailing: IconButton(
+                                  icon: Icon(Icons.delete, color: Colors.red),
+                                  onPressed: () {
+                                    setState(() {
+                                      _cleanupShifts.removeAt(index);
+                                    });
+                                  },
+                                ),
+                              );
+                            }).toList(),
+                          ),
+                        ),
+                      ],
+                      SizedBox(height: 24),
+                      // Pay Options Section
+                      Row(
+                        children: [
+                          Text(
+                            'Pay Options',
+                            style: TextStyle(
+                              color: Colors.amber,
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          Spacer(),
+                          IconButton(
+                            icon: Icon(Icons.add, color: Colors.amber),
+                            onPressed: _addPayOption,
+                          ),
+                        ],
+                      ),
+                      SizedBox(height: 8),
+                      if (_payOptions.isNotEmpty) ...[
+                        Container(
+                          padding: EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: Colors.grey[800],
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Column(
+                            children: _payOptions.asMap().entries.map((entry) {
+                              final index = entry.key;
+                              final option = entry.value;
+                              return ListTile(
+                                title: Text(
+                                  option,
+                                  style: TextStyle(color: Colors.white),
+                                ),
+                                trailing: IconButton(
+                                  icon: Icon(Icons.delete, color: Colors.red),
+                                  onPressed: () {
+                                    setState(() {
+                                      _payOptions.removeAt(index);
+                                    });
+                                  },
+                                ),
+                              );
+                            }).toList(),
+                          ),
+                        ),
+                      ],
                       // Update Button
                       SizedBox(
                         width: double.infinity,
@@ -6516,6 +6777,9 @@ class _EditEventTypeModalState extends State<_EditEventTypeModal> {
             'defaultPreregCost': double.parse(_defaultPreregCostController.text),
             'numberOfNpcShifts': int.parse(_numberOfNpcShiftsController.text),
             'npcShifts': _npcShifts,
+            'numberOfCleanupShifts': int.parse(_numberOfCleanupShiftsController.text),
+            'cleanupShifts': _cleanupShifts,
+            'payOptions': _payOptions,
           }),
         );
 
@@ -7800,6 +8064,8 @@ class _RegisterForEventModalState extends State<_RegisterForEventModal> {
   EventAttendeeType? _selectedAttendeeType;
   final List<int> _selectedNpcShifts = [];
   final List<int> _selectedCleanupShifts = [];
+  int? _secondaryNpcShiftIndex;
+  int? _secondaryCleanupShiftIndex;
   int? _selectedPayOption;
   int _currentStep = 0;
   EventType? _eventType;
@@ -7901,9 +8167,8 @@ class _RegisterForEventModalState extends State<_RegisterForEventModal> {
   }
 
   int _getTotalSteps() {
-    // Always return a consistent number of steps
-    // We'll show all possible steps and conditionally enable/disable them
-    return 4; // Event info + attendee type + NPC shifts + cleanup shifts + pay options
+    // Event info + attendee type + NPC shifts + cleanup shifts + pay options (we'll insert secondary choices inside steps)
+    return 4;
   }
 
   bool _canProceedToNextStep() {
@@ -7914,20 +8179,26 @@ class _RegisterForEventModalState extends State<_RegisterForEventModal> {
         print('Step 0 validation: attendeeType=${_selectedAttendeeType?.name}, canProceed=$canProceed');
         return canProceed;
       case 1:
-        // NPC Shifts step
+        // NPC Shifts step (+ require secondary backup)
         if (_eventType != null && _eventType!.numberOfNpcShifts > 0 && _eventType!.npcShifts.isNotEmpty) {
-          canProceed = _selectedNpcShifts.length == _eventType!.numberOfNpcShifts;
-          print('Step 1 validation: npcShifts=${_selectedNpcShifts.length}/${_eventType!.numberOfNpcShifts}, canProceed=$canProceed');
+          final hasAllPrimary = _selectedNpcShifts.length == _eventType!.numberOfNpcShifts;
+          final hasSecondary = _secondaryNpcShiftIndex != null;
+          final secondaryDifferent = hasSecondary ? !_selectedNpcShifts.contains(_secondaryNpcShiftIndex) : false;
+          canProceed = hasAllPrimary && hasSecondary && secondaryDifferent;
+          print('Step 1 validation: npcShifts=${_selectedNpcShifts.length}/${_eventType!.numberOfNpcShifts}, secondary=$_secondaryNpcShiftIndex, secondaryDifferent=$secondaryDifferent, canProceed=$canProceed');
         } else {
           canProceed = true; // Skip this step if no NPC shifts required or available
           print('Step 1 validation: no NPC shifts required or available, canProceed=$canProceed');
         }
         return canProceed;
       case 2:
-        // Cleanup Shifts step
+        // Cleanup Shifts step (+ require secondary backup)
         if (_eventType != null && _eventType!.numberOfCleanupShifts > 0) {
-          canProceed = _selectedCleanupShifts.length == _eventType!.numberOfCleanupShifts;
-          print('Step 2 validation: cleanupShifts=${_selectedCleanupShifts.length}/${_eventType!.numberOfCleanupShifts}, canProceed=$canProceed');
+          final hasAllPrimary = _selectedCleanupShifts.length == _eventType!.numberOfCleanupShifts;
+          final hasSecondary = _secondaryCleanupShiftIndex != null;
+          final secondaryDifferent = hasSecondary ? !_selectedCleanupShifts.contains(_secondaryCleanupShiftIndex) : false;
+          canProceed = hasAllPrimary && hasSecondary && secondaryDifferent;
+          print('Step 2 validation: cleanupShifts=${_selectedCleanupShifts.length}/${_eventType!.numberOfCleanupShifts}, secondary=$_secondaryCleanupShiftIndex, secondaryDifferent=$secondaryDifferent, canProceed=$canProceed');
         } else {
           canProceed = true; // Skip this step if no cleanup shifts required
           print('Step 2 validation: no cleanup shifts required, canProceed=$canProceed');
@@ -8090,9 +8361,10 @@ class _RegisterForEventModalState extends State<_RegisterForEventModal> {
                     final shift = entry.value;
                     final isSelected = _selectedNpcShifts.contains(index);
                     
+                    final countLabel = '';
                     return CheckboxListTile(
                       title: Text(
-                        'Shift ${index + 1}',
+                        'Shift ${index + 1} • ${_formatShiftDay(index)}$countLabel',
                         style: TextStyle(color: Colors.white),
                       ),
                       subtitle: Text(
@@ -8120,6 +8392,28 @@ class _RegisterForEventModalState extends State<_RegisterForEventModal> {
                   }).toList(),
                 ),
               ),
+              SizedBox(height: 12),
+              // Secondary NPC shift (optional)
+              Text(
+                'Secondary NPC shift:',
+                style: TextStyle(color: Colors.amber, fontSize: 14, fontWeight: FontWeight.bold),
+              ),
+              SizedBox(height: 8),
+              DropdownButtonFormField<int>(
+                initialValue: _secondaryNpcShiftIndex,
+                dropdownColor: Colors.grey[800],
+                style: TextStyle(color: Colors.white),
+                decoration: InputDecoration(border: OutlineInputBorder(), hintText: 'Choose a backup NPC shift', hintStyle: TextStyle(color: Colors.grey)),
+                items: _eventType!.npcShifts.asMap().entries.map((entry) {
+                  return DropdownMenuItem<int>(
+                    value: entry.key,
+                    child: Text('Shift ${entry.key + 1}'),
+                  );
+                }).toList(),
+                onChanged: (val) {
+                  setState(() { _secondaryNpcShiftIndex = val; });
+                },
+              ),
                           if (_selectedNpcShifts.length != _eventType!.numberOfNpcShifts) ...[
               SizedBox(height: 8),
               Container(
@@ -8146,6 +8440,29 @@ class _RegisterForEventModalState extends State<_RegisterForEventModal> {
                   ],
                 ),
               ),
+              if (_secondaryNpcShiftIndex == null || (_secondaryNpcShiftIndex != null && _selectedNpcShifts.contains(_secondaryNpcShiftIndex))) ...[
+                SizedBox(height: 8),
+                Container(
+                  padding: EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: Colors.red.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(4),
+                    border: Border.all(color: Colors.red),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(Icons.warning, color: Colors.red, size: 16),
+                      SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'Please choose a secondary NPC shift different from your primary selection(s).',
+                          style: TextStyle(color: Colors.red, fontSize: 12, fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
             ],
             ] else ...[
               Text(
@@ -8169,6 +8486,19 @@ class _RegisterForEventModalState extends State<_RegisterForEventModal> {
           ),
         ),
       );
+    }
+  }
+
+  String _formatShiftDay(int index) {
+    try {
+      // Derive day from event start date + index if available
+      final base = widget.event.startDateTime;
+      final day = base.add(Duration(days: index % 3));
+      final weekdayNames = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+      final name = weekdayNames[day.weekday - 1];
+      return '$name ${day.month}/${day.day}';
+    } catch (_) {
+      return '';
     }
   }
 
@@ -8205,9 +8535,10 @@ class _RegisterForEventModalState extends State<_RegisterForEventModal> {
                     final shift = entry.value;
                     final isSelected = _selectedCleanupShifts.contains(index);
                     
+                    final countLabel = '';
                     return CheckboxListTile(
                       title: Text(
-                        shift,
+                        '$shift$countLabel',
                         style: TextStyle(color: Colors.white),
                       ),
                       value: isSelected,
@@ -8247,6 +8578,27 @@ class _RegisterForEventModalState extends State<_RegisterForEventModal> {
                 ),
               ),
             ],
+            SizedBox(height: 12),
+            // Secondary cleanup shift
+            Text(
+              'Secondary cleanup shift:',
+              style: TextStyle(color: Colors.amber, fontSize: 14, fontWeight: FontWeight.bold),
+            ),
+            SizedBox(height: 8),
+            DropdownButtonFormField<int>(
+              initialValue: _secondaryCleanupShiftIndex,
+              dropdownColor: Colors.grey[800],
+              style: TextStyle(color: Colors.white),
+              decoration: InputDecoration(border: OutlineInputBorder(), hintText: 'Choose a backup cleanup shift', hintStyle: TextStyle(color: Colors.grey)),
+              items: _eventType!.cleanupShifts.asMap().entries.map((entry) {
+                final idx = entry.key;
+                final label = entry.value;
+                return DropdownMenuItem<int>(value: idx, child: Text(label));
+              }).toList(),
+              onChanged: (val) {
+                setState(() { _secondaryCleanupShiftIndex = val; });
+              },
+            ),
           ],
         ),
       );
@@ -8597,6 +8949,8 @@ class _RegisterForEventModalState extends State<_RegisterForEventModal> {
           'selectedNpcShifts': _selectedNpcShifts,
           'selectedCleanupShifts': _selectedCleanupShifts,
           'selectedPayOption': _selectedPayOption,
+          'secondaryNpcShift': _secondaryNpcShiftIndex,
+          'secondaryCleanupShift': _secondaryCleanupShiftIndex,
         }),
       );
 
@@ -8666,12 +9020,38 @@ class _RegistrationDetailsModalState extends State<_RegistrationDetailsModal> wi
   late TabController _tabController;
   bool _isLoading = true;
   Map<String, dynamic>? _registrationData;
+  Map<String, int> _npcCounts = {};
+  Map<String, int> _cleanupCounts = {};
 
   @override
   void initState() {
     super.initState();
     _tabController = TabController(length: 3, vsync: this);
     _loadRegistrationData();
+    _loadShiftCounts();
+  }
+  Future<void> _loadShiftCounts() async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) return;
+      final idToken = await user.getIdToken();
+      final resp = await http.get(
+        Uri.parse('${AppConfig.getEventShiftSummaryUrl}?eventId=${widget.event.id}'),
+        headers: {
+          'Authorization': 'Bearer $idToken',
+          'Content-Type': 'application/json',
+        },
+      );
+      if (resp.statusCode == 200) {
+        final body = json.decode(resp.body);
+        if (body['ok'] == true) {
+          setState(() {
+            _npcCounts = Map<String, int>.from(Map<String, dynamic>.from(body['npcCounts']).map((k, v) => MapEntry(k, (v ?? 0) as int)));
+            _cleanupCounts = Map<String, int>.from(Map<String, dynamic>.from(body['cleanupCounts']).map((k, v) => MapEntry(k, (v ?? 0) as int)));
+          });
+        }
+      }
+    } catch (_) {}
   }
 
   @override
@@ -9254,6 +9634,176 @@ class _RegistrationDetailsModalState extends State<_RegistrationDetailsModal> wi
           ],
         );
       },
+    );
+  }
+}
+
+class _ManageShiftsModal extends StatefulWidget {
+  final Event event;
+  final String shiftType; // 'npc' | 'cleanup'
+  const _ManageShiftsModal({required this.event, required this.shiftType});
+  @override
+  State<_ManageShiftsModal> createState() => _ManageShiftsModalState();
+}
+
+class _ManageShiftsModalState extends State<_ManageShiftsModal> {
+  bool _loading = true;
+  Map<String, dynamic> _summary = {};
+  List<dynamic> _attendees = [];
+  String? _selectedShiftName; // display label
+
+  @override
+  void initState() {
+    super.initState();
+    _loadSummary();
+  }
+
+  Future<void> _loadSummary() async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) return;
+      final idToken = await user.getIdToken();
+      final resp = await http.get(
+        Uri.parse('${AppConfig.getEventShiftSummaryUrl}?eventId=${widget.event.id}'),
+        headers: { 'Authorization': 'Bearer $idToken' },
+      );
+      if (resp.statusCode == 200) {
+        setState(() { _summary = json.decode(resp.body); _loading = false; });
+      } else {
+        setState(() { _loading = false; });
+      }
+    } catch (_) { setState(() { _loading = false; }); }
+  }
+
+  Future<void> _openShift(String shiftKey, String displayLabel) async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) return;
+      final idToken = await user.getIdToken();
+      final resp = await http.get(
+        Uri.parse('${AppConfig.getShiftAttendeesUrl}?eventId=${widget.event.id}&shiftType=${widget.shiftType}&shiftName=${Uri.encodeComponent(shiftKey)}'),
+        headers: { 'Authorization': 'Bearer $idToken' },
+      );
+      if (resp.statusCode == 200) {
+        final body = json.decode(resp.body);
+        setState(() { _selectedShiftName = displayLabel; _attendees = body['attendees'] ?? []; });
+      }
+    } catch (_) {}
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isNpc = widget.shiftType == 'npc';
+    final counts = Map<String, dynamic>.from(_summary[isNpc ? 'npcCounts' : 'cleanupCounts'] ?? {});
+    // Build display labels and request keys
+    final List<String> shiftLabels = [];
+    final List<String> shiftKeys = [];
+    if (isNpc) {
+      final npcShifts = List<dynamic>.from(_summary['npcShifts'] ?? []);
+      for (int i = 0; i < npcShifts.length; i++) {
+        final s = npcShifts[i] as Map<String, dynamic>? ?? {};
+        final day = s['dayOfWeek']?.toString();
+        final start = s['startTime']?.toString();
+        final end = s['endTime']?.toString();
+        String label = 'Shift ${i + 1}';
+        if (day != null && start != null) {
+          label = 'Shift ${i + 1} • $day $start${end != null ? ' - $end' : ''}';
+        }
+        shiftLabels.add(label);
+        shiftKeys.add('$i'); // NPC uses index string as key
+      }
+    } else {
+      final cleanup = List<String>.from(_summary['cleanupShifts'] ?? []);
+      for (int i = 0; i < cleanup.length; i++) {
+        shiftLabels.add(cleanup[i]);
+        shiftKeys.add(cleanup[i]); // Cleanup uses label as key
+      }
+    }
+    return Dialog(
+      backgroundColor: Colors.grey[900],
+      child: SizedBox(
+        width: MediaQuery.of(context).size.width * 0.8,
+        height: MediaQuery.of(context).size.height * 0.8,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: EdgeInsets.all(16),
+              child: Row(
+                children: [
+                  Icon(isNpc ? Icons.group : Icons.cleaning_services, color: Colors.amber),
+                  SizedBox(width: 8),
+                  Text(isNpc ? 'Manage NPC Shifts' : 'Manage Cleanup Shifts', style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
+                  Spacer(),
+                  IconButton(icon: Icon(Icons.close, color: Colors.white), onPressed: () => Navigator.of(context).pop()),
+                ],
+              ),
+            ),
+            if (_loading) Expanded(child: Center(child: CircularProgressIndicator())) else Expanded(
+              child: Row(
+                children: [
+                  // Left: shift list
+                  Expanded(
+                    flex: 2,
+                  child: ListView.builder(
+                    itemCount: shiftLabels.length,
+                    itemBuilder: (_, i) {
+                      final label = shiftLabels[i];
+                      final key = shiftKeys[i];
+                      final count = isNpc ? (counts['$i']?.toString() ?? '0') : (counts[label]?.toString() ?? '0');
+                      return ListTile(
+                        title: Text(label, style: TextStyle(color: Colors.white)),
+                        subtitle: Text('$count signed up', style: TextStyle(color: Colors.grey)),
+                        onTap: () => _openShift(key, label),
+                      );
+                    },
+                  ),
+                  ),
+                  VerticalDivider(color: Colors.grey),
+                  // Right: attendees
+                  Expanded(
+                    flex: 3,
+                    child: _selectedShiftName == null
+                        ? Center(child: Text('Select a shift', style: TextStyle(color: Colors.grey)))
+                        : Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Padding(
+                                padding: EdgeInsets.all(12),
+                                child: Text('$_selectedShiftName', style: TextStyle(color: Colors.amber, fontSize: 16, fontWeight: FontWeight.bold)),
+                              ),
+                              Expanded(
+                                child: ListView.builder(
+                                  itemCount: _attendees.length,
+                                  itemBuilder: (_, i) {
+                                    final a = _attendees[i];
+                                    return ListTile(
+                                      title: Text(a['email'] ?? a['uid'] ?? 'Unknown', style: TextStyle(color: Colors.white)),
+                                      trailing: Wrap(spacing: 8, children: [
+                                        OutlinedButton(onPressed: () {/* TODO: confirm */}, child: Text('Confirm')),
+                                        OutlinedButton(onPressed: () {/* TODO: remove */}, child: Text('Remove')),
+                                      ]),
+                                    );
+                                  },
+                                ),
+                              ),
+                              Padding(
+                                padding: EdgeInsets.all(12),
+                                child: Row(children: [
+                                  Expanded(child: TextField(decoration: InputDecoration(hintText: 'Add by email or UID', hintStyle: TextStyle(color: Colors.grey), border: OutlineInputBorder()), style: TextStyle(color: Colors.white))),
+                                  SizedBox(width: 8),
+                                  ElevatedButton(onPressed: () {/* TODO: add */}, child: Text('Add')),
+                                ]),
+                              )
+                            ],
+                          ),
+                  )
+                ],
+              ),
+            )
+          ],
+        ),
+      ),
     );
   }
 }

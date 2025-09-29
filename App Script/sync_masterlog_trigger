@@ -1,0 +1,1076 @@
+/*******************************
+ * CONFIGURATION FROM SCRIPT PROPERTIES
+ *******************************/
+function getSyncMasterLogConfig() {
+  const props = PropertiesService.getScriptProperties();
+  
+  return {
+    // Firebase Function URL for syncMasterLogs
+    SYNC_MASTERLOG_URL: props.getProperty('SYNC_MASTERLOG_URL') || 'https://us-central1-crucible-helper.cloudfunctions.net/syncMasterLogs',
+    
+    // Firebase service account for authentication (from existing properties)
+    FIREBASE_SERVICE_ACCOUNT: {
+      CLIENT_EMAIL: props.getProperty('FIREBASE_CLIENT_EMAIL'),
+      PRIVATE_KEY: props.getProperty('FIREBASE_PRIVATE_KEY'),
+      PROJECT_ID: props.getProperty('FIREBASE_SERVICE_ACCOUNT') || 'crucible-helper'
+    },
+    
+    // Default parameters for sync masterlog
+    SYNC_DEFAULTS: {
+      containerDocId: props.getProperty('SYNC_MASTERLOG_CONTAINER_DOC_ID') || 'root',
+      sheetName: props.getProperty('SYNC_MASTERLOG_SHEET_NAME') || 'Master Logs',
+      spreadsheetId: props.getProperty('SYNC_MASTERLOG_SPREADSHEET_ID') || '1SD16oPmNp3b1V3rLrUS37O5DC8kd9-Cwrn3Zrboo6-0'
+    },
+    
+    // Firebase Function URL for calculateCharacter
+    CALCULATE_CHARACTER_URL: props.getProperty('CALCULATE_CHARACTER_URL') || 'https://us-central1-crucible-helper.cloudfunctions.net/calculateCharacter'
+  };
+}
+
+/*******************************
+ * MAIN TRIGGER FUNCTION
+ *******************************/
+function triggerSyncMasterLog() {
+  try {
+    console.log('Starting sync masterlog trigger...');
+    
+    // Get service account ID token for authentication
+    const idToken = getServiceAccountIdToken();
+    if (!idToken) {
+      throw new Error('Failed to get service account ID token. Check FIREBASE_CLIENT_EMAIL and FIREBASE_PRIVATE_KEY in script properties.');
+    }
+    
+    // Call the sync masterlog function
+    const result = callSyncMasterLog(idToken);
+    
+    console.log('Sync masterlog completed successfully:', result);
+    return result;
+    
+  } catch (error) {
+    console.error('Error in triggerSyncMasterLog:', error);
+    throw error;
+  }
+}
+
+/*******************************
+ * SYNC MASTERLOG CALLER
+ *******************************/
+function callSyncMasterLog(idToken, options = {}) {
+  try {
+    const config = getSyncMasterLogConfig();
+    
+    // Merge options with defaults
+    const params = {
+      ...config.SYNC_DEFAULTS,
+      ...options
+    };
+    
+    console.log('Calling sync masterlog with params:', params);
+    
+    // Prepare the request
+    const payload = {
+      containerDocId: params.containerDocId,
+      sheetName: params.sheetName,
+      spreadsheetId: params.spreadsheetId
+    };
+    
+    const requestOptions = {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${idToken}`
+      },
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true
+    };
+    
+    // Make the HTTP request
+    console.log('Making request to:', config.SYNC_MASTERLOG_URL);
+    const response = UrlFetchApp.fetch(config.SYNC_MASTERLOG_URL, requestOptions);
+    const responseCode = response.getResponseCode();
+    const responseText = response.getContentText();
+    
+    console.log('Response code:', responseCode);
+    console.log('Response text:', responseText);
+    
+    if (responseCode !== 200) {
+      throw new Error(`HTTP ${responseCode}: ${responseText}`);
+    }
+    
+    // Parse and return the response
+    const result = JSON.parse(responseText);
+    
+    if (!result.ok) {
+      throw new Error(`Sync failed: ${result.error || 'Unknown error'}`);
+    }
+    
+    return {
+      success: true,
+      message: result.message,
+      stats: {
+        cleared: result.cleared,
+        written: result.written,
+        mirrored: result.mirrored,
+        deletedFromCharacters: result.deletedFromCharacters,
+        diagnostics: result.diagnostics
+      },
+      spreadsheetId: result.spreadsheetId,
+      sheetName: result.sheetName,
+      containerDocId: result.containerDocId
+    };
+    
+  } catch (error) {
+    console.error('Error calling sync masterlog:', error);
+    throw error;
+  }
+}
+
+/*******************************
+ * CHARACTER CALCULATION FUNCTIONS
+ *******************************/
+function calculateCharacter(characterId, options = {}) {
+  /**
+   * Call the calculateCharacter Firebase function
+   * 
+   * @param {string} characterId - Character ID in format "{uid}_{characterNumber}" 
+   * @param {object} options - Optional parameters
+   * @param {boolean} options.debug - Enable debug mode (default: false)
+   * @param {string} options.idToken - Optional manual ID token (uses service account if not provided)
+   * @returns {object} Calculation results
+   */
+  
+  try {
+    const config = getSyncMasterLogConfig();
+    
+    // Get authentication token
+    const idToken = options.idToken || getServiceAccountIdToken();
+    if (!idToken) {
+      throw new Error('Failed to get authentication token for calculateCharacter');
+    }
+    
+    console.log(`Calculating character: ${characterId}`);
+    
+    // Prepare the request
+    const payload = {
+      characterId: characterId,
+      debug: options.debug || false
+    };
+    
+    const requestOptions = {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${idToken}`
+      },
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true
+    };
+    
+    // Make the HTTP request
+    const response = UrlFetchApp.fetch(config.CALCULATE_CHARACTER_URL, requestOptions);
+    const responseCode = response.getResponseCode();
+    const responseText = response.getContentText();
+    
+    console.log(`Calculate character response code: ${responseCode}`);
+    
+    if (responseCode !== 200) {
+      // Enhanced error handling for common authentication/authorization issues
+      let errorMessage = `Calculate character failed: HTTP ${responseCode}`;
+      
+      try {
+        const errorResult = JSON.parse(responseText);
+        if (errorResult.error) {
+          switch (errorResult.error) {
+            case 'Missing authorization header':
+              errorMessage = 'Authentication failed: Missing authorization header. Check service account configuration.';
+              break;
+            case 'insufficient_permissions':
+              errorMessage = `Permission denied: ${errorResult.message || 'Service account may not have super admin privileges'}`;
+              break;
+            case 'missing_target':
+              errorMessage = `Invalid parameters: ${errorResult.message || 'Check characterId format'}`;
+              break;
+            default:
+              errorMessage = `${errorResult.error}: ${errorResult.message || responseText}`;
+          }
+        }
+      } catch (parseError) {
+        errorMessage += ` - ${responseText}`;
+      }
+      
+      throw new Error(errorMessage);
+    }
+    
+    // Parse and return the response
+    const result = JSON.parse(responseText);
+    
+    if (!result.ok) {
+      throw new Error(`Calculate character failed: ${result.error || result.message || 'Unknown error'}`);
+    }
+    
+    console.log(`✅ Character calculation completed for ${characterId}:`);
+    console.log(`  - Advancement rows: ${result.advRows}`);
+    console.log(`  - Affinities calculated: ${result.affinitiesCalculated}`);
+    console.log(`  - Affinity count: ${result.affinityCount}`);
+    
+    return {
+      success: true,
+      characterId: characterId,
+      uid: result.uid,
+      characterNumber: result.characterNumber,
+      advRows: result.advRows,
+      detectedAffinityRows: result.detectedAffinityRows,
+      affinitiesCalculated: result.affinitiesCalculated,
+      affinityCount: result.affinityCount,
+      detectedSkillRows: result.detectedSkillRows,
+      debug: result.debug
+    };
+    
+  } catch (error) {
+    console.error(`Error calculating character ${characterId}:`, error);
+    throw error;
+  }
+}
+
+function calculateCharacterByParams(playerUid, characterNumber, options = {}) {
+  /**
+   * Call calculateCharacter using separate playerUid and characterNumber parameters
+   * 
+   * @param {string} playerUid - Player UID
+   * @param {string} characterNumber - Character number
+   * @param {object} options - Optional parameters
+   * @returns {object} Calculation results
+   */
+  
+  const characterId = `${playerUid}_${characterNumber}`;
+  return calculateCharacter(characterId, options);
+}
+
+function calculateMultipleCharacters(characterIds, options = {}) {
+  /**
+   * Calculate multiple characters sequentially
+   * 
+   * @param {string[]} characterIds - Array of character IDs
+   * @param {object} options - Optional parameters
+   * @param {boolean} options.continueOnError - Continue if one character fails (default: true)
+   * @param {number} options.delayMs - Delay between calculations in ms (default: 1000)
+   * @returns {object} Results for all characters
+   */
+  
+  const continueOnError = options.continueOnError !== false; // Default true
+  const delayMs = options.delayMs || 1000; // Default 1 second delay
+  
+  const results = [];
+  const errors = [];
+  
+  console.log(`Calculating ${characterIds.length} characters...`);
+  
+  for (let i = 0; i < characterIds.length; i++) {
+    const characterId = characterIds[i];
+    
+    try {
+      const result = calculateCharacter(characterId, options);
+      results.push(result);
+      console.log(`✅ Calculated ${characterId} (${i + 1}/${characterIds.length})`);
+      
+    } catch (error) {
+      const errorInfo = {
+        characterId: characterId,
+        error: error.message,
+        index: i
+      };
+      errors.push(errorInfo);
+      console.error(`❌ Failed to calculate ${characterId}:`, error.message);
+      
+      if (!continueOnError) {
+        throw new Error(`Failed to calculate character ${characterId}: ${error.message}`);
+      }
+    }
+    
+    // Add delay between requests to avoid rate limiting
+    if (i < characterIds.length - 1 && delayMs > 0) {
+      Utilities.sleep(delayMs);
+    }
+  }
+  
+  console.log(`Character calculations completed: ${results.length} successful, ${errors.length} failed`);
+  
+  return {
+    success: errors.length === 0 || continueOnError,
+    totalCharacters: characterIds.length,
+    successfulCalculations: results.length,
+    failedCalculations: errors.length,
+    results: results,
+    errors: errors
+  };
+}
+
+/*******************************
+ * FIREBASE SERVICE ACCOUNT AUTHENTICATION
+ *******************************/
+function getServiceAccountIdToken() {
+  try {
+    const config = getSyncMasterLogConfig();
+    const serviceAccount = config.FIREBASE_SERVICE_ACCOUNT;
+    
+    if (!serviceAccount.CLIENT_EMAIL || !serviceAccount.PRIVATE_KEY) {
+      throw new Error('Missing FIREBASE_CLIENT_EMAIL or FIREBASE_PRIVATE_KEY in script properties');
+    }
+    
+    console.log('Getting service account token for:', serviceAccount.CLIENT_EMAIL);
+    
+    // Create JWT for Firebase Auth
+    const now = Math.floor(Date.now() / 1000);
+    const payload = {
+      iss: serviceAccount.CLIENT_EMAIL,
+      sub: serviceAccount.CLIENT_EMAIL,
+      aud: 'https://identitytoolkit.googleapis.com/google.identity.identitytoolkit.v1.IdentityToolkit',
+      iat: now,
+      exp: now + 3600, // 1 hour
+      uid: serviceAccount.CLIENT_EMAIL.replace('@', '_').replace('.', '_'), // Create a UID from email
+      claims: {
+        role: 'super_admin' // Ensure super admin role
+      }
+    };
+    
+    // Sign the JWT
+    const jwt = createJWT(payload, serviceAccount.PRIVATE_KEY);
+    
+    // Exchange JWT for Firebase ID token
+    const idToken = exchangeJWTForIdToken(jwt, serviceAccount.PROJECT_ID);
+    
+    return idToken;
+    
+  } catch (error) {
+    console.error('Error getting service account ID token:', error);
+    throw error;
+  }
+}
+
+function createJWT(payload, privateKey) {
+  try {
+    // Create JWT header
+    const header = {
+      alg: 'RS256',
+      typ: 'JWT'
+    };
+    
+    // Encode header and payload
+    const encodedHeader = Utilities.base64EncodeWebSafe(JSON.stringify(header)).replace(/=/g, '');
+    const encodedPayload = Utilities.base64EncodeWebSafe(JSON.stringify(payload)).replace(/=/g, '');
+    
+    // Create signature
+    const signatureInput = encodedHeader + '.' + encodedPayload;
+    const signature = Utilities.computeRsaSha256Signature(signatureInput, privateKey);
+    const encodedSignature = Utilities.base64EncodeWebSafe(signature).replace(/=/g, '');
+    
+    return signatureInput + '.' + encodedSignature;
+    
+  } catch (error) {
+    console.error('Error creating JWT:', error);
+    throw error;
+  }
+}
+
+function exchangeJWTForIdToken(jwt, projectId) {
+  try {
+    // Use Firebase Auth REST API to get an ID token
+    const url = `https://identitytoolkit.googleapis.com/v1/accounts:signInWithCustomToken?key=AIzaSyD6pJb56UjgUI2Pk5fFoHYTazY843Xciho`;
+    
+    const payload = {
+      token: jwt,
+      returnSecureToken: true
+    };
+    
+    const options = {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true
+    };
+    
+    const response = UrlFetchApp.fetch(url, options);
+    const responseCode = response.getResponseCode();
+    const responseText = response.getContentText();
+    
+    if (responseCode !== 200) {
+      throw new Error(`Failed to exchange JWT for ID token: ${responseCode} - ${responseText}`);
+    }
+    
+    const result = JSON.parse(responseText);
+    return result.idToken;
+    
+  } catch (error) {
+    console.error('Error exchanging JWT for ID token:', error);
+    throw error;
+  }
+}
+
+/*******************************
+ * MANUAL TRIGGER FUNCTIONS
+ *******************************/
+function callSyncMasterLogWithToken(idToken, options = {}) {
+  /**
+   * Manual function to call sync masterlog with a provided ID token
+   * 
+   * Usage:
+   * 1. Get your Firebase ID token from the Flutter app (super admin required)
+   * 2. Call: callSyncMasterLogWithToken('your-id-token-here')
+   * 
+   * Optional parameters:
+   * - containerDocId: default 'root'
+   * - sheetName: default 'Master Logs'  
+   * - spreadsheetId: default from config
+   */
+  
+  if (!idToken) {
+    throw new Error('ID token is required. Please provide a valid Firebase ID token.');
+  }
+  
+  return callSyncMasterLog(idToken, options);
+}
+
+function syncMasterLogWithCustomParams(idToken, containerDocId, sheetName, spreadsheetId) {
+  /**
+   * Sync masterlog with custom parameters
+   * 
+   * @param {string} idToken - Firebase ID token
+   * @param {string} containerDocId - Container document ID (default: 'root')
+   * @param {string} sheetName - Sheet name (default: 'Master Logs')
+   * @param {string} spreadsheetId - Google Sheets ID
+   */
+  
+  const options = {};
+  if (containerDocId) options.containerDocId = containerDocId;
+  if (sheetName) options.sheetName = sheetName;
+  if (spreadsheetId) options.spreadsheetId = spreadsheetId;
+  
+  return callSyncMasterLogWithToken(idToken, options);
+}
+
+/*******************************
+ * SCRIPT PROPERTIES SETUP
+ *******************************/
+function setupSyncMasterLogProperties() {
+  /**
+   * Helper function to set up additional script properties for sync masterlog
+   * Call this once to configure the optional properties
+   */
+  
+  const props = PropertiesService.getScriptProperties();
+  
+  // Check existing properties
+  console.log('Current script properties:');
+  console.log('FIREBASE_CLIENT_EMAIL:', props.getProperty('FIREBASE_CLIENT_EMAIL') ? '✅ Set' : '❌ Missing');
+  console.log('FIREBASE_PRIVATE_KEY:', props.getProperty('FIREBASE_PRIVATE_KEY') ? '✅ Set' : '❌ Missing');
+  console.log('FIREBASE_SERVICE_ACCOUNT:', props.getProperty('FIREBASE_SERVICE_ACCOUNT') ? '✅ Set' : '❌ Missing');
+  
+  // Set optional sync masterlog specific properties with defaults
+  const newProperties = {
+    'SYNC_MASTERLOG_URL': 'https://us-central1-crucible-helper.cloudfunctions.net/syncMasterLogs',
+    'SYNC_MASTERLOG_CONTAINER_DOC_ID': 'root',
+    'SYNC_MASTERLOG_SHEET_NAME': 'Master Logs',
+    'SYNC_MASTERLOG_SPREADSHEET_ID': '1SD16oPmNp3b1V3rLrUS37O5DC8kd9-Cwrn3Zrboo6-0',
+    'CALCULATE_CHARACTER_URL': 'https://us-central1-crucible-helper.cloudfunctions.net/calculateCharacter'
+  };
+  
+  console.log('\nSetting sync masterlog properties:');
+  for (const [key, value] of Object.entries(newProperties)) {
+    const existing = props.getProperty(key);
+    if (!existing) {
+      props.setProperty(key, value);
+      console.log(`✅ Set ${key}: ${value}`);
+    } else {
+      console.log(`⏭️ ${key} already set: ${existing}`);
+    }
+  }
+  
+  console.log('\n✅ Script properties setup complete!');
+  console.log('You can now run triggerSyncMasterLog() to sync masterlog');
+  
+  return newProperties;
+}
+
+function updateSyncMasterLogProperty(key, value) {
+  /**
+   * Update a specific sync masterlog property
+   * 
+   * @param {string} key - Property key (e.g., 'SYNC_MASTERLOG_SPREADSHEET_ID')
+   * @param {string} value - Property value
+   */
+  
+  const validKeys = [
+    'SYNC_MASTERLOG_URL',
+    'SYNC_MASTERLOG_CONTAINER_DOC_ID',
+    'SYNC_MASTERLOG_SHEET_NAME',
+    'SYNC_MASTERLOG_SPREADSHEET_ID',
+    'CALCULATE_CHARACTER_URL'
+  ];
+  
+  if (!validKeys.includes(key)) {
+    throw new Error(`Invalid property key. Valid keys: ${validKeys.join(', ')}`);
+  }
+  
+  const props = PropertiesService.getScriptProperties();
+  const oldValue = props.getProperty(key);
+  props.setProperty(key, value);
+  
+  console.log(`Updated ${key}:`);
+  console.log(`  Old: ${oldValue || 'not set'}`);
+  console.log(`  New: ${value}`);
+  
+  return { key, oldValue, newValue: value };
+}
+
+/*******************************
+ * TESTING AND VALIDATION FUNCTIONS
+ *******************************/
+function testCalculateCharacterAuth() {
+  /**
+   * Test function to verify calculateCharacter authentication is working
+   * This helps troubleshoot authentication issues with the updated Firebase function
+   */
+  
+  try {
+    console.log('Testing calculateCharacter authentication...');
+    
+    // Test with a dummy character ID to see if we get proper auth error handling
+    const testCharacterId = 'test_test';
+    
+    try {
+      const result = calculateCharacter(testCharacterId, { debug: true });
+      console.log('✅ Authentication test passed - got valid response');
+      return { success: true, message: 'Authentication working correctly', result };
+      
+    } catch (error) {
+      const errorMsg = error.message;
+      
+      if (errorMsg.includes('Authentication failed: Missing authorization header')) {
+        console.log('❌ Service account authentication not working - check FIREBASE_CLIENT_EMAIL and FIREBASE_PRIVATE_KEY');
+        return { success: false, issue: 'missing_auth', message: 'Service account credentials missing or invalid' };
+        
+      } else if (errorMsg.includes('Permission denied')) {
+        console.log('❌ Service account does not have super admin privileges');
+        return { success: false, issue: 'insufficient_permissions', message: 'Service account needs super admin privileges in Firestore' };
+        
+      } else if (errorMsg.includes('No advancement rows found') || errorMsg.includes('missing_target')) {
+        console.log('✅ Authentication working - got expected business logic response');
+        return { success: true, message: 'Authentication working correctly (expected error for test data)' };
+        
+      } else {
+        console.log('⚠️ Unexpected error:', errorMsg);
+        return { success: false, issue: 'unexpected_error', message: errorMsg };
+      }
+    }
+    
+  } catch (error) {
+    console.error('Error testing calculateCharacter auth:', error);
+    return { success: false, issue: 'test_error', message: error.message };
+  }
+}
+
+function testCalculateCharacterEndpoint() {
+  /**
+   * Test if the calculateCharacter endpoint is reachable
+   */
+  
+  try {
+    const config = getSyncMasterLogConfig();
+    const response = UrlFetchApp.fetch(config.CALCULATE_CHARACTER_URL, {
+      method: 'OPTIONS',
+      muteHttpExceptions: true
+    });
+    
+    const responseCode = response.getResponseCode();
+    console.log('Calculate character OPTIONS request response code:', responseCode);
+    
+    if (responseCode === 204) {
+      console.log('✅ Calculate character endpoint is reachable');
+      return true;
+    } else {
+      console.log('❌ Unexpected response code:', responseCode);
+      return false;
+    }
+    
+  } catch (error) {
+    console.error('❌ Error testing calculate character endpoint:', error);
+    return false;
+  }
+}
+
+/*******************************
+ * UTILITY FUNCTIONS
+ *******************************/
+function testConnection() {
+  /**
+   * Test if the sync masterlog endpoint is reachable
+   */
+  
+  try {
+    const config = getSyncMasterLogConfig();
+    const response = UrlFetchApp.fetch(config.SYNC_MASTERLOG_URL, {
+      method: 'OPTIONS',
+      muteHttpExceptions: true
+    });
+    
+    const responseCode = response.getResponseCode();
+    console.log('OPTIONS request response code:', responseCode);
+    
+    if (responseCode === 204) {
+      console.log('✅ Sync masterlog endpoint is reachable');
+      return true;
+    } else {
+      console.log('❌ Unexpected response code:', responseCode);
+      return false;
+    }
+    
+  } catch (error) {
+    console.error('❌ Error testing connection:', error);
+    return false;
+  }
+}
+
+function getLastSyncInfo() {
+  /**
+   * Helper function to check when sync was last run
+   * This would require Firebase Admin SDK setup to read Firestore
+   */
+  
+  console.log('⚠️ getLastSyncInfo not implemented yet');
+  console.log('To check last sync info, look at the "Master Logs/last_sync" document in Firestore');
+  
+  return {
+    message: 'Check Firestore collection "Master Logs", document "last_sync" for last sync information'
+  };
+}
+
+/*******************************
+ * SCHEDULED TRIGGER SETUP
+ *******************************/
+function setupScheduledTrigger() {
+  /**
+   * Set up a time-based trigger to run sync automatically
+   * 
+   * WARNING: This requires proper authentication setup first!
+   */
+  
+  console.log('⚠️ Setting up scheduled triggers requires service account authentication');
+  console.log('Please configure service account authentication first');
+  
+  // Example of how to set up a daily trigger:
+  /*
+  ScriptApp.newTrigger('triggerSyncMasterLog')
+    .timeBased()
+    .everyDays(1)
+    .atHour(2) // Run at 2 AM
+    .create();
+  */
+}
+
+/*******************************
+ * CHARACTER CALCULATION HELPERS
+ *******************************/
+function calculateCharactersByIds(characterIds, options = {}) {
+  /**
+   * Helper function to calculate multiple characters when you have their IDs
+   * 
+   * @param {string[]} characterIds - Array of character IDs in format "{uid}_{characterNumber}"
+   * @param {object} options - Optional parameters
+   * @returns {object} Results for all characters
+   */
+  
+  if (!Array.isArray(characterIds) || characterIds.length === 0) {
+    return {
+      success: false,
+      message: 'No character IDs provided',
+      totalCharacters: 0,
+      successfulCalculations: 0,
+      failedCalculations: 0,
+      results: [],
+      errors: []
+    };
+  }
+  
+  const ui = SpreadsheetApp.getUi();
+  
+  if (options.showProgress !== false) {
+    ui.alert(`🔢 Calculating ${characterIds.length} characters...\nThis may take a few moments.`);
+  }
+  
+  const results = calculateMultipleCharacters(characterIds, {
+    continueOnError: true,
+    delayMs: 1500, // Slightly longer delay for manual calculations
+    ...options
+  });
+  
+  if (options.showProgress !== false) {
+    const resultMessage = `✅ Character calculations completed!
+
+📊 Results:
+  • Total characters: ${results.totalCharacters}
+  • Successful: ${results.successfulCalculations}
+  • Failed: ${results.failedCalculations}
+
+${results.errors.length > 0 ? `❌ Errors:\n${results.errors.map(e => `  • ${e.characterId}: ${e.error}`).join('\n')}` : ''}`;
+    
+    ui.alert(resultMessage);
+  }
+  
+  return results;
+}
+
+function manualCalculateCharacter(characterId, debug = false) {
+  /**
+   * Manual character calculation with UI feedback
+   * 
+   * @param {string} characterId - Character ID in format "{uid}_{characterNumber}"
+   * @param {boolean} debug - Enable debug mode
+   */
+  
+  const ui = SpreadsheetApp.getUi();
+  
+  try {
+    ui.alert(`🔢 Calculating character: ${characterId}`);
+    
+    const result = calculateCharacter(characterId, { debug });
+    
+    const successMessage = `✅ Character calculation completed!
+
+Character: ${characterId}
+📊 Results:
+  • Advancement rows: ${result.advRows}
+  • Affinities calculated: ${result.affinitiesCalculated}
+  • Affinity count: ${result.affinityCount}
+  • Detected affinity rows: ${result.detectedAffinityRows}
+  • Detected skill rows: ${result.detectedSkillRows}`;
+    
+    ui.alert(successMessage);
+    return result;
+    
+  } catch (error) {
+    const errorMessage = `❌ Error calculating character ${characterId}:
+
+${error.message}
+
+Please check the script logs for more details.`;
+    
+    ui.alert(errorMessage);
+    throw error;
+  }
+}
+
+/*******************************
+ * INTEGRATION WITH EXISTING WORKFLOWS
+ *******************************/
+function submitStagedToMasterLogs() {
+  /**
+   * Enhanced version that moves staged data to Master Logs, syncs to Firestore, 
+   * and calculates affected characters
+   */
+  
+  const ui = SpreadsheetApp.getUi();
+  
+  try {
+    // Step 1: Move data from staging to master logs (your existing logic)
+    ui.alert('📋 Moving staged data to Master Logs...');
+    
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const stagingSheet = ss.getSheetByName("PC Advancement Staging");
+    const masterSheet = ss.getSheetByName("Master Logs");
+
+    const startRow = 5;
+    const lastRow = stagingSheet.getLastRow();
+    const numRows = lastRow - startRow + 1;
+
+    if (numRows < 1) {
+      ui.alert("There are no entries to submit.");
+      return;
+    }
+
+    const dataRange = stagingSheet.getRange(startRow, 1, numRows, stagingSheet.getLastColumn());
+    const data = dataRange.getValues();
+
+    const rowsToSubmit = data.filter(row => row.some(cell => cell !== "")); // Skip blank rows
+
+    if (rowsToSubmit.length === 0) {
+      ui.alert("No data to move (rows may be blank).");
+      return;
+    }
+
+    // Move the data
+    masterSheet.getRange(masterSheet.getLastRow() + 1, 1, rowsToSubmit.length, rowsToSubmit[0].length).setValues(rowsToSubmit);
+    dataRange.clearContent(); // Clear the submitted rows
+
+    // Step 2: Upload JSON for each unique character (your existing logic)
+    ui.alert(`✅ Moved ${rowsToSubmit.length} rows to Master Logs.\n🔄 Generating character JSON files...`);
+    
+    const uniqueCharacters = [...new Set(rowsToSubmit.map(row => row[0]))];
+
+    uniqueCharacters.forEach(characterNumber => {
+      try {
+        const jsonData = generateCharacterJsonFromLogs(characterNumber);
+        const playerEmail = jsonData.playerEmail;
+        const bucket = "crucible-helper.firebasestorage.app";
+        const path = `users/${playerEmail}/pc.json`;
+
+        uploadJsonToGCS(bucket, path, jsonData);
+      } catch (error) {
+        Logger.log(`❌ Failed to generate/upload JSON for character ${characterNumber}: ${error.message}`);
+      }
+    });
+
+    // Step 3: Trigger sync to Firestore
+    ui.alert('📤 Syncing Master Logs to Firestore...\nThis may take a moment.');
+    
+    const syncResult = triggerSyncMasterLog();
+    
+    // Step 4: Calculate affected characters
+    ui.alert('🔢 Calculating character progressions...\nThis may take a moment for multiple characters.');
+    
+    let calculationResults = null;
+    let calculationErrors = [];
+    
+    try {
+      // For now, we need the character IDs (uid_characterNumber format)
+      // Since we only have character numbers from the staging data, 
+      // we'll need to let the sync complete first and then the calculateCharacter 
+      // function will be called separately or triggered from the Firebase side
+      
+      console.log(`Characters that need calculation: ${uniqueCharacters.join(', ')}`);
+      ui.alert(`⚠️ Character calculation step:\n\nThe following characters need their progressions calculated:\n${uniqueCharacters.join(', ')}\n\nNote: Character calculations require character UIDs which are resolved during sync.\nRun individual character calculations manually if needed.`);
+      
+    } catch (calcError) {
+      console.error('Error during character calculations:', calcError);
+      calculationErrors.push(calcError.message);
+      ui.alert(`⚠️ Character calculations encountered errors:\n${calcError.message}\n\nData has been synced successfully, but character calculations may need to be run manually.`);
+    }
+    
+    // Step 5: Show final success message
+    const successMessage = `🎉 Process Complete!
+
+📋 Moved: ${rowsToSubmit.length} rows to Master Logs
+👥 Characters: ${uniqueCharacters.length} unique characters updated
+📤 Sync Results:
+  • Written: ${syncResult.stats.written} records
+  • Mirrored: ${syncResult.stats.mirrored} character records
+  • Deleted: ${syncResult.stats.deletedFromCharacters} obsolete records
+
+✅ All data has been successfully synced to Firestore!
+
+${calculationErrors.length > 0 ? '⚠️ Note: Some character calculations may need manual attention.' : ''}`;
+
+    ui.alert(successMessage);
+    
+    return {
+      success: true,
+      rowsMoved: rowsToSubmit.length,
+      charactersAffected: uniqueCharacters.length,
+      syncStats: syncResult.stats
+    };
+
+  } catch (error) {
+    console.error('Error in submitStagedToMasterLogsWithSync:', error);
+    
+    const errorMessage = `❌ Error during submission/sync process:
+
+${error.message}
+
+Please check the script logs for more details.`;
+    
+    ui.alert(errorMessage);
+    throw error;
+  }
+}
+
+function submitStagedToMasterLogsWithSyncSilent() {
+  /**
+   * Silent version without UI alerts - for automated/background use
+   * Returns detailed results for programmatic handling
+   */
+  
+  try {
+    console.log('Starting silent staged data submission with sync...');
+    
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const stagingSheet = ss.getSheetByName("PC Advancement Staging");
+    const masterSheet = ss.getSheetByName("Master Logs");
+
+    const startRow = 5;
+    const lastRow = stagingSheet.getLastRow();
+    const numRows = lastRow - startRow + 1;
+
+    if (numRows < 1) {
+      return { success: false, message: "No entries to submit", rowsMoved: 0 };
+    }
+
+    const dataRange = stagingSheet.getRange(startRow, 1, numRows, stagingSheet.getLastColumn());
+    const data = dataRange.getValues();
+
+    const rowsToSubmit = data.filter(row => row.some(cell => cell !== "")); // Skip blank rows
+
+    if (rowsToSubmit.length === 0) {
+      return { success: false, message: "No data to move (rows may be blank)", rowsMoved: 0 };
+    }
+
+    // Move the data
+    masterSheet.getRange(masterSheet.getLastRow() + 1, 1, rowsToSubmit.length, rowsToSubmit[0].length).setValues(rowsToSubmit);
+    dataRange.clearContent(); // Clear the submitted rows
+
+    console.log(`Moved ${rowsToSubmit.length} rows to Master Logs`);
+
+    // Upload JSON for each unique character
+    const uniqueCharacters = [...new Set(rowsToSubmit.map(row => row[0]))];
+    let jsonUploadErrors = 0;
+
+    uniqueCharacters.forEach(characterNumber => {
+      try {
+        const jsonData = generateCharacterJsonFromLogs(characterNumber);
+        const playerEmail = jsonData.playerEmail;
+        const bucket = "crucible-helper.firebasestorage.app";
+        const path = `users/${playerEmail}/pc.json`;
+
+        uploadJsonToGCS(bucket, path, jsonData);
+      } catch (error) {
+        jsonUploadErrors++;
+        console.error(`Failed to generate/upload JSON for character ${characterNumber}:`, error);
+      }
+    });
+
+    console.log(`JSON uploads completed. Errors: ${jsonUploadErrors}/${uniqueCharacters.length}`);
+
+    // Trigger sync to Firestore
+    console.log('Triggering sync to Firestore...');
+    const syncResult = triggerSyncMasterLog();
+    console.log('Sync completed successfully');
+
+    return {
+      success: true,
+      rowsMoved: rowsToSubmit.length,
+      charactersAffected: uniqueCharacters.length,
+      jsonUploadErrors,
+      syncStats: syncResult.stats,
+      message: `Successfully moved ${rowsToSubmit.length} rows and synced to Firestore`
+    };
+
+  } catch (error) {
+    console.error('Error in submitStagedToMasterLogsWithSyncSilent:', error);
+    return {
+      success: false,
+      error: error.message,
+      message: `Error during submission/sync: ${error.message}`
+    };
+  }
+}
+
+/*******************************
+ * DOCUMENTATION HELPERS
+ *******************************/
+function showUsageInstructions() {
+  const instructions = `
+=== SYNC MASTERLOG APP SCRIPT USAGE ===
+
+QUICK START (Service Account - Recommended):
+1. Run: setupSyncMasterLogProperties() (one-time setup)
+2. Run: triggerSyncMasterLog() (triggers sync automatically)
+
+QUICK START (Manual Token):
+1. Get Firebase ID token from Flutter app (super admin required)
+2. Run: callSyncMasterLogWithToken('your-id-token-here')
+
+FUNCTIONS AVAILABLE:
+
+AUTOMATED (SERVICE ACCOUNT):
+1. triggerSyncMasterLog()
+   - Main automated function using service account authentication
+   - No parameters needed - uses script properties
+
+2. setupSyncMasterLogProperties()
+   - One-time setup of script properties
+   - Sets defaults for URL, spreadsheet ID, etc.
+
+3. updateSyncMasterLogProperty(key, value)
+   - Update specific configuration values
+   - Valid keys: SYNC_MASTERLOG_URL, SYNC_MASTERLOG_SPREADSHEET_ID, etc.
+
+MANUAL TOKEN:
+4. callSyncMasterLogWithToken(idToken, options)
+   - Manual function with Firebase ID token
+   - Required: idToken (string)
+   - Optional: options object
+
+5. syncMasterLogWithCustomParams(idToken, containerDocId, sheetName, spreadsheetId)
+   - Sync with specific parameters
+
+CHARACTER CALCULATION:
+6. calculateCharacter(characterId, options)
+   - Calculate single character using characterId format "{uid}_{characterNumber}"
+   - Returns detailed calculation results
+
+7. calculateCharacterByParams(playerUid, characterNumber, options)
+   - Calculate character using separate playerUid and characterNumber
+
+8. calculateMultipleCharacters(characterIds, options)
+   - Calculate multiple characters sequentially with error handling
+
+9. manualCalculateCharacter(characterId, debug)
+   - Manual character calculation with UI feedback
+
+10. calculateCharactersByIds(characterIds, options)
+    - Helper for calculating multiple characters with progress UI
+
+WORKFLOW INTEGRATION:
+11. submitStagedToMasterLogs()
+    - Enhanced version that moves staged data, syncs, and prepares for calculations
+    - Includes user feedback via UI alerts
+    - Shows progress and final results
+
+12. submitStagedToMasterLogsWithSyncSilent()
+    - Silent version for automated/background use
+    - Returns detailed results programmatically
+
+UTILITIES:
+13. testConnection()
+    - Test if sync masterlog endpoint is reachable
+
+14. testCalculateCharacterEndpoint()
+    - Test if calculate character endpoint is reachable
+
+15. testCalculateCharacterAuth()
+    - Test calculate character authentication and permissions
+    - Helps troubleshoot the new authentication requirements
+
+16. getLastSyncInfo()
+    - Check last sync status (requires Firestore access)
+
+AUTHENTICATION:
+- Uses existing FIREBASE_CLIENT_EMAIL and FIREBASE_PRIVATE_KEY from script properties
+- Service account must have super admin privileges
+- Manual token option available as fallback
+
+SCRIPT PROPERTIES REQUIRED:
+- FIREBASE_CLIENT_EMAIL (existing)
+- FIREBASE_PRIVATE_KEY (existing)
+- FIREBASE_SERVICE_ACCOUNT (existing)
+
+SCRIPT PROPERTIES OPTIONAL:
+- SYNC_MASTERLOG_URL (defaults to production URL)
+- SYNC_MASTERLOG_CONTAINER_DOC_ID (defaults to 'root')
+- SYNC_MASTERLOG_SHEET_NAME (defaults to 'Master Logs')
+- SYNC_MASTERLOG_SPREADSHEET_ID (defaults to production spreadsheet)
+
+EXAMPLE USAGE:
+// Automated (recommended)
+setupSyncMasterLogProperties(); // Run once
+triggerSyncMasterLog(); // Run to sync
+
+// Manual token (fallback)
+const token = 'eyJhbGciOiJSUzI1NiIs...';
+const result = callSyncMasterLogWithToken(token);
+console.log(result);
+  `;
+  
+  console.log(instructions);
+  return instructions;
+}

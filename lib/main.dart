@@ -21,6 +21,9 @@ import 'pages/login_page.dart';
 import 'pages/events_page.dart';
 import 'pages/rules_page.dart';
 import 'pages/death_timer_page.dart';
+import 'pages/admin_page.dart';
+import 'pages/new_sheet_page.dart';
+import 'shared/character_cache_service.dart';
 import 'config/app_config.dart';
 
 final RouteObserver<ModalRoute<void>> routeObserver = RouteObserver<ModalRoute<void>>();
@@ -203,6 +206,7 @@ class _HomePageState extends State<HomePage> {
   Map<String, bool> eventRegistrationStatus = {};
   Map<String, bool> eventCheckInStatus = {};
   Map<String, bool> isLoadingRegistrationStatus = {};
+  bool _isSuperAdmin = false;
 
   @override
   void initState() {
@@ -210,6 +214,9 @@ class _HomePageState extends State<HomePage> {
     fetchCharacter();
     fetchActiveEvents();
     _initializeUserStructure();
+    _checkSuperAdminPermissions();
+    // Refresh cache from DB if last_sync is newer
+    CharacterCacheService.refreshIfStale().catchError((_) => false);
   }
 
   Future<void> fetchCharacter() async {
@@ -441,6 +448,34 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  Future<void> _checkSuperAdminPermissions() async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) return;
+
+      final idToken = await user.getIdToken();
+      final response = await http.post(
+        Uri.parse(AppConfig.checkSuperAdminUrl),
+        headers: {
+          'Authorization': 'Bearer $idToken',
+          'Content-Type': 'application/json',
+        },
+        body: json.encode({'uid': user.uid}),
+      );
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        if (mounted) {
+          setState(() {
+            _isSuperAdmin = data['isSuperAdmin'] ?? false;
+          });
+        }
+      }
+    } catch (e) {
+      // ignore
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final isWide = MediaQuery.of(context).size.width >= 900;
@@ -507,6 +542,12 @@ class _HomePageState extends State<HomePage> {
                   icon: Icon(Icons.menu_book),
                   onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => RulesPage())),
                 ),
+                if (_isSuperAdmin)
+                  IconButton(
+                    tooltip: 'Admin',
+                    icon: Icon(Icons.admin_panel_settings, color: Colors.amber),
+                    onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => AdminPage())),
+                  ),
               ]),
             ],
           ),
@@ -538,11 +579,16 @@ class _HomePageState extends State<HomePage> {
                         },
                       ),
                     ),
-                    destinations: const [
+                    destinations: [
                       NavigationRailDestination(icon: Icon(Icons.qr_code_scanner), label: Text('Scan')),
                       NavigationRailDestination(icon: Icon(Icons.timer), label: Text('Death')),
                       NavigationRailDestination(icon: Icon(Icons.calendar_today), label: Text('Events')),
                       NavigationRailDestination(icon: Icon(Icons.menu_book), label: Text('Rules')),
+                      if (_isSuperAdmin)
+                        NavigationRailDestination(
+                          icon: Icon(Icons.admin_panel_settings, color: Colors.amber), 
+                          label: Text('Admin', style: TextStyle(color: Colors.amber))
+                        ),
                     ],
                     onDestinationSelected: (idx) {
                       switch (idx) {
@@ -557,6 +603,11 @@ class _HomePageState extends State<HomePage> {
                           break;
                         case 3:
                           Navigator.push(context, MaterialPageRoute(builder: (_) => RulesPage()));
+                          break;
+                        case 4:
+                          if (_isSuperAdmin) {
+                            Navigator.push(context, MaterialPageRoute(builder: (_) => AdminPage()));
+                          }
                           break;
                       }
                     },
@@ -640,7 +691,10 @@ class _HomePageState extends State<HomePage> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              event.typeName,
+                              (event.registrationActivated && event.registrationDetails != null &&
+                                      ((event.registrationDetails!['eventName'] ?? '').toString().isNotEmpty))
+                                  ? event.registrationDetails!['eventName']
+                                  : event.typeName,
                               style: TextStyle(
                                 color: Colors.white,
                                 fontSize: 16,
@@ -4362,6 +4416,78 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
   }
 
 
+  Future<void> _callCalculateCharacterFunction() async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) {
+        print('❌ User not authenticated for calculate character');
+        return;
+      }
+
+      final idToken = await user.getIdToken();
+      final character = widget.character;
+      
+      // Use the current authenticated user's UID
+      final playerUid = user.uid;
+
+      final response = await http.post(
+        Uri.parse(AppConfig.calculateCharacterUrl),
+        headers: {
+          'Authorization': 'Bearer $idToken',
+          'Content-Type': 'application/json',
+        },
+        body: json.encode({
+          'playerUid': playerUid,
+          'characterNumber': character.characterNumber.toString(),
+        }),
+      );
+
+      if (response.statusCode == 200) {
+        final responseData = json.decode(response.body);
+        if (responseData['ok'] == true) {
+          print('✅ Character calculations updated');
+          print('📊 Advancement errors: ${responseData['advancementErrors'] ?? 'unknown'}');
+          print('📊 Hit point rows detected: ${responseData['detectedHitPointRows'] ?? 'unknown'}');
+          print('📊 Essence calculated: ${responseData['essenceCalculated'] ?? 'unknown'}');
+          if (context.mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('✅ Character calculations updated (${responseData['advancementErrors'] ?? 0} errors)'),
+                backgroundColor: Colors.green,
+                duration: Duration(seconds: 2),
+              ),
+            );
+          }
+        } else {
+          print('❌ Calculate character failed: ${responseData['error']}');
+          if (context.mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('❌ Calculate character failed: ${responseData['error']}'),
+                backgroundColor: Colors.red,
+                duration: Duration(seconds: 3),
+              ),
+            );
+          }
+        }
+      } else {
+        print('❌ Calculate character HTTP error: ${response.statusCode}');
+        print('❌ Response body: ${response.body}');
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('❌ Calculate character HTTP error: ${response.statusCode}'),
+              backgroundColor: Colors.red,
+              duration: Duration(seconds: 3),
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      print('❌ Error calling calculate character: $e');
+    }
+  }
+
   Future<void> _syncCharacterData() async {
     // Show loading indicator
     if (context.mounted) {
@@ -4402,6 +4528,9 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
         final jsonString = utf8.decode(data);
         final jsonMap = json.decode(jsonString);
         final newCharacter = Character.fromJson(jsonMap);
+        
+        // Always trigger calculateCharacter function on refresh
+        await _callCalculateCharacterFunction();
         
         // Check if the character data has actually changed
         if (newCharacter.generatedAt != widget.character.generatedAt) {
@@ -4467,8 +4596,6 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
 
   Color _getCultivationColor(String tier) {
     switch (tier.toLowerCase()) {
-      case 'mortal':
-        return Colors.grey;
       case 'spirit':
         return Colors.green;
       case 'foundation':
@@ -4555,6 +4682,9 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
                 case 'sync':
                   _syncCharacterData();
                   break;
+                case 'new_sheet':
+                  Navigator.push(context, MaterialPageRoute(builder: (_) => NewSheetPage()));
+                  break;
                 case 'open_other':
                   _showOpenOtherCharacterDialog();
                   break;
@@ -4639,6 +4769,16 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
                       Icon(Icons.sync, size: 20),
                       SizedBox(width: 12),
                       Text('Sync Character Data'),
+                    ],
+                  ),
+                ),
+                PopupMenuItem(
+                  value: 'new_sheet',
+                  child: Row(
+                    children: [
+                      Icon(Icons.description, size: 20),
+                      SizedBox(width: 12),
+                      Text('New Sheet (from DB)'),
                     ],
                   ),
                 ),

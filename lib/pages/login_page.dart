@@ -29,7 +29,7 @@ class _LoginPageState extends State<LoginPage> {
         );
         // Warm the rules cache after navigation (user is signed in)
         // Errors are ignored so login UX is not blocked
-        RulesService.fetchAndCacheRules().catchError((_) {});
+        RulesService.fetchAndCacheRules().catchError((_) => null);
       }
     });
   }

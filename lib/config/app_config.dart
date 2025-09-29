@@ -23,6 +23,12 @@ class AppConfig {
   static String get checkSuperAdminUrl => 
     'https://$firebaseRegion-$firebaseProjectId.cloudfunctions.net/checkSuperAdmin';
 
+  static String get syncMasterLogsUrl => 
+    'https://$firebaseRegion-$firebaseProjectId.cloudfunctions.net/syncMasterLogs';
+
+  static String get calculateCharacterUrl => 
+    'https://$firebaseRegion-$firebaseProjectId.cloudfunctions.net/calculateCharacter';
+
   static String get getMonsterCoreUrl => 
     'https://$firebaseRegion-$firebaseProjectId.cloudfunctions.net/getMonsterCore';
 
@@ -105,6 +111,13 @@ class AppConfig {
 
   static String get disconnectDiscordUrl =>
     'https://$firebaseRegion-$firebaseProjectId.cloudfunctions.net/disconnectDiscord';
+
+  // Event shift summary
+  static String get getEventShiftSummaryUrl =>
+    'https://$firebaseRegion-$firebaseProjectId.cloudfunctions.net/getEventShiftSummary';
+
+  static String get getShiftAttendeesUrl =>
+    'https://$firebaseRegion-$firebaseProjectId.cloudfunctions.net/getShiftAttendees';
 
   // Development/Production flags
   static const bool isDevelopment = bool.fromEnvironment(

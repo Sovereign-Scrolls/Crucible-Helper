@@ -1,3 +1,4 @@
+// Imports and initialization (moved to top to avoid 'onRequest' before initialization)
 const { onRequest } = require("firebase-functions/v2/https");
 const { onObjectFinalized } = require("firebase-functions/v2/storage");
 const { defineSecret } = require("firebase-functions/params");
@@ -9,21 +10,95 @@ const axios = require("axios");
 const QRCode = require("qrcode");
 const crypto = require("crypto");
 const { google } = require("googleapis");
+const admin = require("firebase-admin");
+const moment = require('moment-timezone');
+const { google: googleapis } = require('googleapis');
+const config = require("./config.json");
 
 // Initialize Firebase Admin
 initializeApp();
-
 const db = getFirestore();
-const admin = require("firebase-admin");
-const { google: googleapis } = require('googleapis');
-const moment = require('moment-timezone');
-
-// Load configuration
-const config = require("./config.json");
 
 // Declare secrets
 const DISCORD_TOKEN = defineSecret("DISCORD_TOKEN");
 const GAME_SECRET = defineSecret("GAME_SECRET");
+
+// Confirm/add/remove user from a shift
+exports.updateShiftAssignment = onRequest(async (req, res) => {
+  // Enable CORS
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
+
+  if (!req.headers.authorization) {
+    return res.status(401).json({ ok: false, error: 'Missing authorization header' });
+  }
+  try {
+    const idToken = req.headers.authorization.split(' ')[1];
+    const decoded = await getAuth().verifyIdToken(idToken);
+    const uid = decoded.uid;
+    const isAdmin = await isSuperAdmin(uid);
+    if (!isAdmin) return res.status(403).json({ ok: false, error: 'admin_only' });
+
+    const { eventId, targetUid, action, shiftType, shiftIndexOrName } = req.body || {};
+    if (!eventId || !targetUid || !action || !shiftType) {
+      return res.status(400).json({ ok: false, error: 'missing_params' });
+    }
+
+    const regRef = db.collection('events').doc(String(eventId)).collection('registrations').doc(String(targetUid));
+    const regDoc = await regRef.get();
+    if (!regDoc.exists) return res.status(404).json({ ok: false, error: 'registration_not_found' });
+    const data = regDoc.data() || {};
+
+    if (shiftType === 'npc') {
+      const idx = parseInt(shiftIndexOrName);
+      const primary = Array.isArray(data.selectedNpcShifts) ? data.selectedNpcShifts : [];
+      switch (action) {
+        case 'confirm':
+        case 'add_primary':
+          if (!primary.includes(idx)) primary.push(idx);
+          break;
+        case 'remove':
+          const i = primary.indexOf(idx);
+          if (i >= 0) primary.splice(i, 1);
+          if (data.secondaryNpcShift === idx) data.secondaryNpcShift = null;
+          break;
+        case 'set_secondary':
+          data.secondaryNpcShift = idx;
+          break;
+      }
+      data.selectedNpcShifts = primary;
+    } else if (shiftType === 'cleanup') {
+      const name = String(shiftIndexOrName);
+      const primary = Array.isArray(data.selectedCleanupShifts) ? data.selectedCleanupShifts : [];
+      switch (action) {
+        case 'confirm':
+        case 'add_primary':
+          if (!primary.includes(name)) primary.push(name);
+          break;
+        case 'remove':
+          const i = primary.indexOf(name);
+          if (i >= 0) primary.splice(i, 1);
+          if (data.secondaryCleanupShift === name) data.secondaryCleanupShift = null;
+          break;
+        case 'set_secondary':
+          data.secondaryCleanupShift = name;
+          break;
+      }
+      data.selectedCleanupShifts = primary;
+    } else {
+      return res.status(400).json({ ok: false, error: 'invalid_shift_type' });
+    }
+
+    await regRef.update(data);
+    return res.status(200).json({ ok: true, message: 'updated', data });
+  } catch (e) {
+    console.error('updateShiftAssignment error', e);
+    return res.status(500).json({ ok: false, error: 'server_error' });
+  }
+});
+// (imports and initialization moved to top)
 // Discord OAuth: Get authorization URL
 exports.getDiscordAuthorizeUrl = onRequest(async (req, res) => {
   res.set('Access-Control-Allow-Origin', '*');
@@ -43,6 +118,289 @@ exports.getDiscordAuthorizeUrl = onRequest(async (req, res) => {
   } catch (e) {
     console.error('getDiscordAuthorizeUrl error', e);
     return res.status(500).json({ ok: false, error: 'server_error' });
+  }
+});
+
+// Temporary: Import a fixed list of past events into Firestore
+exports.importPastEventsTemp = onRequest(async (req, res) => {
+  // CORS
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
+
+  try {
+    const key = (req.query.key || req.body?.key || '').toString();
+    if (key !== 'import') {
+      return res.status(403).json({ ok: false, error: 'forbidden' });
+    }
+
+    const toIsoDate = (dateStr) => {
+      if (!dateStr) return '';
+      const parts = String(dateStr).trim().split('/');
+      if (parts.length !== 3) return '';
+      const m = String(parseInt(parts[0], 10)).padStart(2, '0');
+      const d = String(parseInt(parts[1], 10)).padStart(2, '0');
+      const y = String(parseInt(parts[2], 10));
+      if (!y || !m || !d) return '';
+      return `${y}-${m}-${d}`;
+    };
+
+    const parseDates = (startStr, endStr) => {
+      const startIso = toIsoDate(startStr);
+      let endIso = toIsoDate(endStr);
+      try {
+        const start = startIso ? new Date(`${startIso}T00:00:00Z`) : null;
+        let end = endIso ? new Date(`${endIso}T00:00:00Z`) : null;
+        if (start && end && end < start) {
+          const sYear = startIso.slice(0, 4);
+          const eMD = endIso.slice(5);
+          endIso = `${sYear}-${eMD}`;
+          end = new Date(`${endIso}T00:00:00Z`);
+        }
+      } catch (_) {}
+      return { startIso, endIso };
+    };
+
+    const slugify = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '').slice(0, 48);
+
+    const fallbackRows = [
+      { name: 'Welcome to the Academy', startDate: '9/15/2023', endDate: '9/17/2023', location: "Gryphon's Nest Campground" },
+      { name: 'Festival of the Lost - First Moon', startDate: '10/13/2023', endDate: '10/13/2023', location: "Gryphon's Nest Campground" },
+      { name: 'Academy Visitors - Second Moon', startDate: '11/10/2023', endDate: '11/12/2023', location: "Gryphon's Nest Campground" },
+      { name: 'The Open Door - Third Moon', startDate: '12/28/2023', endDate: '12/30/2023', location: "Gryphon's Nest Campground" },
+      { name: 'New Beginnings - Chaper 4', startDate: '2/2/2024', endDate: '2/4/2024', location: 'Camp Niwana' },
+      { name: 'A Challenge Offered - Third Moon', startDate: '2/16/2024', endDate: '2/18/2024', location: "Gryphon's Nest Campground" },
+      { name: 'Academy Rivals - Fifth Moon', startDate: '3/15/2024', endDate: '3/17/2024', location: "Gryphon's Nest Campground" },
+      { name: 'The First Tow Challenges', startDate: '4/12/2024', endDate: '4/12/2024', location: "Gryphon's Nest Campground" },
+      { name: 'SSLA War Comes Season Closer', startDate: '5/24/2024', endDate: '5/27/2024', location: "Gryphon's Nest Campground" },
+      { name: 'Sanguine Struggles SSLA', startDate: '9/13/2024', endDate: '9/15/2024', location: "Gryphon's Nest Campground" },
+      { name: 'A Sanctuary Threatened', startDate: '10/11/2024', endDate: '10/13/2024', location: "Gryphon's Nest Campground" },
+      { name: 'An Enemy Revealed', startDate: '12/27/2024', endDate: '12/30/2024', location: "Gryphon's Nest Campground" },
+      { name: 'The Blood Chalice', startDate: '1/17/2025', endDate: '1/19/2025', location: "Gryphon's Nest Campground" },
+      { name: 'War is here', startDate: '2/28/2025', endDate: '3/2/2025', location: "Gryphon's Nest Campground" },
+      { name: 'The End of the Goblin Threat...hopefully', startDate: '3/28/2025', endDate: '3/30/2025', location: "Gryphon's Nest Campground" },
+    ];
+
+    const rows = Array.isArray(req.body?.rows) ? req.body.rows : fallbackRows;
+
+    let success = 0;
+    const ids = [];
+    for (const row of rows) {
+      const name = String(row.name || '').trim();
+      const locationName = String(row.location || '').trim();
+      const { startIso, endIso } = parseDates(row.startDate, row.endDate);
+      if (!name || !startIso || !endIso) continue;
+      const id = `${startIso.replace(/-/g, '')}-${slugify(name)}`;
+
+      const data = {
+        startDate: startIso,
+        endDate: endIso,
+        locationId: null,
+        locationName,
+        locationAddress: '',
+        typeId: null,
+        typeName: name,
+        registrationActivated: false,
+        registrationDetails: { eventName: name },
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      };
+
+      await db.collection('events').doc(id).set(data, { merge: true });
+      success += 1;
+      ids.push(id);
+    }
+
+    return res.status(200).json({ ok: true, inserted: success, ids });
+  } catch (error) {
+    console.error('importPastEventsTemp error', error);
+    return res.status(500).json({ ok: false, error: 'server_error', message: error.message });
+  }
+});
+
+// Backfill: For past events, scan event checkins and Master Logs for matching
+// "Attending Event" entries by date; write rows to the check-in Google Sheet
+exports.backfillAdvancementFromMasterLogs = onRequest(async (req, res) => {
+  // CORS
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
+
+  try {
+    // Optional key-bypass for temporary usage
+    const bypassKey = (req.query.key || req.body?.key || '').toString();
+    const keyBypass = (bypassKey === 'backfill');
+
+    let scannerEmail = 'backfill@system.local';
+    if (!keyBypass) {
+      // Auth: super admin only
+      if (!req.headers.authorization) {
+        return res.status(401).json({ ok: false, error: 'Missing authorization header' });
+      }
+      const idToken = req.headers.authorization.split(' ')[1];
+      const decodedToken = await getAuth().verifyIdToken(idToken);
+      const uid = decodedToken.uid;
+      const isAdmin = await isSuperAdmin(uid);
+      if (!isAdmin) {
+        return res.status(403).json({ ok: false, error: 'User must be super admin' });
+      }
+      scannerEmail = decodedToken.email || scannerEmail;
+    }
+
+    // Inputs: upToDate (ISO), containerDocId (Master Logs root), dryRun
+    const upToDateIso = (req.query.upToDate || req.body?.upToDate || '').toString();
+    const containerDocId = (req.query.containerDocId || req.body?.containerDocId || 'root').toString();
+    const dryRun = String(req.query.dryRun ?? req.body?.dryRun ?? 'false').toLowerCase() === 'true';
+
+    let upToDate = null;
+    if (upToDateIso) {
+      const d = new Date(upToDateIso);
+      if (!isNaN(d.getTime())) upToDate = d;
+    }
+
+    // Load events that ended before now (past events). If upToDate is given, use it; else now
+    const now = new Date();
+    const cutoff = upToDate || now;
+    const eventsSnap = await db.collection('events')
+      .where('endDate', '<', cutoff.toISOString().slice(0, 10))
+      .orderBy('endDate', 'desc')
+      .get();
+
+    // Prepare Google Sheets API
+    const auth = new googleapis.auth.GoogleAuth({
+      scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+      keyFile: './service-account-key.json'
+    });
+    const sheets = googleapis.sheets({ version: 'v4', auth });
+
+    const results = [];
+    let appended = 0;
+
+    // Helper to normalize a date string from Master Logs to YYYY-MM-DD
+    const normalizeDate = (value) => {
+      if (!value) return '';
+      // Try known formats: ISO, M/D/YYYY, MM/DD/YYYY
+      const v = String(value).trim();
+      // If already YYYY-MM-DD
+      if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return v;
+      // If ISO full
+      const dt = new Date(v);
+      if (!isNaN(dt.getTime())) return dt.toISOString().slice(0, 10);
+      // If M/D/YYYY
+      const m = v.split('/');
+      if (m.length === 3) {
+        const month = String(parseInt(m[0], 10)).padStart(2, '0');
+        const day = String(parseInt(m[1], 10)).padStart(2, '0');
+        const year = String(parseInt(m[2], 10));
+        if (year && month && day) return `${year}-${month}-${day}`;
+      }
+      return '';
+    };
+
+    // Preload Master Logs rows indexed by date with reason
+    const masterLogsRef = db.collection('Master Logs').doc(containerDocId).collection('All');
+    const masterLogsSnap = await masterLogsRef.get();
+    const byDate = new Map(); // dateStr (YYYY-MM-DD) -> array of rows
+    masterLogsSnap.forEach((doc) => {
+      const row = doc.data() || {};
+      const reason = String(row['Advancement Reason'] || row['AdvancementReason'] || '').trim();
+      if (reason.toLowerCase() !== 'attending event') return;
+      const dateStr = normalizeDate(row['Date'] || row['date'] || row['_date']);
+      if (!dateStr) return;
+      if (!byDate.has(dateStr)) byDate.set(dateStr, []);
+      byDate.get(dateStr).push(row);
+    });
+
+    for (const evDoc of eventsSnap.docs) {
+      const ev = { id: evDoc.id, ...(evDoc.data() || {}) };
+      const eventName = ev.registrationActivated && ev.registrationDetails?.eventName ? ev.registrationDetails.eventName : (ev.typeName || ev.type || ev.id);
+      const eventStart = String(ev.startDate || '').slice(0, 10);
+      const eventEnd = String(ev.endDate || '').slice(0, 10);
+
+      // Load checkins
+      const checkinsSnap = await db.collection('events').doc(ev.id).collection('checkins').get();
+      if (checkinsSnap.empty) {
+        results.push({ eventId: ev.id, eventName, status: 'no_checkins' });
+        continue;
+      }
+
+      // Candidate master log dates: between start and end (inclusive)
+      const candidateDates = new Set([eventStart, eventEnd]);
+      // Also include each day in the range in case of multi-day events
+      try {
+        const s = new Date(`${eventStart}T00:00:00Z`);
+        const e = new Date(`${eventEnd}T00:00:00Z`);
+        if (!isNaN(s.getTime()) && !isNaN(e.getTime())) {
+          for (let d = new Date(s); d <= e; d.setUTCDate(d.getUTCDate() + 1)) {
+            candidateDates.add(d.toISOString().slice(0, 10));
+          }
+        }
+      } catch (_) {}
+
+      const rowsToAppend = [];
+      for (const checkDoc of checkinsSnap.docs) {
+        const checkin = checkDoc.data() || {};
+        const playerUid = checkin.playerUid || checkDoc.id;
+
+        // Get player email
+        let playerEmail = 'Unknown';
+        try {
+          const userRecord = await getAuth().getUser(playerUid);
+          playerEmail = userRecord.email || 'Unknown';
+        } catch (e) {
+          const userDoc = await db.collection('users').doc(playerUid).get();
+          if (userDoc.exists) playerEmail = (userDoc.data() || {}).email || 'Unknown';
+        }
+
+        // Read registration for attendingAs and adjustments
+        const regDoc = await db.collection('events').doc(ev.id).collection('registrations').doc(playerUid).get();
+        const reg = regDoc.exists ? (regDoc.data() || {}) : {};
+        const attendingAs = reg.attendeeTypeName || 'Unknown';
+        const buildAdjustment = reg.buildForEvent || 0;
+        const apAdjustment = reg.affinityPointsForEvent || 0;
+
+        // Find a matching master log entry by date among candidate dates
+        let matched = false;
+        for (const dateStr of candidateDates) {
+          const rows = byDate.get(dateStr) || [];
+          if (rows.length > 0) { matched = true; break; }
+        }
+        if (!matched) continue; // skip if no matching attending event row by date
+
+        // Build row like checkInPlayer: [scanner email, timestamp, player email, event name, attendingAs, Build, AP]
+        const rowData = [
+          scannerEmail,                       // scanner/admin
+          new Date().toISOString(),           // timestamp now
+          playerEmail,                        // player email
+          eventName,                          // event name
+          attendingAs,                        // attending as
+          buildAdjustment,                     // build adj
+          apAdjustment                         // ap adj
+        ];
+        rowsToAppend.push(rowData);
+      }
+
+      if (rowsToAppend.length > 0 && !dryRun) {
+        await sheets.spreadsheets.values.append({
+          spreadsheetId: config.google_sheets.checkin_spreadsheet_id,
+          range: `${config.google_sheets.checkin_sheet_name}!A:G`,
+          valueInputOption: 'RAW',
+          insertDataOption: 'INSERT_ROWS',
+          resource: { values: rowsToAppend }
+        });
+        appended += rowsToAppend.length;
+        results.push({ eventId: ev.id, eventName, appended: rowsToAppend.length });
+      } else {
+        results.push({ eventId: ev.id, eventName, appended: 0 });
+      }
+    }
+
+    return res.status(200).json({ ok: true, appended, results, dryRun });
+  } catch (error) {
+    console.error('backfillAdvancementFromMasterLogs error', error);
+    return res.status(500).json({ ok: false, error: 'server_error', message: error.message });
   }
 });
 
@@ -122,6 +480,43 @@ exports.discordOAuthCallback = onRequest({ secrets: [DISCORD_TOKEN] }, async (re
         }
       } catch (joinErr) {
         console.log('Guild join failed or skipped:', joinErr.response?.data || joinErr.message);
+      }
+
+      // After linking: if there is an active event and the user is registered,
+      // add them to the event role and NPC shift private channels
+      try {
+        const activeEventsSnap = await db.collection('events')
+          .where('registrationActivated', '==', true)
+          .get();
+        for (const evDoc of activeEventsSnap.docs) {
+          const ev = { id: evDoc.id, ...evDoc.data() };
+          // Check if user is registered
+          const regDoc = await db.collection('events').doc(ev.id)
+            .collection('registrations').doc(uid).get();
+          if (!regDoc.exists) continue;
+
+          // Ensure role and shift channels exist
+          const roleId = await ensureDiscordRoleForEvent(ev);
+          const shifts = await ensureNpcShiftPrivateChannelsForEvent(ev);
+
+          // Get linked discord id
+          const discordId = discordUser.id;
+          if (roleId) await addRoleToDiscordMember(discordId, roleId);
+
+          // Grant access to selected NPC shift channels
+          const reg = regDoc.data();
+          const selected = Array.isArray(reg.selectedNpcShifts) ? reg.selectedNpcShifts : [];
+          const VIEW_CHANNEL = 1 << 10;
+          const SEND_MESSAGES = 1 << 11;
+          const READ_MESSAGE_HISTORY = 1 << 16;
+          const normalAllow = (VIEW_CHANNEL | SEND_MESSAGES | READ_MESSAGE_HISTORY);
+          for (const idx of selected) {
+            const chId = shifts[idx];
+            if (chId) await ensureUserPermissionOnChannel(chId, discordId, normalAllow);
+          }
+        }
+      } catch (postLinkErr) {
+        console.log('⚠️ post-link discord membership update failed:', postLinkErr.response?.data || postLinkErr.message);
       }
     }
 
@@ -210,20 +605,16 @@ exports.createDiscordLinkCode = onRequest({ secrets: [DISCORD_TOKEN] }, async (r
         });
         const messages = msgsResp.data || [];
 
-        // Delete all non-pinned messages
+        // Check if a pinned instruction message already exists
+        let hasPinnedInstruction = false;
         for (const m of messages) {
-          if (!m.pinned) {
-            try {
-              await axios.delete(`https://discord.com/api/v10/channels/${channelId}/messages/${m.id}`, {
-                headers: { Authorization: `Bot ${DISCORD_TOKEN.value()}` }
-              });
-            } catch (delErr) {
-              console.log('Skip delete message', m.id, delErr.response?.status || delErr.message);
-            }
+          if (m.pinned && typeof m.content === 'string' && m.content.includes('Crucible Helper app')) {
+            hasPinnedInstruction = true;
+            break;
           }
         }
 
-        // Post concise instruction message and pin it
+        // Post concise instruction message and pin it only if missing
         const channelName = config.discord.link_channel_name || 'verification';
         const parts = [];
         parts.push(`# ${channelName}`);
@@ -231,25 +622,27 @@ exports.createDiscordLinkCode = onRequest({ secrets: [DISCORD_TOKEN] }, async (r
         parts.push('Please do not chat here.');
         parts.push('To link: In the app, get your code and post it here. Messages are removed after verification.');
         const instructionContent = parts.join('\n');
-        try {
-          const postResp = await axios.post(`https://discord.com/api/v10/channels/${channelId}/messages`, {
-            content: instructionContent
-          }, {
-            headers: {
-              Authorization: `Bot ${DISCORD_TOKEN.value()}`,
-              'Content-Type': 'application/json'
-            }
-          });
-          const posted = postResp.data;
+        if (!hasPinnedInstruction) {
           try {
-            await axios.put(`https://discord.com/api/v10/channels/${channelId}/pins/${posted.id}`, null, {
-              headers: { Authorization: `Bot ${DISCORD_TOKEN.value()}` }
+            const postResp = await axios.post(`https://discord.com/api/v10/channels/${channelId}/messages`, {
+              content: instructionContent
+            }, {
+              headers: {
+                Authorization: `Bot ${DISCORD_TOKEN.value()}`,
+                'Content-Type': 'application/json'
+              }
             });
-          } catch (pinErr) {
-            console.log('Pin failed (continuing):', pinErr.response?.status || pinErr.message);
+            const posted = postResp.data;
+            try {
+              await axios.put(`https://discord.com/api/v10/channels/${channelId}/pins/${posted.id}`, null, {
+                headers: { Authorization: `Bot ${DISCORD_TOKEN.value()}` }
+              });
+            } catch (pinErr) {
+              console.log('Pin failed (continuing):', pinErr.response?.status || pinErr.message);
+            }
+          } catch (postErr) {
+            console.log('Instruction post failed (continuing):', postErr.response?.status || postErr.message);
           }
-        } catch (postErr) {
-          console.log('Instruction post failed (continuing):', postErr.response?.status || postErr.message);
         }
       }
     } catch (channelErr) {
@@ -329,8 +722,6 @@ exports.verifyDiscordLinkByChannel = onRequest({ secrets: [DISCORD_TOKEN] }, asy
     return res.status(500).json({ ok: false, error: 'server_error' });
   }
 });
-
-
 // Sync Rules DB from Google Sheets to Firestore
 exports.syncRulesDb = onRequest(async (req, res) => {
   // CORS
@@ -556,6 +947,7 @@ exports.syncRulesDb = onRequest(async (req, res) => {
 
     const writeSkills = async (categoryName, sheet) => {
       if (!sheet.rows.length) return 0;
+      console.log(`📋 Processing ${categoryName} skills - headers:`, sheet.headers);
       const baseCol = rulesRoot.doc('Skills').collection(categoryName);
       let written = 0;
       for (let start = 0; start < sheet.rows.length; start += 400) {
@@ -568,11 +960,33 @@ exports.syncRulesDb = onRequest(async (req, res) => {
           const docId = sanitizeDocId(name, `Skill_${categoryName}_${rowIndex+1}`);
           const prereqName = obj['Skill Prerequisite'] || obj.skillPrerequisite || '';
           const prereqCategory = obj['Prerequisite Category'] || obj['Skill Prerequisite Category'] || obj.prerequisiteCategory || '';
-          // Write all columns as attributes as well
+          
+          // Get Build from correct column based on skill type
+          let rawBuild = '';
+          if (categoryName === 'Common') {
+            // Common Skills: Column C = Build
+            rawBuild = slice[i][2] || ''; // Column C (index 2)
+          } else if (categoryName === 'Races') {
+            // Race Skill: Column B = Build  
+            rawBuild = slice[i][1] || ''; // Column B (index 1)
+          } else {
+            // Affinity Skills: Column D = Build
+            rawBuild = slice[i][3] || ''; // Column D (index 3)
+          }
+          
+          console.log(`🔍 ${categoryName} skill "${name}" - raw Build from column: "${rawBuild}" (type: ${typeof rawBuild})`);
+          const numericBuild = Number(rawBuild);
+          console.log(`🔢 Converted to number: ${numericBuild}`);
+          
           const attributes = { ...obj };
+          delete attributes.build;
+          delete attributes['Base Build'];
+          delete attributes['base build'];
+          delete attributes.Build;
           const docRef = baseCol.doc(docId);
           batch.set(docRef, {
             ...attributes,
+            ...(Number.isFinite(numericBuild) && numericBuild >= 0 ? { Build: numericBuild } : {}),
             SkillPrerequisite: prereqName,
             SkillPrerequisiteCategory: prereqCategory, // Affinity | Race | Common
             _sheetRow: rowIndex + 2,
@@ -605,9 +1019,20 @@ exports.syncRulesDb = onRequest(async (req, res) => {
           // Determine target affinity subcollection
           const affinityNameRaw = obj.Affinity || obj['Affinity'] || obj['Affinity Name'] || 'Unknown';
           const subcollectionId = sanitizeCollectionId(affinityNameRaw, 'Unknown');
+          // Get Build from Column D for Affinity Skills
+          const rawBuild = slice[i][3] || ''; // Column D (index 3)
+          console.log(`🔍 Affinity skill "${name}" - raw Build from column D: "${rawBuild}" (type: ${typeof rawBuild})`);
+          const numericBuild = Number(rawBuild);
+          console.log(`🔢 Converted to number: ${numericBuild}`);
+          const attributes = { ...obj };
+          delete attributes.build;
+          delete attributes['Base Build'];
+          delete attributes['base build'];
+          delete attributes.Build;
           const docRef = skillsDocRef.collection(subcollectionId).doc(docId);
           batch.set(docRef, {
-            ...obj,
+            ...attributes,
+            ...(Number.isFinite(numericBuild) && numericBuild >= 0 ? { Build: numericBuild } : {}),
             SkillPrerequisite: prereqName,
             SkillPrerequisiteCategory: prereqCategory,
             _sheetRow: rowIndex + 2,
@@ -821,19 +1246,971 @@ exports.createDiscordChannel = onRequest(
     }
   }
 );
+// Helper: ensure an event-specific Discord text channel exists and has correct permissions
+async function ensureDiscordChannelForEvent(event) {
+  try {
+    const guildId = config.discord.guild_id;
+    if (!guildId) {
+      console.log('⚠️ Missing discord.guild_id in config; skipping channel ensure');
+      return null;
+    }
 
+    // Only create channel for activated registrations with an event name
+    if (!event.registrationActivated || !event.registrationDetails || !event.registrationDetails.eventName) {
+      console.log(`ℹ️ Event ${event.id} has no active registration or shortName; skipping channel ensure`);
+      return null;
+    }
+
+    // Channel name is fixed to 'notifications'
+    const desiredName = 'notifications';
+
+    console.log(`🔧 ensureDiscordChannelForEvent: event=${event.id}, activated=${!!event.registrationActivated}, eventName="${event.registrationDetails?.eventName}", shortName="${event.registrationDetails?.shortName}"`);
+
+    // Desired permission overwrites: @everyone can view and read history, cannot send messages
+    const VIEW_CHANNEL = 1 << 10;        // 1024
+    const SEND_MESSAGES = 1 << 11;       // 2048
+    const READ_MESSAGE_HISTORY = 1 << 16; // 65536
+    const desiredAllow = String(VIEW_CHANNEL | READ_MESSAGE_HISTORY);
+    const desiredDeny = String(SEND_MESSAGES);
+    const everyoneRoleId = guildId; // @everyone role id equals guild id
+    const adminRoleId = config.discord.admin_role_id || null; // optional explicit writer role
+
+    // Helper to apply permission overwrite patch safely (preserving others)
+    const ensureOverwrites = (existingOverwrites) => {
+      const overwrites = Array.isArray(existingOverwrites) ? [...existingOverwrites] : [];
+      const idx = overwrites.findIndex((ow) => ow && String(ow.id) === String(everyoneRoleId) && (ow.type === 0 || ow.type === 'role'));
+      const target = { id: everyoneRoleId, type: 0, allow: desiredAllow, deny: desiredDeny };
+      if (idx >= 0) {
+        overwrites[idx] = { id: everyoneRoleId, type: overwrites[idx].type ?? 0, allow: desiredAllow, deny: desiredDeny };
+      } else {
+        overwrites.push(target);
+      }
+      // Ensure admin role can send messages explicitly if configured
+      if (adminRoleId) {
+        const adminIdx = overwrites.findIndex((ow) => ow && String(ow.id) === String(adminRoleId));
+        const adminAllow = String((VIEW_CHANNEL | READ_MESSAGE_HISTORY | SEND_MESSAGES));
+        const adminTarget = { id: adminRoleId, type: 0, allow: adminAllow, deny: '0' };
+        if (adminIdx >= 0) {
+          overwrites[adminIdx] = { id: adminRoleId, type: overwrites[adminIdx].type ?? 0, allow: adminAllow, deny: '0' };
+        } else {
+          overwrites.push(adminTarget);
+        }
+      }
+      return overwrites;
+    };
+
+    // Attempt to ensure we have a category for this event (named after the event)
+    const { categoryId: eventsCategoryId } = await ensureDiscordCategoryForEvent(event);
+    console.log(`📂 ensureDiscordChannelForEvent: categoryId=${eventsCategoryId || 'null'}`);
+
+    // Load latest nested discord data if present
+    let latestDiscord = null;
+    try {
+      const snap = await db.collection('events').doc(event.id).get();
+      if (snap.exists) {
+        latestDiscord = (snap.data() || {}).discord || null;
+      }
+    } catch (_) {}
+    const storedChannelId = latestDiscord?.notifications?.id || event.discordChannelId || null;
+
+    // If we have a recorded channel id, validate existence and settings
+    if (storedChannelId) {
+      try {
+        const getResp = await axios.get(`https://discord.com/api/v10/channels/${storedChannelId}`, {
+          headers: { Authorization: `Bot ${DISCORD_TOKEN.value()}` },
+          timeout: 10000
+        });
+        const channel = getResp.data;
+        console.log(`🔎 Found existing notifications channel ${storedChannelId} name="${channel?.name}" parent=${channel?.parent_id}`);
+
+        // Determine if name or overwrites need update
+        let needsPatch = false;
+        const patchPayload = {};
+        if (String(channel.name) !== desiredName) {
+          patchPayload.name = desiredName;
+          needsPatch = true;
+        }
+
+        // Compare @everyone overwrite
+        const currentEveryone = Array.isArray(channel.permission_overwrites)
+          ? channel.permission_overwrites.find((ow) => String(ow.id) === String(everyoneRoleId))
+          : null;
+        const allowOk = currentEveryone && String(currentEveryone.allow) === desiredAllow;
+        const denyOk = currentEveryone && String(currentEveryone.deny) === desiredDeny;
+        if (!allowOk || !denyOk) {
+          patchPayload.permission_overwrites = ensureOverwrites(channel.permission_overwrites);
+          needsPatch = true;
+        }
+
+        // Also ensure parent (category) is set
+        if (eventsCategoryId && String(channel.parent_id || '') !== String(eventsCategoryId)) {
+          patchPayload.parent_id = eventsCategoryId;
+          needsPatch = true;
+        }
+
+        if (needsPatch) {
+          await axios.patch(`https://discord.com/api/v10/channels/${storedChannelId}`, patchPayload, {
+            headers: {
+              Authorization: `Bot ${DISCORD_TOKEN.value()}`,
+              'Content-Type': 'application/json'
+            },
+            timeout: 10000
+          });
+          console.log(`✅ Patched Discord channel ${storedChannelId} for event ${event.id}`);
+        } else {
+          console.log(`✅ Discord channel ${storedChannelId} already valid for event ${event.id}`);
+        }
+
+        // Ensure Firestore has the latest (already does) and return id
+        await db.collection('events').doc(event.id).set({
+          discordChannelId: storedChannelId,
+          discordChannelName: desiredName,
+          discord: {
+            notifications: { id: storedChannelId, name: desiredName, verifiedAt: new Date().toISOString() }
+          }
+        }, { merge: true });
+        return storedChannelId;
+      } catch (e) {
+        const status = e.response?.status;
+        if (status === 404) {
+          console.log(`⚠️ Recorded Discord channel ${storedChannelId} no longer exists; will recreate`);
+          // fallthrough to create
+        } else {
+          console.log(`⚠️ Failed to validate Discord channel ${storedChannelId}:`, e.response?.data || e.message);
+          // Continue to attempt creation
+        }
+      }
+    }
+
+    // Create a new channel (optionally under configured category)
+    const payload = {
+      name: desiredName,
+      type: 0,
+      permission_overwrites: ensureOverwrites([])
+    };
+    if (eventsCategoryId) payload.parent_id = eventsCategoryId;
+
+    console.log(`➕ Creating notifications channel under category ${eventsCategoryId} (if provided)`);
+    const createResp = await axios.post(
+      `https://discord.com/api/v10/guilds/${guildId}/channels`,
+      payload,
+      { headers: { Authorization: `Bot ${DISCORD_TOKEN.value()}`, 'Content-Type': 'application/json' }, timeout: 15000 }
+    );
+    const channelId = createResp.data?.id || null;
+    if (!channelId) {
+      console.log('❌ Failed to create Discord channel: no id returned');
+      return null;
+    }
+
+    // Persist channel id/name on event
+    await db.collection('events').doc(event.id).set({
+      discordChannelId: channelId,
+      discordChannelName: desiredName,
+      discord: {
+        notifications: { id: channelId, name: desiredName, createdAt: new Date().toISOString() }
+      },
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+    console.log(`✅ Created Discord channel ${channelId} (${desiredName}) for event ${event.id}`);
+    return channelId;
+  } catch (err) {
+    console.log('⚠️ ensureDiscordChannelForEvent error:', err.response?.data || err.message || err);
+    return null;
+  }
+}
+
+// Helper: ensure an event-specific Discord role exists (named after the event), return roleId
+async function ensureDiscordRoleForEvent(event) {
+  try {
+    const guildId = config.discord.guild_id;
+    if (!guildId) return null;
+
+    const roleName = String(event.registrationDetails?.eventName || event.typeName || `event-${event.id}`).trim().substring(0, 100);
+
+    // Read nested discord data
+    let latestDiscord = null;
+    try {
+      const snap = await db.collection('events').doc(event.id).get();
+      if (snap.exists) latestDiscord = (snap.data() || {}).discord || null;
+    } catch (_) {}
+
+    const storedRoleId = latestDiscord?.role?.id || event.discordRoleId || null;
+
+    // If we already have a recorded role, verify it
+    if (storedRoleId) {
+      try {
+        const getResp = await axios.get(`https://discord.com/api/v10/guilds/${guildId}/roles`, {
+          headers: { Authorization: `Bot ${DISCORD_TOKEN.value()}` },
+          timeout: 10000
+        });
+        const roles = Array.isArray(getResp.data) ? getResp.data : [];
+        const existing = roles.find((r) => String(r.id) === String(storedRoleId));
+        if (existing) {
+          if (String(existing.name) !== roleName) {
+            await axios.patch(`https://discord.com/api/v10/guilds/${guildId}/roles/${storedRoleId}`,
+              { name: roleName },
+              { headers: { Authorization: `Bot ${DISCORD_TOKEN.value()}`, 'Content-Type': 'application/json' }, timeout: 10000 }
+            );
+          }
+          await db.collection('events').doc(event.id).set({
+            discordRoleId: storedRoleId,
+            discordRoleName: roleName,
+            discord: { role: { id: storedRoleId, name: roleName, verifiedAt: new Date().toISOString() } },
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+          }, { merge: true });
+          return storedRoleId;
+        }
+      } catch (e) {
+        console.log('⚠️ verify discord role failed:', e.response?.data || e.message);
+      }
+    }
+
+    // If we get here, find by name or create
+    try {
+      const listResp = await axios.get(`https://discord.com/api/v10/guilds/${guildId}/roles`, {
+        headers: { Authorization: `Bot ${DISCORD_TOKEN.value()}` },
+        timeout: 10000
+      });
+      const roles = Array.isArray(listResp.data) ? listResp.data : [];
+      const byName = roles.find((r) => String(r.name) === roleName);
+      if (byName && byName.id) {
+        await db.collection('events').doc(event.id).set({
+          discordRoleId: byName.id,
+          discordRoleName: roleName,
+          discord: { role: { id: byName.id, name: roleName, detectedAt: new Date().toISOString() } },
+          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+        return byName.id;
+      }
+    } catch (e) {
+      console.log('⚠️ list roles failed:', e.response?.data || e.message);
+    }
+
+    try {
+      const createResp = await axios.post(`https://discord.com/api/v10/guilds/${guildId}/roles`,
+        { name: roleName },
+        { headers: { Authorization: `Bot ${DISCORD_TOKEN.value()}`, 'Content-Type': 'application/json' }, timeout: 10000 }
+      );
+      const roleId = createResp.data?.id || null;
+      if (roleId) {
+        await db.collection('events').doc(event.id).set({
+          discordRoleId: roleId,
+          discordRoleName: roleName,
+          discord: { role: { id: roleId, name: roleName, createdAt: new Date().toISOString() } },
+          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+        console.log(`✅ Created Discord role ${roleId} (${roleName}) for event ${event.id}`);
+        return roleId;
+      }
+    } catch (e) {
+      console.log('❌ create role failed:', e.response?.data || e.message);
+    }
+
+    return null;
+  } catch (err) {
+    console.log('⚠️ ensureDiscordRoleForEvent error:', err.response?.data || err.message || err);
+    return null;
+  }
+}
+// Helper: ensure NPC shift private channels exist, return mapping { [shiftKey]: channelId }
+async function ensureNpcShiftPrivateChannelsForEvent(event) {
+  const result = {};
+  try {
+    const guildId = config.discord.guild_id;
+    if (!guildId) return result;
+
+    // Need category for this event
+    const { categoryId } = await ensureDiscordCategoryForEvent(event);
+    if (!categoryId) return result;
+
+    // Load event type to know shifts with dayOfWeek and times
+    let npcShifts = [];
+    try {
+      if (event.typeId) {
+        const typeDoc = await db.collection('event_types').doc(event.typeId).get();
+        if (typeDoc.exists) {
+          const typeData = typeDoc.data();
+          npcShifts = Array.isArray(typeData.npcShifts) ? typeData.npcShifts : [];
+        }
+      }
+    } catch (e) {
+      console.log('⚠️ failed to load event type npcShifts:', e.message);
+    }
+
+    const total = npcShifts.length || (event.numberOfNpcShifts || 0);
+    if (!total) return result;
+
+    // Merge with any existing mapping (refresh from DB to avoid stale data)
+    let existingMap = event.discordNpcShiftChannels || {};
+    try {
+      const refreshed = await db.collection('events').doc(event.id).get();
+      if (refreshed.exists) {
+        existingMap = (refreshed.data() || {}).discordNpcShiftChannels || existingMap;
+      }
+    } catch (_) {}
+
+    // Build a lookup of existing channels under this category to avoid duplicates
+    let existingChildren = [];
+    try {
+      const listResp = await axios.get(`https://discord.com/api/v10/guilds/${guildId}/channels`, {
+        headers: { Authorization: `Bot ${DISCORD_TOKEN.value()}` }, timeout: 20000
+      });
+      const all = Array.isArray(listResp.data) ? listResp.data : [];
+      existingChildren = all.filter((c) => String(c.parent_id || '') === String(categoryId));
+    } catch (e) {
+      console.log('⚠️ failed to list existing channels for category during ensure:', e.response?.data || e.message);
+    }
+
+    // Build the target NPC channel names set for this event
+    const targetNames = new Set();
+    for (let i = 0; i < total; i++) {
+      const shift = npcShifts[i] || {};
+      const day0 = String(shift.dayOfWeek || `shift-${i + 1}`).toLowerCase().replace(/\s+/g, '-');
+      const start0 = String(shift.startTime || '').replace(/[^0-9:]/g, '');
+      const normalizedStart0 = start0 || 'tbd';
+      targetNames.add(`npc-${day0}-${normalizedStart0}`);
+    }
+
+    // Cleanup any NPC channels under this category that are not part of target names (prefix npc-)
+    for (const ch of existingChildren) {
+      const name = String(ch.name || '');
+      if (/^npc-/i.test(name) && !targetNames.has(name)) {
+        try {
+          await axios.delete(`https://discord.com/api/v10/channels/${ch.id}`, {
+            headers: { Authorization: `Bot ${DISCORD_TOKEN.value()}` }, timeout: 15000
+          });
+          console.log(`🗑️ Deleted non-target NPC channel ${ch.id} (${name})`);
+        } catch (e) {
+          console.log(`⚠️ Failed deleting non-target NPC channel ${ch.id}:`, e.response?.status || e.message);
+        }
+      }
+    }
+
+    // Build name→channel index for quick lookups and track names we assign this run
+    const nameToChannel = new Map();
+    for (const ch of existingChildren) {
+      if (ch && ch.name && targetNames.has(ch.name)) {
+        if (!nameToChannel.has(ch.name)) nameToChannel.set(ch.name, ch);
+      }
+    }
+    const usedNames = new Set();
+
+    const MANAGE_CHANNELS = 1 << 5;
+    const VIEW_CHANNEL = 1 << 10;
+    const SEND_MESSAGES = 1 << 11;
+    const READ_MESSAGE_HISTORY = 1 << 16;
+    const everyoneRoleId = config.discord.guild_id; // @everyone role id equals guild id
+
+    // Determine a role the bot owns to grant explicit access to private channels
+    let botRoleId = null;
+    try {
+      // Get bot user
+      const meResp = await axios.get('https://discord.com/api/v10/users/@me', {
+        headers: { Authorization: `Bot ${DISCORD_TOKEN.value()}` }, timeout: 10000
+      });
+      const botUser = meResp.data; // { id, username, ... }
+      if (botUser?.id) {
+        const memberResp = await axios.get(`https://discord.com/api/v10/guilds/${guildId}/members/${botUser.id}`, {
+          headers: { Authorization: `Bot ${DISCORD_TOKEN.value()}` }, timeout: 10000
+        });
+        const roles = memberResp.data?.roles || [];
+        if (roles.length > 0) botRoleId = String(roles[0]);
+      }
+    } catch (e) {
+      console.log('⚠️ Could not determine bot role id; private channels may be inaccessible to bot:', e.response?.status || e.message);
+    }
+    const allowBotBits = String(VIEW_CHANNEL | SEND_MESSAGES | READ_MESSAGE_HISTORY | MANAGE_CHANNELS);
+
+    for (let i = 0; i < total; i++) {
+      const shift = npcShifts[i] || {};
+      const day = String(shift.dayOfWeek || `shift-${i + 1}`).toLowerCase().replace(/\s+/g, '-');
+      const start = String(shift.startTime || '').replace(/[^0-9:]/g, '');
+      const normalizedStart = start || 'tbd';
+      const channelName = `npc-${day}-${normalizedStart}`;
+
+      // Start from DB mapping (most authoritative), else from existing category by name
+      let channelId = existingMap[i] || null;
+
+      if (channelId) {
+        try {
+          const getResp = await axios.get(`https://discord.com/api/v10/channels/${channelId}`, {
+            headers: { Authorization: `Bot ${DISCORD_TOKEN.value()}` }, timeout: 10000
+          });
+          const ch = getResp.data;
+          nameToChannel.set(ch.name, ch);
+          // Ensure correct name/parent/privacy
+          let needPatch = (String(ch.name) !== channelName) || (String(ch.parent_id || '') !== String(categoryId));
+          const curEveryone = Array.isArray(ch.permission_overwrites) ? ch.permission_overwrites.find((ow) => String(ow.id) === String(everyoneRoleId)) : null;
+          const denyView = String(VIEW_CHANNEL);
+          const needsPrivacy = !(curEveryone && String(curEveryone.deny) === denyView);
+          if (needsPrivacy) needPatch = true;
+          if (needPatch) {
+            const overwrites = Array.isArray(ch.permission_overwrites) ? [...ch.permission_overwrites] : [];
+            const idx = overwrites.findIndex((ow) => String(ow.id) === String(everyoneRoleId));
+            if (idx >= 0) {
+              overwrites[idx] = { id: everyoneRoleId, type: 0, allow: '0', deny: denyView };
+            } else {
+              overwrites.push({ id: everyoneRoleId, type: 0, allow: '0', deny: denyView });
+            }
+            if (botRoleId) {
+              const bIdx = overwrites.findIndex((ow) => String(ow.id) === String(botRoleId));
+              if (bIdx >= 0) {
+                overwrites[bIdx] = { id: botRoleId, type: 0, allow: allowBotBits, deny: '0' };
+              } else {
+                overwrites.push({ id: botRoleId, type: 0, allow: allowBotBits, deny: '0' });
+              }
+            }
+            await axios.patch(`https://discord.com/api/v10/channels/${channelId}`,
+              { name: channelName, parent_id: categoryId, permission_overwrites: overwrites },
+              { headers: { Authorization: `Bot ${DISCORD_TOKEN.value()}`, 'Content-Type': 'application/json' }, timeout: 10000 }
+            );
+          }
+          // Commit mapping immediately to prevent re-creation by concurrent ensures
+          try {
+            await db.collection('events').doc(event.id).set({
+              [`discordNpcShiftChannels.${i}`]: channelId,
+              updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            }, { merge: true });
+          } catch (_) {}
+          nameToChannel.set(channelName, { id: channelId, name: channelName, parent_id: categoryId });
+          usedNames.add(channelName);
+          result[i] = channelId;
+          continue;
+        } catch (e) {
+          if (e.response?.status === 404) {
+            console.log(`ℹ️ Stored NPC channel ${channelId} not found; will recreate for idx ${i}`);
+            channelId = null;
+          } else if (e.response?.status === 403) {
+            // Missing Access: assume the channel exists but the bot can't view/manage it. Avoid creating duplicates.
+            console.log('⚠️ Missing access to stored NPC channel; assuming it exists and skipping creation. Please grant bot Manage/View Channels on the category.' );
+            usedNames.add(channelName);
+            result[i] = existingMap[i];
+            // Do not create another channel for this shift
+            continue;
+          } else {
+            console.log('⚠️ Failed to verify stored NPC channel:', e.response?.status || e.message);
+          }
+        }
+      }
+
+      // If after verification we still don't have a channel, try to reuse an existing by name
+      if (!channelId) {
+        const byName = nameToChannel.get(channelName);
+        if (byName && !usedNames.has(channelName)) {
+          channelId = byName.id;
+        }
+      }
+
+      if (channelId) {
+        try {
+          const getResp = await axios.get(`https://discord.com/api/v10/channels/${channelId}`, {
+            headers: { Authorization: `Bot ${DISCORD_TOKEN.value()}` }, timeout: 10000
+          });
+          const ch = getResp.data;
+          // Ensure correct name and parent & baseline @everyone deny
+          let needPatch = (String(ch.name) !== channelName) || (String(ch.parent_id || '') !== String(categoryId));
+          const curEveryone = Array.isArray(ch.permission_overwrites) ? ch.permission_overwrites.find((ow) => String(ow.id) === String(everyoneRoleId)) : null;
+          const denyView = String(VIEW_CHANNEL);
+          const needsPrivacy = !(curEveryone && String(curEveryone.deny) === denyView);
+          if (needsPrivacy) needPatch = true;
+          if (needPatch) {
+            const overwrites = Array.isArray(ch.permission_overwrites) ? [...ch.permission_overwrites] : [];
+            const idx = overwrites.findIndex((ow) => String(ow.id) === String(everyoneRoleId));
+            if (idx >= 0) {
+              overwrites[idx] = { id: everyoneRoleId, type: 0, allow: '0', deny: denyView };
+            } else {
+              overwrites.push({ id: everyoneRoleId, type: 0, allow: '0', deny: denyView });
+            }
+            await axios.patch(`https://discord.com/api/v10/channels/${channelId}`,
+              { name: channelName, parent_id: categoryId, permission_overwrites: overwrites },
+              { headers: { Authorization: `Bot ${DISCORD_TOKEN.value()}`, 'Content-Type': 'application/json' }, timeout: 10000 }
+            );
+          }
+          // Update indexes
+          // Commit mapping as soon as we successfully verified/created
+          try {
+            await db.collection('events').doc(event.id).set({
+              [`discordNpcShiftChannels.${i}`]: channelId,
+              updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            }, { merge: true });
+          } catch (_) {}
+          nameToChannel.set(channelName, { id: channelId, name: channelName, parent_id: categoryId });
+          usedNames.add(channelName);
+        } catch (e) {
+          if (e.response?.status !== 404) {
+            console.log('⚠️ verify npc channel failed:', e.response?.data || e.message);
+          }
+          channelId = null; // will recreate
+        }
+      }
+
+      if (!channelId) {
+        try {
+          const payload = {
+            name: channelName,
+            type: 0,
+            parent_id: categoryId,
+            permission_overwrites: [
+              { id: everyoneRoleId, type: 0, allow: '0', deny: String(VIEW_CHANNEL) }
+            ]
+          };
+          if (botRoleId) {
+            payload.permission_overwrites.push({ id: botRoleId, type: 0, allow: allowBotBits, deny: '0' });
+          }
+          const createResp = await axios.post(`https://discord.com/api/v10/guilds/${guildId}/channels`, payload, {
+            headers: { Authorization: `Bot ${DISCORD_TOKEN.value()}`, 'Content-Type': 'application/json' }, timeout: 15000
+          });
+          channelId = createResp.data?.id;
+          console.log(`✅ Created NPC shift channel ${channelId} (${channelName}) in category ${categoryId}`);
+          try {
+            await db.collection('events').doc(event.id).set({
+              [`discordNpcShiftChannels.${i}`]: channelId,
+              updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            }, { merge: true });
+          } catch (_) {}
+          nameToChannel.set(channelName, { id: channelId, name: channelName, parent_id: categoryId });
+          usedNames.add(channelName);
+        } catch (e) {
+          if (e.response?.status === 403 || e.response?.data?.code === 50013) {
+            console.log('⚠️ Missing Permissions creating NPC channel; ensuring category overwrites then retrying once...');
+            try {
+              await ensureDiscordCategoryForEvent(event);
+              const retryPayload = {
+                name: channelName,
+                type: 0,
+                parent_id: categoryId,
+                permission_overwrites: [
+                  { id: everyoneRoleId, type: 0, allow: '0', deny: String(VIEW_CHANNEL) }
+                ]
+              };
+              if (botRoleId) {
+                retryPayload.permission_overwrites.push({ id: botRoleId, type: 0, allow: allowBotBits, deny: '0' });
+              }
+              const retryResp = await axios.post(`https://discord.com/api/v10/guilds/${guildId}/channels`, retryPayload, {
+                headers: { Authorization: `Bot ${DISCORD_TOKEN.value()}`, 'Content-Type': 'application/json' }, timeout: 15000
+              });
+              channelId = retryResp.data?.id || null;
+              if (channelId) {
+                console.log(`✅ Created NPC shift channel on retry ${channelId} (${channelName}) in category ${categoryId}`);
+                try {
+                  await db.collection('events').doc(event.id).set({
+                    [`discordNpcShiftChannels.${i}`]: channelId,
+                    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                  }, { merge: true });
+                } catch (_) {}
+                nameToChannel.set(channelName, { id: channelId, name: channelName, parent_id: categoryId });
+                usedNames.add(channelName);
+              } else {
+                console.log('❌ Retry create returned no id for NPC channel');
+              }
+            } catch (eRetry) {
+              console.log('❌ failed creating NPC shift channel after retry:', eRetry.response?.data || eRetry.message);
+            }
+          } else {
+            console.log('❌ failed creating NPC shift channel:', e.response?.data || e.message);
+          }
+        }
+      }
+
+      if (channelId) {
+        result[i] = channelId;
+      }
+    }
+
+    // Persist mapping
+    await db.collection('events').doc(event.id).update({
+      discordNpcShiftChannels: result,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+  } catch (err) {
+    console.log('⚠️ ensureNpcShiftPrivateChannelsForEvent error:', err.response?.data || err.message || err);
+  }
+  return result;
+}
+
+// Helper: archive/delete Discord assets for a past event (delete all child channels, then delete category)
+async function archiveDiscordAssetsForEvent(event) {
+  const actions = [];
+  try {
+    const guildId = config.discord.guild_id;
+    if (!guildId) return { archived: false, actions };
+
+    if (!event.discordCategoryId) {
+      actions.push('No discordCategoryId on event; nothing to archive');
+      return { archived: false, actions };
+    }
+
+    // Fetch category
+    let category = null;
+    try {
+      const getResp = await axios.get(`https://discord.com/api/v10/channels/${event.discordCategoryId}`, {
+        headers: { Authorization: `Bot ${DISCORD_TOKEN.value()}` }, timeout: 10000
+      });
+      category = getResp.data;
+    } catch (e) {
+      actions.push(`Category ${event.discordCategoryId} not found; skipping archive`);
+      return { archived: false, actions };
+    }
+
+    // List all guild channels to find children (any type) under the category
+    let channels = [];
+    try {
+      const listResp = await axios.get(`https://discord.com/api/v10/guilds/${guildId}/channels`, {
+        headers: { Authorization: `Bot ${DISCORD_TOKEN.value()}` }, timeout: 20000
+      });
+      channels = Array.isArray(listResp.data) ? listResp.data : [];
+    } catch (e) {
+      actions.push('Failed listing guild channels while archiving');
+    }
+
+    const children = channels.filter((c) => String(c.parent_id || '') === String(event.discordCategoryId));
+
+    // Delete each child channel
+    for (const ch of children) {
+      try {
+        await axios.delete(`https://discord.com/api/v10/channels/${ch.id}`, {
+          headers: { Authorization: `Bot ${DISCORD_TOKEN.value()}` }, timeout: 15000
+        });
+        actions.push(`Deleted channel ${ch.id} (${ch.name})`);
+      } catch (e) {
+        actions.push(`Failed deleting channel ${ch.id}: ${e.response?.status || e.message}`);
+      }
+    }
+
+    // Delete the category itself
+    try {
+      await axios.delete(`https://discord.com/api/v10/channels/${event.discordCategoryId}`, {
+        headers: { Authorization: `Bot ${DISCORD_TOKEN.value()}` }, timeout: 15000
+      });
+      actions.push(`Deleted category ${event.discordCategoryId} (${category.name})`);
+    } catch (e) {
+      actions.push(`Failed deleting category ${event.discordCategoryId}: ${e.response?.status || e.message}`);
+    }
+
+    // Clear stored Discord fields on the event after deletion
+    await db.collection('events').doc(event.id).update({
+      discordArchivedAt: admin.firestore.FieldValue.serverTimestamp(),
+      discordCategoryId: admin.firestore.FieldValue.delete(),
+      discordCategoryName: admin.firestore.FieldValue.delete(),
+      discordChannelId: admin.firestore.FieldValue.delete(),
+      discordChannelName: admin.firestore.FieldValue.delete(),
+      discordRoleId: admin.firestore.FieldValue.delete(),
+      discordRoleName: admin.firestore.FieldValue.delete(),
+      discordNpcShiftChannels: {},
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    return { archived: true, actions };
+  } catch (err) {
+    return { archived: false, actions: [`Archive error: ${err.response?.data || err.message || err}`] };
+  }
+}
+
+// Helper: add a Discord role to a guild member
+async function addRoleToDiscordMember(discordUserId, roleId) {
+  try {
+    const guildId = config.discord.guild_id;
+    if (!guildId || !discordUserId || !roleId) return;
+    await axios.put(`https://discord.com/api/v10/guilds/${guildId}/members/${discordUserId}/roles/${roleId}`, null, {
+      headers: { Authorization: `Bot ${DISCORD_TOKEN.value()}` }, timeout: 10000
+    });
+  } catch (e) {
+    console.log('⚠️ addRoleToDiscordMember failed:', e.response?.data || e.message);
+  }
+}
+
+// Helper: add user permission to a channel
+async function ensureUserPermissionOnChannel(channelId, discordUserId, allowBits) {
+  try {
+    if (!channelId || !discordUserId) return;
+    const getResp = await axios.get(`https://discord.com/api/v10/channels/${channelId}`, {
+      headers: { Authorization: `Bot ${DISCORD_TOKEN.value()}` }, timeout: 10000
+    });
+    const channel = getResp.data;
+    const overwrites = Array.isArray(channel.permission_overwrites) ? [...channel.permission_overwrites] : [];
+    const allow = String(allowBits);
+    const idx = overwrites.findIndex((ow) => String(ow.id) === String(discordUserId) && (ow.type === 1 || ow.type === '1' || ow.type === 'member'));
+    const target = { id: discordUserId, type: 1, allow, deny: '0' };
+    if (idx >= 0) {
+      overwrites[idx] = { id: discordUserId, type: overwrites[idx].type ?? 1, allow, deny: '0' };
+    } else {
+      overwrites.push(target);
+    }
+    await axios.patch(`https://discord.com/api/v10/channels/${channelId}`, { permission_overwrites: overwrites }, {
+      headers: { Authorization: `Bot ${DISCORD_TOKEN.value()}`, 'Content-Type': 'application/json' }, timeout: 10000
+    });
+  } catch (e) {
+    console.log('⚠️ ensureUserPermissionOnChannel failed:', e.response?.data || e.message);
+  }
+}
+
+// Update Discord memberships for all linked registrations of an event
+async function updateEventDiscordMembershipsForAll(event, options = {}) {
+  try {
+    const guildId = config.discord.guild_id;
+    if (!guildId) return;
+
+    // Ensure role and shift channels exist
+    const roleId = await ensureDiscordRoleForEvent(event);
+    const skipEnsureNpcChannels = !!options.skipEnsureNpcChannels;
+    let shiftChannels = {};
+    if (skipEnsureNpcChannels) {
+      try {
+        const refreshed = await db.collection('events').doc(event.id).get();
+        if (refreshed.exists) {
+          shiftChannels = (refreshed.data() || {}).discordNpcShiftChannels || (event.discordNpcShiftChannels || {});
+        }
+      } catch (_) {
+        shiftChannels = event.discordNpcShiftChannels || {};
+      }
+    } else {
+      shiftChannels = await ensureNpcShiftPrivateChannelsForEvent(event);
+    }
+
+    // Load all registrations
+    const regsSnap = await db.collection('events').doc(String(event.id)).collection('registrations').get();
+    if (regsSnap.empty) return;
+
+    const VIEW_CHANNEL = 1 << 10;
+    const SEND_MESSAGES = 1 << 11;
+    const READ_MESSAGE_HISTORY = 1 << 16;
+    const normalAllow = (VIEW_CHANNEL | SEND_MESSAGES | READ_MESSAGE_HISTORY);
+
+    for (const regDoc of regsSnap.docs) {
+      const reg = regDoc.data();
+      const uid = regDoc.id;
+      // Get user's discord link
+      const linkDoc = await db.collection('players').doc(uid).collection('integrations').doc('discord').get();
+      if (!linkDoc.exists) continue;
+      const discordId = linkDoc.data()?.discordId;
+      if (!discordId) continue;
+
+      if (roleId) await addRoleToDiscordMember(discordId, roleId);
+
+      const selectedShifts = Array.isArray(reg.selectedNpcShifts) ? reg.selectedNpcShifts : [];
+      for (const shiftIndex of selectedShifts) {
+        const channelId = shiftChannels[shiftIndex];
+        if (channelId) {
+          await ensureUserPermissionOnChannel(channelId, discordId, normalAllow);
+        }
+      }
+    }
+  } catch (e) {
+    console.log('⚠️ updateEventDiscordMembershipsForAll failed:', e.response?.data || e.message);
+  }
+}
+// Helper: ensure a per-event category exists (named after the event), return { categoryId, categoryName }
+async function ensureDiscordCategoryForEvent(event) {
+  try {
+    const guildId = config.discord.guild_id;
+    if (!guildId) return { categoryId: null, categoryName: null };
+
+    const categoryName = String(event.registrationDetails?.eventName || event.typeName || `event-${event.id}`).trim().substring(0, 100);
+    console.log(`🔧 ensureDiscordCategoryForEvent: event=${event.id}, desiredName="${categoryName}"`);
+
+    // Load latest event to see if nested discord data exists
+    let latestDiscord = null;
+    try {
+      const snap = await db.collection('events').doc(event.id).get();
+      if (snap.exists) {
+        latestDiscord = (snap.data() || {}).discord || null;
+      }
+    } catch (_) {}
+
+    const storedCategoryId = latestDiscord?.category?.id || event.discordCategoryId || null;
+
+    // If event already has a recorded category id (either nested or legacy field), verify and update name if needed
+    if (storedCategoryId) {
+      try {
+        const getResp = await axios.get(`https://discord.com/api/v10/channels/${storedCategoryId}`, {
+          headers: { Authorization: `Bot ${DISCORD_TOKEN.value()}` },
+          timeout: 10000
+        });
+        const category = getResp.data;
+        if (category && (category.type === 4 || category.type === '4')) {
+          if (String(category.name) !== categoryName) {
+            await axios.patch(`https://discord.com/api/v10/channels/${storedCategoryId}`, {
+              name: categoryName
+            }, { headers: { Authorization: `Bot ${DISCORD_TOKEN.value()}`, 'Content-Type': 'application/json' }, timeout: 10000 });
+            console.log(`✅ Renamed existing category ${event.discordCategoryId} to "${categoryName}"`);
+          }
+          // Persist on event: legacy fields and nested discord map
+          await db.collection('events').doc(event.id).set({
+            discordCategoryId: storedCategoryId,
+            discordCategoryName: categoryName,
+            discord: {
+              category: { id: storedCategoryId, name: categoryName, updatedAt: new Date().toISOString() }
+            },
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+          }, { merge: true });
+          return { categoryId: storedCategoryId, categoryName };
+        }
+      } catch (e) {
+        const status = e.response?.status;
+        if (status !== 404) {
+          console.log('⚠️ Failed verifying existing event category:', e.response?.data || e.message);
+        }
+        // fall-through to find/create
+      }
+    }
+
+    // Try to find an existing category by name
+    try {
+      const listResp = await axios.get(`https://discord.com/api/v10/guilds/${guildId}/channels`, {
+        headers: { Authorization: `Bot ${DISCORD_TOKEN.value()}` },
+        timeout: 15000
+      });
+      const channels = Array.isArray(listResp.data) ? listResp.data : [];
+      const existing = channels.find((c) => (c.type === 4 || c.type === '4') && String(c.name) === categoryName);
+      if (existing && existing.id) {
+        await db.collection('events').doc(event.id).set({
+          discordCategoryId: existing.id,
+          discordCategoryName: categoryName,
+          discord: {
+            category: { id: existing.id, name: categoryName, detectedAt: new Date().toISOString() }
+          },
+          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+        console.log(`✅ Found existing category ${existing.id} for "${categoryName}"`);
+        // Ensure the bot role has explicit permissions on the category so it can create channels under it
+        try {
+          const MANAGE_CHANNELS = 1 << 5;
+          const VIEW_CHANNEL = 1 << 10;
+          const SEND_MESSAGES = 1 << 11;
+          const READ_MESSAGE_HISTORY = 1 << 16;
+          let botRoleId = null;
+          try {
+            const meResp = await axios.get('https://discord.com/api/v10/users/@me', {
+              headers: { Authorization: `Bot ${DISCORD_TOKEN.value()}` }, timeout: 10000
+            });
+            const botUser = meResp.data;
+            if (botUser?.id) {
+              const memberResp = await axios.get(`https://discord.com/api/v10/guilds/${guildId}/members/${botUser.id}`, {
+                headers: { Authorization: `Bot ${DISCORD_TOKEN.value()}` }, timeout: 10000
+              });
+              const roles = memberResp.data?.roles || [];
+              if (roles.length > 0) botRoleId = String(roles[0]);
+            }
+          } catch (_) {}
+          if (botRoleId) {
+            const getCat = await axios.get(`https://discord.com/api/v10/channels/${existing.id}`, {
+              headers: { Authorization: `Bot ${DISCORD_TOKEN.value()}` }, timeout: 10000
+            });
+            const overwrites = Array.isArray(getCat.data?.permission_overwrites) ? [...getCat.data.permission_overwrites] : [];
+            const allowBotBits = String(VIEW_CHANNEL | SEND_MESSAGES | READ_MESSAGE_HISTORY | MANAGE_CHANNELS);
+            const bIdx = overwrites.findIndex((ow) => String(ow.id) === String(botRoleId));
+            if (bIdx >= 0) {
+              overwrites[bIdx] = { id: botRoleId, type: overwrites[bIdx].type ?? 0, allow: allowBotBits, deny: '0' };
+            } else {
+              overwrites.push({ id: botRoleId, type: 0, allow: allowBotBits, deny: '0' });
+            }
+            await axios.patch(`https://discord.com/api/v10/channels/${existing.id}`, { permission_overwrites: overwrites }, {
+              headers: { Authorization: `Bot ${DISCORD_TOKEN.value()}`, 'Content-Type': 'application/json' }, timeout: 10000
+            });
+          }
+        } catch (e2) {
+          console.log('⚠️ Failed ensuring bot access on category:', e2.response?.status || e2.message);
+        }
+        return { categoryId: existing.id, categoryName };
+      }
+    } catch (e) {
+      console.log('⚠️ Failed listing guild channels:', e.response?.data || e.message);
+    }
+
+    // Create the category
+    try {
+      const createResp = await axios.post(`https://discord.com/api/v10/guilds/${guildId}/channels`, {
+        name: categoryName,
+        type: 4
+      }, {
+        headers: { Authorization: `Bot ${DISCORD_TOKEN.value()}`, 'Content-Type': 'application/json' },
+        timeout: 15000
+      });
+      const newId = createResp.data?.id || null;
+      if (newId) {
+        await db.collection('events').doc(event.id).set({
+          discordCategoryId: newId,
+          discordCategoryName: categoryName,
+          discord: {
+            category: { id: newId, name: categoryName, createdAt: new Date().toISOString() }
+          },
+          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+        console.log(`✅ Created Discord category ${newId} (${categoryName}) for event ${event.id}`);
+        // Ensure the bot role has explicit permissions on the category so it can create channels under it
+        try {
+          const MANAGE_CHANNELS = 1 << 5;
+          const VIEW_CHANNEL = 1 << 10;
+          const SEND_MESSAGES = 1 << 11;
+          const READ_MESSAGE_HISTORY = 1 << 16;
+          let botRoleId = null;
+          try {
+            const meResp = await axios.get('https://discord.com/api/v10/users/@me', {
+              headers: { Authorization: `Bot ${DISCORD_TOKEN.value()}` }, timeout: 10000
+            });
+            const botUser = meResp.data;
+            if (botUser?.id) {
+              const memberResp = await axios.get(`https://discord.com/api/v10/guilds/${guildId}/members/${botUser.id}`, {
+                headers: { Authorization: `Bot ${DISCORD_TOKEN.value()}` }, timeout: 10000
+              });
+              const roles = memberResp.data?.roles || [];
+              if (roles.length > 0) botRoleId = String(roles[0]);
+            }
+          } catch (_) {}
+          if (botRoleId) {
+            const getCat = await axios.get(`https://discord.com/api/v10/channels/${newId}`, {
+              headers: { Authorization: `Bot ${DISCORD_TOKEN.value()}` }, timeout: 10000
+            });
+            const overwrites = Array.isArray(getCat.data?.permission_overwrites) ? [...getCat.data.permission_overwrites] : [];
+            const allowBotBits = String(VIEW_CHANNEL | SEND_MESSAGES | READ_MESSAGE_HISTORY | MANAGE_CHANNELS);
+            const bIdx = overwrites.findIndex((ow) => String(ow.id) === String(botRoleId));
+            if (bIdx >= 0) {
+              overwrites[bIdx] = { id: botRoleId, type: overwrites[bIdx].type ?? 0, allow: allowBotBits, deny: '0' };
+            } else {
+              overwrites.push({ id: botRoleId, type: 0, allow: allowBotBits, deny: '0' });
+            }
+            await axios.patch(`https://discord.com/api/v10/channels/${newId}`, { permission_overwrites: overwrites }, {
+              headers: { Authorization: `Bot ${DISCORD_TOKEN.value()}`, 'Content-Type': 'application/json' }, timeout: 10000
+            });
+          }
+        } catch (e2) {
+          console.log('⚠️ Failed ensuring bot access on category:', e2.response?.status || e2.message);
+        }
+        return { categoryId: newId, categoryName };
+      }
+    } catch (e) {
+      console.log('❌ Failed creating per-event category:', e.response?.data || e.message);
+    }
+
+    return { categoryId: null, categoryName: null };
+  } catch (err) {
+    console.log('⚠️ ensureDiscordCategoryForEvent error:', err.response?.data || err.message || err);
+    return { categoryId: null, categoryName: null };
+  }
+}
 // Sync Master Logs from Google Sheets to Firestore
 exports.syncMasterLogs = onRequest(async (req, res) => {
   // CORS for manual invocation from browser if needed
   res.set('Access-Control-Allow-Origin', '*');
   res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.set('Access-Control-Allow-Headers', 'Content-Type');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   if (req.method === 'OPTIONS') {
     res.status(204).send('');
     return;
   }
 
   try {
+    // Auth: super admin only
+    if (!req.headers.authorization) {
+      return res.status(401).json({ ok: false, error: 'Missing authorization header' });
+    }
+    const idToken = req.headers.authorization.split(' ')[1];
+    const decodedToken = await getAuth().verifyIdToken(idToken);
+    const uid = decodedToken.uid;
+    const isAdmin = await isSuperAdmin(uid);
+    if (!isAdmin) {
+      return res.status(403).json({ ok: false, error: 'User must be super admin' });
+    }
     const containerDocId = (req.query.containerDocId || req.body?.containerDocId || 'root').toString();
     const sheetName = (req.query.sheetName || req.body?.sheetName || config.google_sheets.pc_db_master_logs_sheet_name || 'Master Logs').toString();
     let spreadsheetId = (req.query.spreadsheetId || req.body?.spreadsheetId || config.google_sheets.pc_db_spreadsheet_id || config.google_sheets.checkin_spreadsheet_id).toString();
@@ -925,6 +2302,252 @@ exports.syncMasterLogs = onRequest(async (req, res) => {
       await batch.commit();
     }
 
+    // Load PC DB 'PCs' sheet to map characterNumber -> email
+    const charNumToEmail = new Map();
+    try {
+      let pcDbSpreadsheetId = sanitizeSpreadsheetId(
+        (config.google_sheets.pc_db_spreadsheet_id || '').toString()
+      );
+      if (pcDbSpreadsheetId) {
+        const pcsRange = `PCs!A:Z`;
+        const pcsResp = await sheets.spreadsheets.values.get({
+          spreadsheetId: pcDbSpreadsheetId,
+          range: pcsRange
+        });
+        const pcsValues = pcsResp.data.values || [];
+        // Expect: Column B (index 1) = email, Column F (index 5) = character number
+        for (let i = 1; i < pcsValues.length; i++) {
+          const r = pcsValues[i] || [];
+          const email = String(r[1] || '').trim();
+          const charNum = String(r[5] || '').trim();
+          if (email && charNum) charNumToEmail.set(charNum, email);
+        }
+      }
+    } catch (e) {
+      console.log('PCs lookup failed:', e.message);
+    }
+
+    // Mirror Master Logs to per-character advancement subcollections
+    // Goal: For each row, identify player and character; write a simple mirror doc under
+    // players/{uid}/characters/{characterNumber}/advancement/{masterLogDocId}.
+    // Also, delete any existing per-character advancement docs not present in the Master Logs.
+
+    const normalizeKey = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const getFieldValue = (rowObj, candidates) => {
+      for (const cand of candidates) {
+        const target = normalizeKey(cand);
+        for (const k of Object.keys(rowObj)) {
+          if (normalizeKey(k) === target) return rowObj[k];
+        }
+      }
+      return '';
+    };
+
+    const emailKeys = [
+      'Player Email', 'Email', 'PlayerEmail',
+      'Email Address', 'EmailAddress', 'Player E-mail', 'E-mail'
+    ];
+    const uidKeys = ['Player UID', 'UID', 'PlayerUid', 'playerUid'];
+    const characterNumberKeys = [
+      'Character Number', 'CharacterNumber', 'characterNumber', 'Character',
+      'Character #', 'Character#', 'Char #', 'Char#',
+      'PC Number', 'PCNumber',
+      'Player Number', 'PlayerNumber',
+      'Number', '#'
+    ];
+
+    const emailToUidCache = new Map();
+    const characterMirrorMap = new Map(); // key: `${uid}_${characterNumber}` -> { uid, characterNumber, docs: Map(docId->docData) }
+
+    // Helper to resolve UID from row (prefer explicit UID; else via email and Auth/users fallback)
+    const resolveUid = async (row, characterNumberMaybe) => {
+      let uid = String(getFieldValue(row, uidKeys) || '').trim();
+      if (uid) return uid;
+      let email = String(getFieldValue(row, emailKeys) || '').trim();
+      if (!email && characterNumberMaybe) {
+        const cKey = String(characterNumberMaybe).trim();
+        if (cKey && charNumToEmail.has(cKey)) {
+          email = charNumToEmail.get(cKey) || '';
+        }
+      }
+      if (!email) return '';
+      if (emailToUidCache.has(email)) return emailToUidCache.get(email);
+      try {
+        const userRecord = await getAuth().getUserByEmail(email);
+        uid = userRecord.uid || '';
+      } catch (e) {
+        // Fallback to Firestore users collection by email
+        try {
+          const snap = await db.collection('users').where('email', '==', email).limit(1).get();
+          if (!snap.empty) {
+            uid = snap.docs[0].id;
+          }
+        } catch (_) {}
+      }
+      if (!uid && characterNumberMaybe) {
+        try {
+          // Try resolve by character number via collection group on 'characters'
+          const cg = await db.collectionGroup('characters')
+            .where('characterNumber', '==', String(characterNumberMaybe))
+            .limit(2)
+            .get();
+          if (cg.size === 1) {
+            const doc = cg.docs[0];
+            const parentPlayer = doc.ref.parent.parent; // players/{uid}
+            uid = parentPlayer ? parentPlayer.id : '';
+          } else if (cg.size === 0) {
+            // Try by document ID match (character doc id is usually the number)
+            const FieldPath = admin.firestore.FieldPath;
+            const cg2 = await db.collectionGroup('characters')
+              .where(FieldPath.documentId(), '==', String(characterNumberMaybe))
+              .limit(2)
+              .get();
+            if (cg2.size === 1) {
+              const doc = cg2.docs[0];
+              const parentPlayer = doc.ref.parent.parent;
+              uid = parentPlayer ? parentPlayer.id : '';
+            }
+          }
+        } catch (_) {}
+      }
+      if (uid && email) emailToUidCache.set(email, uid);
+      return uid || '';
+    };
+
+    // Load all rows again to compute character mirroring (use values + headers to keep memory low)
+    // We'll process sequentially with caching to avoid auth rate limits.
+    let diagTotalRows = 0;
+    let diagMissingCharacterNumber = 0;
+    let diagMissingUid = 0;
+    let diagResolvedViaPcDb = 0;
+    for (let start = 0; start < rows.length; start += 400) {
+      const slice = rows.slice(start, start + 400);
+      for (let idx = 0; idx < slice.length; idx++) {
+        const globalRowIndex = start + idx + 2;
+        const rowArr = slice[idx];
+        const rowObj = toObject(headers, rowArr);
+        rowObj._rowNumber = globalRowIndex;
+        rowObj._sheet = sheetName;
+        diagTotalRows += 1;
+        let characterNumberRaw = getFieldValue(rowObj, characterNumberKeys);
+        if (characterNumberRaw === null || characterNumberRaw === undefined) characterNumberRaw = '';
+        characterNumberRaw = String(characterNumberRaw).trim();
+        if (!characterNumberRaw && Array.isArray(rowArr) && rowArr.length > 0) {
+          // Fallback: column A (index 0) is the character number per sheet definition
+          characterNumberRaw = String(rowArr[0] || '').trim();
+        }
+        if (!characterNumberRaw) { diagMissingCharacterNumber += 1; continue; }
+        const beforeEmail = String(getFieldValue(rowObj, emailKeys) || '').trim();
+        const uid = await resolveUid(rowObj, characterNumberRaw);
+        if (!beforeEmail && uid) diagResolvedViaPcDb += 1;
+        if (!uid) { diagMissingUid += 1; continue; }
+
+        const characterKey = `${uid}_${characterNumberRaw}`;
+        if (!characterMirrorMap.has(characterKey)) {
+          characterMirrorMap.set(characterKey, { uid, characterNumber: characterNumberRaw, docs: new Map() });
+        }
+        const entry = characterMirrorMap.get(characterKey);
+        const docId = `r${globalRowIndex}`;
+        // Keep mirrored data simple: store selected normalized fields plus the raw row for reference
+        const email = String(getFieldValue(rowObj, emailKeys) || '').trim();
+        const reason = String(getFieldValue(rowObj, ['Advancement Reason', 'AdvancementReason']) || '').trim();
+        const dateVal = getFieldValue(rowObj, ['Date', 'date', '_date']);
+        const mirrored = {
+          _masterLogId: docId,
+          _sheet: sheetName,
+          _rowNumber: globalRowIndex,
+          _syncedAt: new Date().toISOString(),
+          playerUid: uid,
+          playerEmail: email || null,
+          characterNumber: characterNumberRaw,
+          advancementReason: reason || null,
+          date: dateVal || null,
+          data: rowObj
+        };
+        entry.docs.set(docId, mirrored);
+      }
+    }
+
+    // For each character touched, delete docs not present and upsert the current ones
+    let mirrored = 0;
+    let deletedFromCharacters = 0;
+    for (const [key, info] of characterMirrorMap.entries()) {
+      const { uid, characterNumber, docs } = info;
+      const advRef = db.collection('players').doc(uid).collection('characters').doc(String(characterNumber)).collection('advancement');
+
+      // Ensure player and character documents exist (best-effort)
+      try {
+        const playerDocRef = db.collection('players').doc(uid);
+        const playerDoc = await playerDocRef.get();
+        if (!playerDoc.exists) {
+          await playerDocRef.set({
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
+            uid: uid
+          }, { merge: true });
+        }
+
+        const charDoc = await playerDocRef.collection('characters').doc(String(characterNumber)).get();
+        if (!charDoc.exists) {
+          await playerDocRef.collection('characters').doc(String(characterNumber)).set({
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
+            playerUid: uid,
+            characterNumber: String(characterNumber)
+          }, { merge: true });
+        }
+      } catch (_) {}
+
+      // Fetch existing advancement doc IDs
+      const existingSnap = await advRef.get();
+      const existingIds = new Set(existingSnap.docs.map(d => d.id));
+      const presentIds = new Set(docs.keys());
+
+      // Delete obsolete
+      const toDelete = [];
+      for (const id of existingIds) {
+        if (!presentIds.has(id)) toDelete.push(id);
+      }
+      for (let i = 0; i < toDelete.length; i += 450) {
+        const batch = db.batch();
+        for (let j = i; j < Math.min(i + 450, toDelete.length); j++) {
+          batch.delete(advRef.doc(toDelete[j]));
+        }
+        await batch.commit();
+        deletedFromCharacters += Math.min(450, toDelete.length - i);
+      }
+
+      // Upsert current docs to match Master Logs exactly
+      const toWrite = Array.from(docs.entries());
+      for (let i = 0; i < toWrite.length; i += 400) {
+        const batch = db.batch();
+        const slice = toWrite.slice(i, i + 400);
+        for (const [docId, docData] of slice) {
+          batch.set(advRef.doc(docId), docData); // overwrite to ensure exact match
+          mirrored += 1;
+        }
+        await batch.commit();
+      }
+    }
+
+    // Write last sync metadata at Master Logs level
+    await db.collection('Master Logs').doc('last_sync').set({
+      syncedAt: admin.firestore.FieldValue.serverTimestamp(),
+      spreadsheetId,
+      sheetName,
+      containerDocId,
+      cleared,
+      written,
+      mirrored,
+      deletedFromCharacters,
+      diagnostics: {
+        processedRows: diagTotalRows,
+        missingCharacterNumber: diagMissingCharacterNumber,
+        missingUid: diagMissingUid,
+        resolvedViaPcDb: diagResolvedViaPcDb
+      }
+    }, { merge: true });
+
     return res.status(200).json({
       ok: true,
       message: 'Master Logs sync complete',
@@ -932,11 +2555,1028 @@ exports.syncMasterLogs = onRequest(async (req, res) => {
       sheetName,
       containerDocId,
       cleared,
-      written
+      written,
+      mirrored,
+      deletedFromCharacters,
+      diagnostics: {
+        processedRows: diagTotalRows,
+        missingCharacterNumber: diagMissingCharacterNumber,
+        missingUid: diagMissingUid,
+        resolvedViaPcDb: diagResolvedViaPcDb
+      }
     });
   } catch (error) {
     console.error('Error syncing Master Logs:', error);
     return res.status(500).json({ ok: false, error: error.message });
+  }
+});
+// Calculate per-character advancement summaries (Affinities first)
+exports.calculateCharacter = onRequest(async (req, res) => {
+  // CORS
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
+
+  try {
+    // Auth: user must be authenticated
+    if (!req.headers.authorization) {
+      return res.status(401).json({ ok: false, error: 'Missing authorization header' });
+    }
+    const idToken = req.headers.authorization.split(' ')[1];
+    const decodedToken = await getAuth().verifyIdToken(idToken);
+    const authenticatedUid = decodedToken.uid;
+
+    // Inputs: playerUid + characterNumber, or characterId in format "{uid}_{characterNumber}"
+    const playerUid = (req.query.playerUid || req.body?.playerUid || '').toString();
+    const characterNumberInput = (req.query.characterNumber || req.body?.characterNumber || '').toString();
+    const characterId = (req.query.characterId || req.body?.characterId || '').toString();
+    const debug = String(req.query.debug ?? req.body?.debug ?? 'false').toLowerCase() === 'true';
+
+    let uid = playerUid;
+    let characterNumber = characterNumberInput;
+    if ((!uid || !characterNumber) && characterId) {
+      const parts = characterId.split('_');
+      if (parts.length >= 2) {
+        uid = parts[0];
+        characterNumber = parts.slice(1).join('_');
+      }
+    }
+    if (!uid || !characterNumber) {
+      return res.status(400).json({ ok: false, error: 'missing_target', message: 'Provide playerUid and characterNumber or characterId' });
+    }
+
+    // Authorization: user can calculate their own characters OR super admin can calculate any character
+    const isAdmin = await isSuperAdmin(authenticatedUid);
+    const isOwner = (authenticatedUid === uid);
+    if (!isOwner && !isAdmin) {
+      return res.status(403).json({ ok: false, error: 'insufficient_permissions', message: 'You can only calculate your own characters unless you are a super admin' });
+    }
+
+    // Fetch advancement rows for this character
+    const advRef = db.collection('players').doc(uid).collection('characters').doc(String(characterNumber)).collection('advancement');
+    const advSnap = await advRef.get();
+    const advRowsCount = advSnap.size;
+    if (advSnap.empty) {
+      return res.status(200).json({ ok: true, message: 'No advancement rows found for character', uid, characterNumber, advRows: 0 });
+    }
+
+    // Initialize character calculation error log
+    const advancementErrorLog = [];
+
+    // Load Rules multipliers for affinities
+    const rulesAffinitiesRef = db.collection('Rules').doc('Affinities').collection('All');
+    const rulesSnap = await rulesAffinitiesRef.get();
+    const affinityToMultiplier = new Map();
+    const knownAffinityNames = [];
+    rulesSnap.forEach((doc) => {
+      const d = doc.data() || {};
+      const name = doc.id;
+      const m = Number(d.Multiplier ?? d.multiplier ?? d.Multipler ?? 0); // accept variants
+      if (!isNaN(m) && m > 0) affinityToMultiplier.set(name.toLowerCase(), m);
+      knownAffinityNames.push(name);
+    });
+
+    // Helpers to extract fields from a master log row
+    const normalizeKey = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const getFieldValue = (rowObj, candidates) => {
+      for (const cand of candidates) {
+        const target = normalizeKey(cand);
+        for (const k of Object.keys(rowObj)) {
+          if (normalizeKey(k) === target) return rowObj[k];
+        }
+      }
+      return '';
+    };
+
+    const reasonKeys = ['Advancement Reason', 'AdvancementReason', 'Reason'];
+    const affinityNameKeys = ['Affinty', 'Affinity', 'Affinity Name', 'affinityName', 'Name'];
+    const tierKeys = ['Character Cultivation Tier', 'Tier', 'Affinity Tier', 'tier'];
+    const levelChangeKeys = ['Affinity Level', 'Level Change', 'levelChange', 'Change', 'Delta', 'Adjustment', 'Adjust Hit Points', 'AdjustHitPoints', 'Hit Points', 'HitPoints'];
+    const buildAdjustmentKeys = ['Build Adjustment', 'BuildAdjustment', 'Build Adj', 'BuildAdj', 'Build Change', 'BuildChange', 'Build'];
+    const affinityPointAdjustmentKeys = ['Affinity Point Adjustment', 'AffinityPointAdjustment', 'AP Adjustment', 'APAdjustment', 'Affinity Points', 'AffinityPoints', 'AP'];
+    const adjustCultivationTierKeys = [
+      'Adjust Cultivation Tier',
+      'Adjust Cultilation Tier',
+      'Adjust Cultication Tier',
+      'Adjust Cutlication Tier',
+      'Character Cultivation Tier'
+    ];
+
+    // Prefer the first non-empty value among a set of candidate field names
+    const getFirstNonEmptyFieldValue = (rowObj, candidates) => {
+      for (const cand of candidates) {
+        const target = normalizeKey(cand);
+        for (const k of Object.keys(rowObj)) {
+          if (normalizeKey(k) === target) {
+            const val = rowObj[k];
+            if (val !== null && val !== undefined && String(val).trim() !== '') {
+              return val;
+            }
+          }
+        }
+      }
+      return '';
+    };
+
+    const totals = new Map(); // affinityName(lower) -> { name, tiers: { [tier: string]: { Level:number, Cost:number } }, Total:{Level:number, Cost:number} }
+
+    let detectedAffinityRows = 0;
+    const skippedSamples = [];
+    for (const doc of advSnap.docs) {
+      const data = doc.data() || {};
+      const row = data.data || data; // mirror rows keep raw under data
+
+      const rawReason = String(getFieldValue(row, reasonKeys) || '').trim().toLowerCase();
+      const reasonNorm = rawReason.replace(/[^a-z]/g, '');
+      const isAffinityRaise = (reasonNorm === 'rasingaffintylevel' || reasonNorm === 'raisingaffinitylevel');
+      if (!isAffinityRaise) { 
+        if (debug && skippedSamples.length < 10) skippedSamples.push({ id: doc.id, reason: `reason=${rawReason || 'none'}` }); 
+        // Log non-affinity entries for potential processing by other sections
+        if (rawReason && reasonNorm !== 'buyinghitpoints' && reasonNorm !== 'buyingskill' && reasonNorm !== 'buyingskills') {
+          // Special-case: reason "import" with positive Build Adjustment is handled in the Build section.
+          if (reasonNorm === 'import') {
+            const rawAdj = getFirstNonEmptyFieldValue(row, buildAdjustmentKeys);
+            const adj = Number(rawAdj);
+            if (!isNaN(adj) && adj > 0) {
+              // Considered processed by the Build writer; do not create an error entry
+              continue;
+            }
+          }
+          // Special-case: reason "attending event" with positive Build/AP Adjustment is handled in Build/AP section
+          if (reasonNorm === 'attendingevent') {
+            const rawBuild = getFirstNonEmptyFieldValue(row, buildAdjustmentKeys);
+            const rawAp = getFirstNonEmptyFieldValue(row, affinityPointAdjustmentKeys);
+            const build = Number(rawBuild);
+            const ap = Number(rawAp);
+            if ((!isNaN(build) && build > 0) || (!isNaN(ap) && ap > 0)) {
+              continue;
+            }
+          }
+          // Special-case: Character Initialization handled earlier
+          if (reasonNorm === 'characterinitialization') {
+            const rawBuild = getFirstNonEmptyFieldValue(row, buildAdjustmentKeys);
+            const rawAp = getFirstNonEmptyFieldValue(row, affinityPointAdjustmentKeys);
+            const build = Number(rawBuild);
+            const ap = Number(rawAp);
+            const freeAffinity = String(getFirstNonEmptyFieldValue(row, [...affinityNameKeys, 'Affinity']) || '').trim();
+            const hasTier = String(getFirstNonEmptyFieldValue(row, adjustCultivationTierKeys) || '').trim();
+            if ((!isNaN(build) && build > 0) || (!isNaN(ap) && ap > 0) || freeAffinity || hasTier) {
+              continue;
+            }
+          }
+          // Special-case: Ascend handled earlier
+          if (reasonNorm === 'ascend') {
+            const ascTier = String(getFirstNonEmptyFieldValue(row, adjustCultivationTierKeys) || '').trim();
+            if (ascTier) {
+              continue;
+            }
+          }
+          // Special-case: reason "slotting cores" with positive AP is handled in AP section
+          if (reasonNorm === 'slottingcores') {
+            const rawApOnly = getFirstNonEmptyFieldValue(row, affinityPointAdjustmentKeys);
+            const apOnly = Number(rawApOnly);
+            if (!isNaN(apOnly) && apOnly > 0) {
+              continue;
+            }
+          }
+          // Special-case: reason "consuming cores" with positive Build Adjustment handled in Build section
+          if (reasonNorm === 'consumingcores') {
+            const rawBuildOnly = getFirstNonEmptyFieldValue(row, buildAdjustmentKeys);
+            const buildOnly = Number(rawBuildOnly);
+            if (!isNaN(buildOnly) && buildOnly > 0) {
+              continue;
+            }
+          }
+          // Special-case: reason "donations" handled in Build/AP section if it has values; otherwise ignore
+          if (reasonNorm === 'donations') {
+            const rawBuild = getFirstNonEmptyFieldValue(row, buildAdjustmentKeys);
+            const rawAp = getFirstNonEmptyFieldValue(row, affinityPointAdjustmentKeys);
+            const build = Number(rawBuild);
+            const ap = Number(rawAp);
+            if ((!isNaN(build) && build > 0) || (!isNaN(ap) && ap > 0)) {
+              continue;
+            }
+          }
+          // Special-case: reason "marshal override" handled in Build/AP section (allows +/-); ignore here
+          if (reasonNorm === 'marshaloverride') {
+            const rawBuild = getFirstNonEmptyFieldValue(row, buildAdjustmentKeys);
+            const rawAp = getFirstNonEmptyFieldValue(row, affinityPointAdjustmentKeys);
+            const build = Number(rawBuild);
+            const ap = Number(rawAp);
+            if ((!isNaN(build) && build !== 0) || (!isNaN(ap) && ap !== 0)) {
+              continue;
+            }
+          }
+          // Special-case: reason "free affinity" is ignored entirely
+          if (reasonNorm === 'freeaffinity' || reasonNorm === 'freeaffinty') {
+            continue;
+          }
+          // Special-case: reason "Free Affinty after ascending" (and correct-spelling variant) is handled elsewhere; ignore without error
+          if (reasonNorm === 'freeaffintyafterascending' || reasonNorm === 'freeaffinityafterascending') {
+            continue;
+          }
+          console.log(`⚠️ Unrecognized reason in affinity section: Doc ${doc.id}: reason="${rawReason}" normalized="${reasonNorm}"`);
+          advancementErrorLog.push({
+            docId: doc.id,
+            masterLogId: data._masterLogId || 'unknown',
+            rowNumber: data._rowNumber || 'unknown',
+            reason: rawReason,
+            issue: 'unrecognized_advancement_reason',
+            details: `Reason "${rawReason}" (normalized: "${reasonNorm}") is not recognized as affinity, skill, or hit point advancement`,
+            timestamp: new Date().toISOString()
+          });
+        }
+        continue; 
+      }
+      let affinityNameRaw = String(getFirstNonEmptyFieldValue(row, [...affinityNameKeys, 'Affinity Purchased', 'Affinity Purchased Name']) || '').trim();
+      if (!affinityNameRaw) {
+        // Heuristic: search for any known affinity name present in row values
+        const joinedValues = Object.values(row).map(v => String(v || '')).join(' ').toLowerCase();
+        const found = knownAffinityNames.find(n => joinedValues.includes(String(n).toLowerCase()));
+        if (found) affinityNameRaw = found;
+      }
+      if (!affinityNameRaw) { 
+        if (debug && skippedSamples.length < 10) skippedSamples.push({ id: doc.id, reason: 'no_affinity_name' }); 
+        advancementErrorLog.push({
+          docId: doc.id,
+          masterLogId: data._masterLogId || 'unknown',
+          rowNumber: data._rowNumber || 'unknown',
+          reason: rawReason,
+          issue: 'missing_affinity_name',
+          details: `Affinity advancement missing affinity name. Looked for fields: ${affinityNameKeys.join(', ')}`,
+          timestamp: new Date().toISOString()
+        });
+        continue; 
+      }
+      // Reason already filtered; no further type checks needed
+
+      let tier = String(getFirstNonEmptyFieldValue(row, [...tierKeys, 'Character Tier', 'Cultivation Tier'])) .trim();
+      if (!tier) {
+        // Attempt to infer tier from other fields (very loose)
+        const joined = JSON.stringify(row).toLowerCase();
+        if (joined.includes('iron')) tier = 'Iron';
+        else if (joined.includes('silver')) tier = 'Silver';
+        else if (joined.includes('gold')) tier = 'Gold';
+      }
+      // Normalize tier to Title Case
+      const tierNorm = tier ? (tier.charAt(0).toUpperCase() + tier.slice(1).toLowerCase()) : null;
+      if (!tierNorm) { 
+        if (debug && skippedSamples.length < 10) skippedSamples.push({ id: doc.id, reason: `no_tier` }); 
+        advancementErrorLog.push({
+          docId: doc.id,
+          masterLogId: data._masterLogId || 'unknown',
+          rowNumber: data._rowNumber || 'unknown',
+          reason: rawReason,
+          issue: 'missing_tier',
+          details: `Affinity advancement for "${affinityNameRaw}" missing tier information. Looked for fields: ${tierKeys.join(', ')}`,
+          timestamp: new Date().toISOString()
+        });
+        continue; 
+      }
+
+      let delta = Number(getFieldValue(row, levelChangeKeys));
+      if (isNaN(delta)) delta = 1; // default to +1 per row if unspecified
+      if (delta <= 0) {
+        advancementErrorLog.push({
+          docId: doc.id,
+          masterLogId: data._masterLogId || 'unknown',
+          rowNumber: data._rowNumber || 'unknown',
+          reason: rawReason,
+          issue: 'zero_or_negative_affinity_change',
+          details: `Affinity advancement for "${affinityNameRaw}" (${tierNorm}) has zero or negative change: ${delta}. No data modified.`,
+          timestamp: new Date().toISOString()
+        });
+        continue; // ignore reductions for now
+      }
+
+      const key = affinityNameRaw.toLowerCase();
+      if (!totals.has(key)) {
+        totals.set(key, {
+          name: affinityNameRaw,
+          tiers: {},
+          Total: { Level: 0, Cost: 0 }
+        });
+      }
+      const agg = totals.get(key);
+      if (!agg.tiers[tierNorm]) agg.tiers[tierNorm] = { Level: 0, Cost: 0 };
+      agg.tiers[tierNorm].Level += delta;
+      agg.Total.Level += delta;
+      detectedAffinityRows += 1;
+    }
+
+    // Load character free affinity for per-tier first-level-free rule
+    const charRootRef = db.collection('players').doc(uid).collection('characters').doc(String(characterNumber));
+    let freeAffinityName = '';
+    try {
+      const cSnap = await charRootRef.get();
+      const cData = cSnap.exists ? (cSnap.data() || {}) : {};
+      freeAffinityName = String(cData.free_affinity || cData.freeAffinity || '').trim();
+    } catch (_) {}
+
+    // Compute costs using multiplier and triangular numbers per tier (minus free first level per tier if matches free_affinity)
+    const triangular = (n) => (n <= 0 ? 0 : (n * (n + 1)) / 2);
+    for (const [key, agg] of totals.entries()) {
+      const m = affinityToMultiplier.get(key) || affinityToMultiplier.get(agg.name.toLowerCase()) || 1;
+      let totalCost = 0;
+      for (const t of Object.keys(agg.tiers)) {
+        const n = Number(agg.tiers[t].Level || 0); // purchased levels in this tier
+        let cost;
+        if (freeAffinityName && String(agg.name || '').toLowerCase() === freeAffinityName.toLowerCase()) {
+          // Free level is granted per tier, so cost is triangular(n + 1) - triangular(1) = triangular(n + 1) - 1
+          cost = Math.round(m * (triangular(n + 1) - 1));
+        } else {
+          cost = Math.round(m * triangular(n));
+        }
+        agg.tiers[t].Cost = cost;
+        totalCost += cost;
+      }
+      agg.Total.Cost = totalCost;
+    }
+
+    // Write results under character root: characters/{characterNumber}/affinities/{AffinityName}/tiers/{Tier}
+    // First, clear existing calculated affinity docs for a clean slate
+    const charDocRef = charRootRef;
+    const affinitiesCol = charDocRef.collection('affinities');
+    // Clear previous advancement error log for this character at start of calculation
+    try {
+      await charDocRef.collection('errors').doc('advancement').delete();
+    } catch (_) {}
+    try {
+      const existingAffDocs = await affinitiesCol.get();
+      for (const affDoc of existingAffDocs.docs) {
+        const tiersSnap = await affDoc.ref.collection('tiers').get();
+        for (let i = 0; i < tiersSnap.docs.length; i += 450) {
+          const batch = db.batch();
+          for (let j = i; j < Math.min(i + 450, tiersSnap.docs.length); j++) {
+            batch.delete(tiersSnap.docs[j].ref);
+          }
+          await batch.commit();
+        }
+        await affDoc.ref.delete();
+      }
+    } catch (_) {}
+
+    let written = 0;
+    for (const [, agg] of totals.entries()) {
+      const affDocRef = affinitiesCol.doc(agg.name);
+      await affDocRef.set({ name: agg.name, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      // Write encountered tiers only
+      for (const t of Object.keys(agg.tiers)) {
+        const docRef = affDocRef.collection('tiers').doc(t);
+        const payload = { Level: agg.tiers[t].Level || 0, Cost: agg.tiers[t].Cost || 0, updatedAt: admin.firestore.FieldValue.serverTimestamp() };
+        await docRef.set(payload, { merge: true });
+        written += 1;
+      }
+      // Write Total
+      {
+        const docRef = affDocRef.collection('tiers').doc('Total');
+        const payload = { Level: agg.Total.Level || 0, Cost: agg.Total.Cost || 0, updatedAt: admin.firestore.FieldValue.serverTimestamp() };
+        await docRef.set(payload, { merge: true });
+        written += 1;
+      }
+    }
+
+    // ========== Skills Calculation ==========
+    // Collect skill increments from advancement
+    const skillReasonKeys = ['Advancement Reason', 'AdvancementReason', 'Reason'];
+    const skillNameKeys = ['Skill'];
+    const skillLevelAdjKeys = ['Skill Level Adj', 'SkillLevelAdj', 'Level Adj', 'Level Adjustment'];
+    const skillTypeKeys = ['Skill Type', 'SkillType', 'Type'];
+
+    const skillsTotals = new Map(); // type -> Map(name->levels)
+    let detectedSkillRows = 0;
+    for (const doc of advSnap.docs) {
+      const data = doc.data() || {};
+      const row = data.data || data;
+      const rawReason = String(getFieldValue(row, skillReasonKeys) || '').trim().toLowerCase();
+      const norm = rawReason.replace(/[^a-z]/g, '');
+      if (!(norm === 'buyingskill' || norm === 'buyingskills' || norm === 'illuionaryrace' || norm === 'illusionaryrace')) continue;
+      // Illuionary Race handling (typo accepted): must be a Race skill
+      if (norm === 'illuionaryrace' || norm === 'illusionaryrace') {
+        const skillTypeVal = String(getFieldValue(row, skillTypeKeys) || '').trim();
+        if (skillTypeVal.toLowerCase() !== 'race') {
+          advancementErrorLog.push({
+            docId: doc.id,
+            masterLogId: data._masterLogId || 'unknown',
+            rowNumber: data._rowNumber || 'unknown',
+            reason: rawReason,
+            issue: 'illusionary_race_not_race_type',
+            details: `Illusionary Race must have Skill Type 'Race'. Found: '${skillTypeVal}'`,
+            timestamp: new Date().toISOString()
+          });
+          continue;
+        }
+      }
+      const skillName = String(getFieldValue(row, skillNameKeys) || '').trim();
+      if (!skillName) {
+        advancementErrorLog.push({
+          docId: doc.id,
+          masterLogId: data._masterLogId || 'unknown',
+          rowNumber: data._rowNumber || 'unknown',
+          reason: rawReason,
+          issue: 'missing_skill_name',
+          details: `Skill advancement missing skill name. Looked for fields: ${skillNameKeys.join(', ')}`,
+          timestamp: new Date().toISOString()
+        });
+        continue;
+      }
+      const skillType = String(getFieldValue(row, skillTypeKeys) || '').trim() || 'Unknown';
+      let adj = Number(getFieldValue(row, skillLevelAdjKeys));
+      if (isNaN(adj)) adj = 1;
+      if (adj <= 0) {
+        advancementErrorLog.push({
+          docId: doc.id,
+          masterLogId: data._masterLogId || 'unknown',
+          rowNumber: data._rowNumber || 'unknown',
+          reason: rawReason,
+          issue: 'zero_or_negative_skill_change',
+          details: `Skill advancement for "${skillName}" (${skillType}) has zero or negative change: ${adj}. No data modified.`,
+          timestamp: new Date().toISOString()
+        });
+        continue;
+      }
+      if (!skillsTotals.has(skillType)) skillsTotals.set(skillType, new Map());
+      const byName = skillsTotals.get(skillType);
+      byName.set(skillName, (byName.get(skillName) || 0) + adj);
+      detectedSkillRows += 1;
+    }
+
+    // Helper to sanitize doc ids similar to syncRulesDb
+    const sanitizeDocIdLocal = (name, fallback) => {
+      try {
+        let id = String(name || '').trim();
+        if (!id) return fallback;
+        // Match syncRulesDb behavior: replace '/' and collapse whitespace
+        id = id.replace(/\//g, ' - ');
+        id = id.replace(/\s+/g, ' ').trim();
+        if (id.length > 1500) id = id.substring(0, 1500);
+        return id;
+      } catch (_) { return fallback; }
+    };
+
+    // Load character for race
+    const charDoc = await charDocRef.get();
+    const characterRace = (charDoc.exists ? ((charDoc.data() || {}).race || (charDoc.data() || {}).Race) : '') || '';
+
+    // For each skill, look up base Build cost and compute total cost
+    const skillsRoot = charDocRef.collection('skills');
+    // Clear existing skills tree
+    try {
+      const existingTypes = await skillsRoot.get();
+      for (const typeDoc of existingTypes.docs) {
+        const itemsSnap = await typeDoc.ref.listCollections();
+        for (const sub of itemsSnap) {
+          const docs = await sub.get();
+          for (let i = 0; i < docs.docs.length; i += 450) {
+            const batch = db.batch();
+            for (let j = i; j < Math.min(i + 450, docs.docs.length); j++) batch.delete(docs.docs[j].ref);
+            await batch.commit();
+          }
+        }
+        await typeDoc.ref.delete();
+      }
+    } catch (_) {}
+
+    let totalSkillsCost = 0;
+    const rulesSkillsDoc = db.collection('Rules').doc('Skills');
+    const skillsErrorLog = [];
+
+    // Preload Common skills to build a case-insensitive index by Name and by doc id
+    const commonIndexByName = new Map();
+    const commonIndexById = new Map();
+    try {
+      const commonSnap = await rulesSkillsDoc.collection('Common').get();
+      for (const d of commonSnap.docs) {
+        const data = d.data() || {};
+        const name = String(data.Name || d.id || '').trim();
+        const build = Number(data.Build || 0) || 0;
+        commonIndexById.set(d.id.toLowerCase(), build);
+        if (name) commonIndexByName.set(name.toLowerCase(), build);
+      }
+    } catch (_) {}
+
+    const computeSkillCost = (base, levels) => {
+      if (!levels || levels <= 0 || !base || base <= 0) return 0;
+      let total = base; // Level 1 costs full base
+      for (let k = 1; k < levels; k++) {
+        // Each subsequent level costs (base - k), but cannot drop below 1
+        total += Math.max(1, base - k);
+      }
+      return total;
+    };
+
+    for (const [skillType, byName] of skillsTotals.entries()) {
+      const typeDocRef = skillsRoot.doc(skillType);
+      await typeDocRef.set({ type: skillType, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      const itemsCol = typeDocRef.collection('items');
+
+      for (const [skillName, levels] of byName.entries()) {
+        let baseBuild = 0;
+        let resolvedFrom = null;
+        const skillId = sanitizeDocIdLocal(skillName, skillName);
+        if (debug) console.log(`🔍 Looking for skill "${skillName}" with sanitized ID "${skillId}"`);
+        // Try Common first by doc id, then by Name (case-insensitive index)
+        try {
+          const docRef = rulesSkillsDoc.collection('Common').doc(skillId);
+          const snap = await docRef.get();
+          if (debug) console.log(`📋 Common doc "${skillId}" exists: ${snap.exists}`);
+          if (snap.exists) {
+            const data = snap.data() || {};
+            if (debug) console.log(`📊 Common doc "${skillId}" data:`, data);
+            const fromDoc = Number((snap.data() || {}).Build || 0);
+            if (debug) console.log(`💰 Build value for "${skillId}": ${fromDoc}`);
+            if (Number.isFinite(fromDoc) && fromDoc >= 0) { baseBuild = fromDoc; resolvedFrom = { category: 'Common', id: skillId }; }
+            else {
+              // record that doc exists but Build missing
+              skillsErrorLog.push({ skillName, skillType, reason: 'build_missing_in_common_doc', docId: skillId });
+            }
+          }
+        } catch (_) {}
+        // Fallback: query by Name in Common
+        if (!baseBuild && baseBuild !== 0) {
+          const byIdLower = commonIndexById.get(skillId.toLowerCase());
+          const byNameLower = commonIndexByName.get(String(skillName).toLowerCase());
+          if (debug) console.log(`🔎 Index lookup for "${skillName}": byId=${byIdLower}, byName=${byNameLower}`);
+          if (byIdLower !== undefined) { baseBuild = byIdLower; resolvedFrom = { category: 'CommonIndex', id: skillId }; }
+          else if (byNameLower !== undefined) { baseBuild = byNameLower; resolvedFrom = { category: 'CommonIndex', name: skillName }; }
+        }
+        // If not found, try Affinity subcollection using known affinities or skillType
+        if (!baseBuild) {
+          const candidateAffinities = new Set([skillType, ...knownAffinityNames]);
+          for (const aff of candidateAffinities) {
+            try {
+              const docRef = rulesSkillsDoc.collection(String(aff)).doc(skillId);
+              const snap = await docRef.get();
+              if (snap.exists) { baseBuild = Number((snap.data() || {}).Build || 0); if (baseBuild) { resolvedFrom = { category: 'Affinity', affinity: String(aff), id: skillId }; break; } }
+            } catch (_) {}
+            if (!baseBuild) {
+              try {
+                const q = await rulesSkillsDoc.collection(String(aff)).where('Name', '==', String(skillName)).limit(1).get();
+                if (!q.empty) { baseBuild = Number((q.docs[0].data() || {}).Build || 0); if (baseBuild) { resolvedFrom = { category: 'Affinity', affinity: String(aff), name: skillName }; break; } }
+              } catch (_) {}
+            }
+          }
+        }
+        // If still not found, try Races filtered by race and name
+        if (!baseBuild) {
+          try {
+            const q = await rulesSkillsDoc.collection('Races')
+              .where('Race', '==', String(characterRace))
+              .where('Name', '==', String(skillName))
+              .limit(1).get();
+            if (!q.empty) { baseBuild = Number((q.docs[0].data() || {}).Build || 0); if (baseBuild) resolvedFrom = { category: 'Races', race: characterRace, name: skillName }; }
+          } catch (_) {}
+        }
+
+        // If baseBuild still not found (undefined), record error details
+        if (baseBuild === undefined || (baseBuild === 0 && resolvedFrom === null)) {
+          const tried = [];
+          tried.push({ category: 'Common', id: skillId });
+          tried.push({ category: 'Affinity', candidates: [skillType, ...knownAffinityNames] });
+          tried.push({ category: 'Races', race: characterRace, name: skillName });
+          skillsErrorLog.push({ skillName, skillType, reason: 'base_build_not_found', tried });
+        }
+
+        const cost = computeSkillCost(baseBuild, Number(levels || 0));
+        totalSkillsCost += cost;
+        await itemsCol.doc(skillName).set({ Name: skillName, Level: Number(levels || 0), Cost: cost, BaseBuild: baseBuild, ResolvedFrom: resolvedFrom || null, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+      }
+    }
+
+    await skillsRoot.doc('Total').set({ Cost: totalSkillsCost, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    
+    // Write errors to centralized location: Errors > Character Calculation > {Character Number} > skills
+    if (skillsErrorLog.length > 0) {
+      const errorsRef = db.collection('Errors').doc('Character Calculation').collection(String(characterNumber)).doc('skills');
+      await errorsRef.set({ entries: skillsErrorLog, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    } else {
+      // Clear old error log if present
+      try { 
+        await db.collection('Errors').doc('Character Calculation').collection(String(characterNumber)).doc('skills').delete();
+      } catch (_) {}
+    }
+
+    // === ESSENCE CALCULATION ===
+    // 1. Base essence: 5 for all characters
+    let baseEssence = 5;
+    let hitPointsFromAdvancements = 0;
+    let bodyEssenceByTier = {};
+    let detectedHitPointRows = 0;
+    let detectedBodyAffinityRows = 0;
+
+    // 2.a Process Build/AP adjustments (Import, Attending Event) and Ascend
+    let totalBuildAdjustment = 0;
+    let totalAffinityPointAdjustment = 0;
+    const buildColRef = charDocRef.collection('build');
+    const affinityPointsColRef = charDocRef.collection('affinity_points');
+    const ascendColRef = charDocRef.collection('ascend');
+    try {
+      // Clear previous non-total build docs (keep or overwrite total later)
+      const existingBuild = await buildColRef.get();
+      for (const d of existingBuild.docs) {
+        if (d.id !== 'Total') {
+          await d.ref.delete();
+        }
+      }
+    } catch (_) {}
+    try {
+      // Clear previous non-total affinity point docs
+      const existingAp = await affinityPointsColRef.get();
+      for (const d of existingAp.docs) {
+        if (d.id !== 'Total') {
+          await d.ref.delete();
+        }
+      }
+    } catch (_) {}
+    try {
+      // Clear previous ascend entries except 'current'
+      const existingAsc = await ascendColRef.get();
+      for (const d of existingAsc.docs) {
+        if (d.id !== 'current') {
+          await d.ref.delete();
+        }
+      }
+    } catch (_) {}
+
+    // Track highest ascended tier value from Adjust Cultivation Tier
+    const tierOrder = ['Iron', 'Silver', 'Gold', 'Jade', 'Saint', 'Sovereign'];
+    const tierRank = (t) => { const idx = tierOrder.indexOf(String(t)); return idx >= 0 ? idx : -1; };
+    let highestAscTier = null;
+
+    for (const doc of advSnap.docs) {
+      const data = doc.data() || {};
+      const row = data.data || data;
+      const rawReason = String(getFieldValue(row, reasonKeys) || '').trim().toLowerCase();
+      const reasonNorm = rawReason.replace(/[^a-z]/g, '');
+      // Character Initialization: seed free affinity, positive Build/AP, optional cultivation tier
+      if (reasonNorm === 'characterinitialization') {
+        // Free affinity: store on character doc
+        const freeAffinity = String(getFirstNonEmptyFieldValue(row, [...affinityNameKeys, 'Affinity']) || '').trim();
+        if (freeAffinity) {
+          await charDocRef.set({ free_affinity: freeAffinity }, { merge: true });
+        }
+        // Positive Build
+        const rawInitBuild = getFirstNonEmptyFieldValue(row, buildAdjustmentKeys);
+        const initBuild = Number(rawInitBuild);
+        if (!isNaN(initBuild) && initBuild > 0) {
+          totalBuildAdjustment += initBuild;
+          await buildColRef.doc(data._masterLogId || doc.id).set({
+            amount: initBuild,
+            source: 'Character Initialization',
+            rowNumber: data._rowNumber || null,
+            masterLogId: data._masterLogId || doc.id,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true });
+        }
+        // Positive AP
+        const rawInitAp = getFirstNonEmptyFieldValue(row, affinityPointAdjustmentKeys);
+        const initAp = Number(rawInitAp);
+        if (!isNaN(initAp) && initAp > 0) {
+          totalAffinityPointAdjustment += initAp;
+          await affinityPointsColRef.doc(data._masterLogId || doc.id).set({
+            amount: initAp,
+            source: 'Character Initialization',
+            rowNumber: data._rowNumber || null,
+            masterLogId: data._masterLogId || doc.id,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true });
+        }
+        // Optional cultivation tier
+        const newTier = String(getFirstNonEmptyFieldValue(row, adjustCultivationTierKeys) || '').trim();
+        if (newTier) {
+          await charDocRef.set({ cultivationTier: newTier }, { merge: true });
+        }
+        continue;
+      }
+      // Slotting Cores: AP only
+      if (reasonNorm === 'slottingcores') {
+        const rawApOnly = getFirstNonEmptyFieldValue(row, affinityPointAdjustmentKeys);
+        const apOnly = Number(rawApOnly);
+        if (!isNaN(apOnly) && apOnly > 0) {
+          totalAffinityPointAdjustment += apOnly;
+          await affinityPointsColRef.doc(data._masterLogId || doc.id).set({
+            amount: apOnly,
+            source: 'Slotting Cores',
+            rowNumber: data._rowNumber || null,
+            masterLogId: data._masterLogId || doc.id,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true });
+        }
+        continue;
+      }
+
+      if (reasonNorm === 'import' || reasonNorm === 'attendingevent' || reasonNorm === 'consumingcores' || reasonNorm === 'donations' || reasonNorm === 'marshaloverride') {
+        const rawAdj = getFirstNonEmptyFieldValue(row, buildAdjustmentKeys);
+        const adj = Number(rawAdj);
+        const isMarshal = reasonNorm === 'marshaloverride';
+        const isDonations = reasonNorm === 'donations';
+        const isImport = reasonNorm === 'import';
+        const isAttend = reasonNorm === 'attendingevent';
+        const isConsume = reasonNorm === 'consumingcores';
+
+        // Build: marshaloverride allows positive or negative (non-zero). Others positive only. consumingcores is build-only.
+        if (!isNaN(adj) && ((isMarshal && adj !== 0) || (!isMarshal && adj > 0)) && reasonNorm !== 'slottingcores') {
+          totalBuildAdjustment += adj;
+          await buildColRef.doc(data._masterLogId || doc.id).set({
+            amount: adj,
+            source: isMarshal ? 'Marshal Override' : (isDonations ? 'Donations' : (isImport ? 'Import' : (isAttend ? 'Attending Event' : 'Consuming Cores'))),
+            rowNumber: data._rowNumber || null,
+            masterLogId: data._masterLogId || doc.id,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          }, { merge: true });
+        }
+        // Affinity Points: skip for consumingcores. marshaloverride allows non-zero; others positive only
+        if (!isConsume) {
+          const rawAp = getFirstNonEmptyFieldValue(row, affinityPointAdjustmentKeys);
+          const ap = Number(rawAp);
+          if (!isNaN(ap) && ((isMarshal && ap !== 0) || (!isMarshal && ap > 0))) {
+            totalAffinityPointAdjustment += ap;
+            await affinityPointsColRef.doc(data._masterLogId || doc.id).set({
+              amount: ap,
+              source: isMarshal ? 'Marshal Override' : (isDonations ? 'Donations' : (isImport ? 'Import' : 'Attending Event')),
+              rowNumber: data._rowNumber || null,
+              masterLogId: data._masterLogId || doc.id,
+              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            }, { merge: true });
+          }
+        }
+      }
+
+      // Ascend: record entry, compute highest tier, optionally AP/Build ignored here
+      if (reasonNorm === 'ascend') {
+        // Explicitly prefer the Adjust* field over Character Cultivation Tier
+        let ascendTierRaw = String(getFirstNonEmptyFieldValue(row, ['Adjust Cultivation Tier','Adjust Cultilation Tier','Adjust Cultication Tier','Adjust Cutlication Tier']) || '').trim();
+        if (!ascendTierRaw) {
+          // fallback only if no explicit Adjust* present
+          ascendTierRaw = String(getFirstNonEmptyFieldValue(row, ['Character Cultivation Tier']) || '').trim();
+        }
+        const ascendTier = ascendTierRaw ? (ascendTierRaw.charAt(0).toUpperCase() + ascendTierRaw.slice(1).toLowerCase()) : '';
+        if (ascendTier) {
+          const rank = tierRank(ascendTier);
+          // choose the highest tier encountered in this run
+          if (highestAscTier === null || rank > tierRank(highestAscTier)) { highestAscTier = ascendTier; }
+        }
+
+        await ascendColRef.doc(data._masterLogId || doc.id).set({
+          tier: ascendTier || null,
+          rowNumber: data._rowNumber || null,
+          masterLogId: data._masterLogId || doc.id,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+        continue;
+      }
+    }
+
+    // Write Build total
+    await buildColRef.doc('Total').set({
+      amount: totalBuildAdjustment,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+
+    // Write Affinity Points total
+    await affinityPointsColRef.doc('Total').set({
+      amount: totalAffinityPointAdjustment,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+
+    // Write Ascend current + apply effects
+    if (highestAscTier) {
+      await ascendColRef.doc('current').set({
+        tier: highestAscTier,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+
+      // Upgrade character cultivation tier if higher
+      try {
+        const charSnap = await charDocRef.get();
+        const currentTier = (charSnap.exists ? (charSnap.data().cultivationTier || '') : '') || '';
+        const currentRank = tierRank(currentTier);
+        if (tierRank(highestAscTier) > currentRank) {
+          await charDocRef.set({ cultivationTier: highestAscTier }, { merge: true });
+        }
+      } catch (_) {}
+
+      // Free affinity +1 level on ascend
+      try {
+        const charSnap = await charDocRef.get();
+        const freeAffinity = (charSnap.exists ? (charSnap.data().free_affinity || '') : '') || '';
+        if (freeAffinity) {
+          const affDocRef = charDocRef.collection('affinities').doc(freeAffinity);
+          // Increment Total level by 1 with cost 0
+          const totalRef = affDocRef.collection('tiers').doc('Total');
+          const totalSnap = await totalRef.get();
+          const currentLevel = Number((totalSnap.data() || {}).Level || 0) || 0;
+          await affDocRef.set({ name: freeAffinity, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+          await totalRef.set({ Level: currentLevel + 1, Cost: Number((totalSnap.data() || {}).Cost || 0), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        }
+      } catch (_) {}
+    }
+    // 2.b Process "Buying Hit Points" advancements 
+    console.log(`🔋 Starting essence/hit point processing loop with ${advSnap.docs.length} documents`);
+    const allDocIds = advSnap.docs.map(doc => doc.id);
+    console.log(`🔋 All document IDs: ${allDocIds.join(', ')}`);
+    console.log(`🔋 Looking for r151 and r162: r151=${allDocIds.includes('r151')}, r162=${allDocIds.includes('r162')}`);
+    for (const doc of advSnap.docs) {
+      const data = doc.data() || {};
+      const row = data.data || data;
+      
+      const rawReason = String(getFieldValue(row, reasonKeys) || '').trim().toLowerCase();
+      const reasonNorm = rawReason.replace(/[^a-z]/g, '');
+      
+      // Debug logging for essence processing - show ALL docs
+      console.log(`🔋 Essence loop - Processing doc ${doc.id}: reason="${rawReason}" normalized="${reasonNorm}"`);
+      
+      if (reasonNorm === 'buyinghitpoints') {
+        console.log(`🎯 Hit point entry found! Doc ${doc.id}`);
+        console.log(`🎯 Available fields: ${JSON.stringify(Object.keys(row))}`);
+        console.log(`🎯 Row data: ${JSON.stringify(row)}`);
+        console.log(`🎯 Looking for fields: ${levelChangeKeys.join(', ')}`);
+        
+        // Use first non-empty among all possible HP fields
+        let hpGainRaw = getFirstNonEmptyFieldValue(row, ['Adjust Hit Points', 'Hit Points', 'Adjustment', 'Delta', 'Change', 'Level Change', 'levelChange']);
+        if (hpGainRaw === '' || hpGainRaw === null || hpGainRaw === undefined) {
+          // Fallback to generic getFieldValue just in case
+          hpGainRaw = getFieldValue(row, levelChangeKeys);
+        }
+        console.log(`🎯 Found hit point value: "${hpGainRaw}"`);
+        
+        // Debug each field individually
+        for (const field of levelChangeKeys) {
+          const value = getFieldValue(row, [field]);
+          console.log(`🎯 Field "${field}": "${value}"`);
+        }
+        
+        const hpGain = Number(hpGainRaw);
+        
+        if (isNaN(hpGain) || hpGain === null || hpGain === undefined) {
+          // Missing or invalid hit point field
+          advancementErrorLog.push({
+            docId: doc.id,
+            masterLogId: data._masterLogId || 'unknown',
+            rowNumber: data._rowNumber || 'unknown',
+            reason: rawReason,
+            issue: 'missing_hit_point_value',
+            details: `Hit point advancement missing or invalid value: "${hpGainRaw}". Looked for fields: ${levelChangeKeys.join(', ')}`,
+            timestamp: new Date().toISOString()
+          });
+        } else if (hpGain <= 0) {
+          // Zero or negative hit point value
+          advancementErrorLog.push({
+            docId: doc.id,
+            masterLogId: data._masterLogId || 'unknown',
+            rowNumber: data._rowNumber || 'unknown',
+            reason: rawReason,
+            issue: 'zero_or_negative_hit_point_value',
+            details: `Hit point advancement has zero or negative value: ${hpGain}. No data modified.`,
+            timestamp: new Date().toISOString()
+          });
+        } else {
+          // Valid hit point gain
+          hitPointsFromAdvancements += hpGain;
+          detectedHitPointRows += 1;
+        }
+      }
+    }
+
+    // 3. Calculate Body affinity essence contribution
+    // Prefer freshly calculated totals; if absent, fall back to stored affinities under the character
+    const bodyAffinityKey = 'body';
+    let bodyLevelsByTier = {};
+    if (totals.has(bodyAffinityKey)) {
+      const bodyAgg = totals.get(bodyAffinityKey);
+      for (const [tier, tierData] of Object.entries(bodyAgg.tiers)) {
+        const bodyLevel = Number(tierData.Level || 0);
+        if (bodyLevel > 0) bodyLevelsByTier[tier] = bodyLevel;
+      }
+    }
+    // Fallback: read from Firestore if not present in this run
+    if (Object.keys(bodyLevelsByTier).length === 0) {
+      try {
+        const bodyDoc = await charDocRef.collection('affinities').doc('Body').get();
+        if (bodyDoc.exists) {
+          const tiersSnap = await bodyDoc.ref.collection('tiers').get();
+          tiersSnap.forEach(d => {
+            const data = d.data() || {};
+            const level = Number((data.Level ?? data.level ?? 0)) || 0;
+            if (level > 0) bodyLevelsByTier[d.id] = level; // d.id expected to be tier name (e.g., "Silver")
+          });
+        }
+      } catch (_) {}
+    }
+
+    // Load Body Essence - DR values from Rules (supports multiple key names)
+    const bodyEssenceRef = db.collection('Rules').doc('Body Essence - DR').collection('All');
+    const bodyEssenceSnap = await bodyEssenceRef.get();
+    const bodyEssenceData = new Map(); // level -> essence value
+
+    bodyEssenceSnap.forEach((doc) => {
+      const data = doc.data() || {};
+      const docId = doc.id; // Should be like "Body 1", "Body 2", etc.
+      const level = Number(String(docId).replace(/[^0-9]/g, '') || 0);
+      const essenceValue = (
+        data['Essence gain'] ??
+        data['Essence gain:'] ??
+        data['Essence Gain'] ??
+        data['Essence Gain:'] ??
+        data['Essence/Hit Points'] ??
+        data['Essence / Hit Points'] ??
+        data.Essence ??
+        data.essence ??
+        0
+      );
+      const essence = Number(essenceValue) || 0;
+      if (level > 0 && essence >= 0) {
+        bodyEssenceData.set(level, essence);
+      }
+    });
+
+    // Calculate cumulative Body essence for each tier using gathered body levels
+    for (const [tier, bodyLevelRaw] of Object.entries(bodyLevelsByTier)) {
+      const bodyLevel = Number(bodyLevelRaw) || 0;
+      if (bodyLevel <= 0) continue;
+      let tierEssence = 0;
+      for (let lvl = 1; lvl <= bodyLevel; lvl++) {
+        tierEssence += Number(bodyEssenceData.get(lvl) || 0);
+      }
+      bodyEssenceByTier[tier] = {
+        Level: bodyLevel,
+        Essence: tierEssence
+      };
+      detectedBodyAffinityRows += bodyLevel;
+    }
+
+    // 4. Calculate total essence
+    const totalBodyEssence = Object.values(bodyEssenceByTier).reduce((sum, tier) => sum + (tier.Essence || 0), 0);
+    const totalEssence = baseEssence + hitPointsFromAdvancements + totalBodyEssence;
+
+    // 5. Store essence data at character level
+    const essenceData = {
+      base: baseEssence,
+      hitPointsFromAdvancements,
+      bodyEssenceByTier,
+      total: totalEssence,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    };
+
+    const essenceRef = charDocRef.collection('essence').doc('summary');
+    await essenceRef.set(essenceData, { merge: true });
+
+    // Record last_sync for advancement calculations
+    try {
+      await charDocRef.collection('advancement').doc('last_sync').set({
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      }, { merge: true });
+    } catch (_) {}
+
+    // Write advancement error log per character: players/{uid}/characters/{characterNumber}/errors
+    if (advancementErrorLog.length > 0) {
+      const errorsRef = charDocRef.collection('errors').doc('advancement');
+      await errorsRef.set({ 
+        entries: advancementErrorLog, 
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        totalErrors: advancementErrorLog.length,
+        summary: {
+          unrecognized_reasons: advancementErrorLog.filter(e => e.issue === 'unrecognized_advancement_reason').length,
+          missing_affinity_names: advancementErrorLog.filter(e => e.issue === 'missing_affinity_name').length,
+          missing_tiers: advancementErrorLog.filter(e => e.issue === 'missing_tier').length,
+          missing_skill_names: advancementErrorLog.filter(e => e.issue === 'missing_skill_name').length,
+          missing_hit_point_values: advancementErrorLog.filter(e => e.issue === 'missing_hit_point_value').length,
+          zero_or_negative_affinity_changes: advancementErrorLog.filter(e => e.issue === 'zero_or_negative_affinity_change').length,
+          zero_or_negative_skill_changes: advancementErrorLog.filter(e => e.issue === 'zero_or_negative_skill_change').length,
+          zero_or_negative_hit_point_values: advancementErrorLog.filter(e => e.issue === 'zero_or_negative_hit_point_value').length
+        }
+      }, { merge: true });
+    } else {
+      // Clear old error log if present
+      try { 
+        await charDocRef.collection('errors').doc('advancement').delete();
+      } catch (_) {}
+    }
+
+    return res.status(200).json({ 
+      ok: true, 
+      uid, 
+      characterNumber, 
+      advRows: advRowsCount, 
+      detectedAffinityRows, 
+      affinitiesCalculated: written, 
+      affinityCount: totals.size, 
+      detectedSkillRows, 
+      detectedHitPointRows,
+      detectedBodyAffinityRows,
+      essenceCalculated: {
+        base: baseEssence,
+        hitPoints: hitPointsFromAdvancements,
+        bodyEssence: totalBodyEssence,
+        total: totalEssence
+      },
+      advancementErrors: advancementErrorLog.length,
+      debug: debug ? { skippedSamples, advancementErrors: advancementErrorLog } : undefined 
+    });
+  } catch (error) {
+    console.error('calculateCharacter error', error);
+    return res.status(500).json({ ok: false, error: 'server_error', message: error.message });
   }
 });
 
@@ -1030,7 +3670,6 @@ exports.updateDiscordEvent = onRequest({ secrets: [DISCORD_TOKEN] }, async (req,
     return res.status(500).json({ error: message });
   }
 });
-
 // QR Code Generation Function - Triggered when pc.json is updated
 exports.generateQRCode = onObjectFinalized({ secrets: [GAME_SECRET] }, async (event) => {
   const filePath = event.data.name;
@@ -1151,7 +3790,6 @@ async function isSuperAdmin(uid) {
     return false;
   }
 }
-
 // Create a new event
 exports.createEvent = onRequest(async (req, res) => {
   // Enable CORS
@@ -1218,6 +3856,13 @@ exports.createEvent = onRequest(async (req, res) => {
     };
 
     const eventRef = await db.collection('events').add(eventData);
+
+    // Best-effort trigger of Discord sync
+    try {
+      await axios.post(`https://us-central1-${process.env.GCLOUD_PROJECT}.cloudfunctions.net/syncEventsToDiscord`);
+    } catch (e) {
+      console.log('syncEventsToDiscord trigger failed (continuing):', e.response?.status || e.message);
+    }
 
     return res.status(200).json({
       ok: true,
@@ -1306,6 +3951,12 @@ exports.updateEvent = onRequest(async (req, res) => {
     };
 
     await db.collection('events').doc(eventId).update(updateData);
+
+    try {
+      await axios.post(`https://us-central1-${process.env.GCLOUD_PROJECT}.cloudfunctions.net/syncEventsToDiscord`);
+    } catch (e) {
+      console.log('syncEventsToDiscord trigger failed (continuing):', e.response?.status || e.message);
+    }
 
     return res.status(200).json({
       ok: true,
@@ -1486,7 +4137,6 @@ exports.createEventType = onRequest(async (req, res) => {
     });
   }
 });
-
 // Update event type
 exports.updateEventType = onRequest(async (req, res) => {
   // Enable CORS
@@ -1582,7 +4232,6 @@ exports.updateEventType = onRequest(async (req, res) => {
     });
   }
 });
-
 // Update location
 exports.updateLocation = onRequest(async (req, res) => {
   // Enable CORS
@@ -1810,7 +4459,6 @@ exports.deleteLocation = onRequest(async (req, res) => {
     });
   }
 });
-
 // Delete event
 exports.deleteEvent = onRequest(async (req, res) => {
   // Enable CORS
@@ -2041,9 +4689,8 @@ exports.getEventTypes = onRequest(async (req, res) => {
     });
   }
 });
-
 // Activate event registration
-exports.activateEventRegistration = onRequest(async (req, res) => {
+exports.activateEventRegistration = onRequest({ secrets: [DISCORD_TOKEN] }, async (req, res) => {
   // Enable CORS
   res.set('Access-Control-Allow-Origin', '*');
   res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -2127,6 +4774,24 @@ exports.activateEventRegistration = onRequest(async (req, res) => {
     };
 
     await db.collection('events').doc(eventId).update(registrationData);
+
+    // Ensure a Discord text channel exists for this event after activation
+    try {
+      const refreshed = await db.collection('events').doc(eventId).get();
+      const eventRecord = { id: eventId, ...refreshed.data() };
+      await ensureDiscordChannelForEvent(eventRecord);
+      await ensureDiscordRoleForEvent(eventRecord);
+      await updateEventDiscordMembershipsForAll(eventRecord, { skipEnsureNpcChannels: true });
+    } catch (ensureErr) {
+      console.log('⚠️ ensureDiscordChannelForEvent failed (continuing):', ensureErr.response?.status || ensureErr.message || ensureErr);
+    }
+
+    // Best-effort trigger a full Discord sync
+    try {
+      await axios.post(`https://us-central1-${process.env.GCLOUD_PROJECT}.cloudfunctions.net/syncEventsToDiscord`);
+    } catch (e) {
+      console.log('syncEventsToDiscord trigger failed (continuing):', e.response?.status || e.message);
+    }
 
     return res.status(200).json({
       ok: true,
@@ -2226,6 +4891,23 @@ exports.updateEventRegistration = onRequest(async (req, res) => {
 
     await db.collection('events').doc(eventId).update(registrationData);
 
+    // Ensure Discord text channel exists/renamed on updates
+    try {
+      const refreshed = await db.collection('events').doc(eventId).get();
+      const eventRecord = { id: eventId, ...refreshed.data() };
+      await ensureDiscordChannelForEvent(eventRecord);
+      await ensureDiscordRoleForEvent(eventRecord);
+      await updateEventDiscordMembershipsForAll(eventRecord, { skipEnsureNpcChannels: true });
+    } catch (ensureErr) {
+      console.log('⚠️ ensureDiscordChannelForEvent (update) failed (continuing):', ensureErr.response?.status || ensureErr.message || ensureErr);
+    }
+
+    try {
+      await axios.post(`https://us-central1-${process.env.GCLOUD_PROJECT}.cloudfunctions.net/syncEventsToDiscord`);
+    } catch (e) {
+      console.log('syncEventsToDiscord trigger failed (continuing):', e.response?.status || e.message);
+    }
+
     return res.status(200).json({
       ok: true,
       message: 'Event registration updated successfully',
@@ -2241,7 +4923,6 @@ exports.updateEventRegistration = onRequest(async (req, res) => {
     });
   }
 });
-
 // Create event attendee type
 exports.createEventAttendeeType = onRequest(async (req, res) => {
   // Enable CORS
@@ -2447,7 +5128,6 @@ exports.updateEventAttendeeType = onRequest(async (req, res) => {
     });
   }
 });
-
 // Delete event attendee type
 exports.deleteEventAttendeeType = onRequest(async (req, res) => {
   // Enable CORS
@@ -2523,8 +5203,7 @@ exports.deleteEventAttendeeType = onRequest(async (req, res) => {
     });
   }
 });
-
-// Register user for an event
+// Register user for an event (supports secondary backup shifts)
 exports.registerForEvent = onRequest(async (req, res) => {
   // Enable CORS
   res.set('Access-Control-Allow-Origin', '*');
@@ -2547,7 +5226,15 @@ exports.registerForEvent = onRequest(async (req, res) => {
     const decodedToken = await getAuth().verifyIdToken(idToken);
     const uid = decodedToken.uid;
 
-    const { eventId, attendeeTypeId, selectedNpcShifts, selectedCleanupShifts, selectedPayOption } = req.body;
+    const { 
+      eventId, 
+      attendeeTypeId, 
+      selectedNpcShifts, 
+      selectedCleanupShifts, 
+      selectedPayOption,
+      secondaryNpcShift, // optional backup shift name/id
+      secondaryCleanupShift // optional backup shift name/id
+    } = req.body;
 
     // Validate required fields
     if (!eventId || !attendeeTypeId) {
@@ -2594,6 +5281,8 @@ exports.registerForEvent = onRequest(async (req, res) => {
       maxConsumeForEvent: attendeeTypeData.maxConsumeForEvent,
       selectedNpcShifts: selectedNpcShifts || [],
       selectedCleanupShifts: selectedCleanupShifts || [],
+      secondaryNpcShift: secondaryNpcShift || null,
+      secondaryCleanupShift: secondaryCleanupShift || null,
       selectedPayOption: selectedPayOption,
       registeredAt: admin.firestore.FieldValue.serverTimestamp(),
     };
@@ -2620,7 +5309,160 @@ exports.registerForEvent = onRequest(async (req, res) => {
   }
 });
 
-// Get user's event registration
+// Get event shift summary: counts per NPC and Cleanup shift (primary selections)
+exports.getEventShiftSummary = onRequest(async (req, res) => {
+  // Enable CORS
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
+
+  if (!req.headers.authorization) {
+    return res.status(401).json({ ok: false, error: 'Missing authorization header' });
+  }
+  try {
+    const idToken = req.headers.authorization.split(' ')[1];
+    await getAuth().verifyIdToken(idToken);
+
+    const eventId = req.query.eventId || req.body?.eventId;
+    if (!eventId) return res.status(400).json({ ok: false, error: 'eventId_required' });
+
+    const eventDoc = await db.collection('events').doc(String(eventId)).get();
+    if (!eventDoc.exists) return res.status(404).json({ ok: false, error: 'event_not_found' });
+    const eventData = eventDoc.data() || {};
+
+    let npcShifts = Array.isArray(eventData.npcShifts) ? eventData.npcShifts : [];
+    let cleanupShifts = Array.isArray(eventData.cleanupShifts) ? eventData.cleanupShifts : [];
+
+    // If shifts are not present on the event, fall back to its event type definition
+    if ((!npcShifts || npcShifts.length === 0) || (!cleanupShifts || cleanupShifts.length === 0)) {
+      const typeId = eventData.typeId;
+      if (typeId) {
+        try {
+          const typeDoc = await db.collection('event_types').doc(String(typeId)).get();
+          if (typeDoc.exists) {
+            const typeData = typeDoc.data() || {};
+            if (!npcShifts || npcShifts.length === 0) npcShifts = Array.isArray(typeData.npcShifts) ? typeData.npcShifts : [];
+            if (!cleanupShifts || cleanupShifts.length === 0) cleanupShifts = Array.isArray(typeData.cleanupShifts) ? typeData.cleanupShifts : [];
+          }
+        } catch (e) {
+          console.log('Failed to load event type for shifts (continuing):', e.message);
+        }
+      }
+    }
+
+    // Initialize counts by index (string keys)
+    const npcCounts = {};
+    const cleanupCounts = {};
+    for (let i = 0; i < npcShifts.length; i++) npcCounts[String(i)] = 0; // NPC keyed by index
+    for (let i = 0; i < cleanupShifts.length; i++) {
+      const label = String(cleanupShifts[i]);
+      cleanupCounts[label] = 0; // Cleanup keyed by label
+    }
+
+    const regsSnap = await db.collection('events').doc(String(eventId)).collection('registrations').get();
+    regsSnap.forEach(doc => {
+      const r = doc.data() || {};
+      const primaryNpc = Array.isArray(r.selectedNpcShifts) ? r.selectedNpcShifts : [];
+      const primaryCleanup = Array.isArray(r.selectedCleanupShifts) ? r.selectedCleanupShifts : [];
+      for (const idx of primaryNpc) {
+        const key = String(parseInt(idx));
+        if (npcCounts[key] !== undefined) npcCounts[key] += 1;
+      }
+      for (const label of primaryCleanup) {
+        const key = String(label);
+        if (cleanupCounts[key] !== undefined) cleanupCounts[key] += 1;
+      }
+      // Include secondary preferences in counts (separate keys)
+      const secNpc = r.secondaryNpcShift;
+      const secCleanup = r.secondaryCleanupShift;
+      if (secNpc !== undefined && secNpc !== null) {
+        const key = String(parseInt(secNpc));
+        if (npcCounts[key] !== undefined) npcCounts[key] += 0; // keep primary in npcCounts; secondary shown via separate map below if needed
+      }
+      if (secCleanup !== undefined && secCleanup !== null) {
+        const key = String(parseInt(secCleanup));
+        if (cleanupCounts[key] !== undefined) cleanupCounts[key] += 0;
+      }
+    });
+
+    return res.status(200).json({ ok: true, eventId, npcCounts, cleanupCounts, npcShifts, cleanupShifts });
+  } catch (error) {
+    console.error('Error in getEventShiftSummary:', error);
+    return res.status(500).json({ ok: false, error: 'server_error', message: error.message });
+  }
+});
+
+// Get attendees for a specific shift (includes primary and secondary picks)
+// Params: eventId, shiftType ('npc' | 'cleanup'), shiftName (string label for cleanup, index string for npc)
+exports.getShiftAttendees = onRequest(async (req, res) => {
+  // Enable CORS
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
+
+  if (!req.headers.authorization) {
+    return res.status(401).json({ ok: false, error: 'Missing authorization header' });
+  }
+  try {
+    const idToken = req.headers.authorization.split(' ')[1];
+    await getAuth().verifyIdToken(idToken);
+
+    const eventId = req.query.eventId || req.body?.eventId;
+    const shiftType = (req.query.shiftType || req.body?.shiftType || '').toString();
+    const shiftName = (req.query.shiftName || req.body?.shiftName || '').toString();
+    if (!eventId || !shiftType || !shiftName) {
+      return res.status(400).json({ ok: false, error: 'eventId_shiftType_shiftName_required' });
+    }
+    if (!['npc', 'cleanup'].includes(shiftType)) {
+      return res.status(400).json({ ok: false, error: 'invalid_shift_type' });
+    }
+
+    const regsSnap = await db.collection('events').doc(String(eventId)).collection('registrations').get();
+    const attendeeUids = [];
+    const secondaryUids = [];
+    regsSnap.forEach(doc => {
+      const r = doc.data() || {};
+      if (shiftType === 'npc') {
+        const primary = Array.isArray(r.selectedNpcShifts) ? r.selectedNpcShifts.map(x => String(parseInt(x))) : [];
+        if (primary.includes(shiftName)) attendeeUids.push(doc.id);
+        const sec = r.secondaryNpcShift;
+        if (sec !== undefined && sec !== null && String(parseInt(sec)) === shiftName) secondaryUids.push(doc.id);
+      } else {
+        const primary = Array.isArray(r.selectedCleanupShifts) ? r.selectedCleanupShifts : [];
+        if (primary.includes(shiftName)) attendeeUids.push(doc.id);
+        const sec = r.secondaryCleanupShift;
+        if (sec === shiftName) secondaryUids.push(doc.id);
+      }
+    });
+
+    // Resolve basic identity (email) for display
+    const attendees = [];
+    for (const uid of attendeeUids) {
+      try {
+        const user = await getAuth().getUser(uid);
+        attendees.push({ uid, email: user.email || null, displayName: user.displayName || null, source: 'primary' });
+      } catch {
+        attendees.push({ uid, source: 'primary' });
+      }
+    }
+    for (const uid of secondaryUids) {
+      try {
+        const user = await getAuth().getUser(uid);
+        attendees.push({ uid, email: user.email || null, displayName: user.displayName || null, source: 'secondary' });
+      } catch {
+        attendees.push({ uid, source: 'secondary' });
+      }
+    }
+
+    return res.status(200).json({ ok: true, eventId, shiftType, shiftName, count: attendees.length, attendees });
+  } catch (error) {
+    console.error('Error in getShiftAttendees:', error);
+    return res.status(500).json({ ok: false, error: 'server_error', message: error.message });
+  }
+});
+// Get user's event registration (includes secondary shifts if present)
 exports.getUserEventRegistration = onRequest(async (req, res) => {
   // Enable CORS
   res.set('Access-Control-Allow-Origin', '*');
@@ -2782,7 +5624,6 @@ exports.checkPlayerRegistration = onRequest(async (req, res) => {
     });
   }
 });
-
 // Check in a player for an event
 exports.checkInPlayer = onRequest(async (req, res) => {
   // Enable CORS
@@ -3008,7 +5849,6 @@ exports.checkSuperAdmin = onRequest(async (req, res) => {
     });
   }
 });
-
 // Generate Monster Core printout
 exports.generateMonsterCorePrintout = onRequest({ secrets: [GAME_SECRET] }, async (req, res) => {
   // Enable CORS
@@ -3281,7 +6121,6 @@ exports.generateMonsterCorePrintout = onRequest({ secrets: [GAME_SECRET] }, asyn
     });
   }
 });
-
 // Get Monster Cores
 exports.getMonsterCores = onRequest(async (req, res) => {
   // Enable CORS
@@ -3557,7 +6396,6 @@ exports.consumeMonsterCore = onRequest(async (req, res) => {
     });
   }
 });
-
 // Get Monster Core consumption stats
 exports.getMonsterCoreStats = onRequest(async (req, res) => {
   // Enable CORS
@@ -3776,7 +6614,6 @@ exports.addToGoogleSheet = onRequest(async (req, res) => {
     });
   }
 });
-
 // Get Monster Core by ID
 exports.getMonsterCore = onRequest(async (req, res) => {
   // Enable CORS
@@ -4153,7 +6990,6 @@ exports.getMonsterCoreReactivationHistory = onRequest(async (req, res) => {
     });
   }
 });
-
 // Function to trade a monster core between players (tier-based)
 exports.tradeMonsterCore = onRequest(async (req, res) => {
   // Enable CORS
@@ -4309,7 +7145,6 @@ exports.tradeMonsterCore = onRequest(async (req, res) => {
     return res.status(500).json({ ok: false, error: 'Internal server error: ' + error.message });
   }
 });
-
 // Store Monster Core in Character Inventory
 exports.storeMonsterCore = onRequest(async (req, res) => {
   // Enable CORS
@@ -4491,7 +7326,6 @@ exports.storeMonsterCore = onRequest(async (req, res) => {
     return res.status(500).json({ ok: false, error: 'Internal server error' });
   }
 });
-
 // Get Stored Cores for Character
 exports.getStoredCores = onRequest(async (req, res) => {
   // Enable CORS
@@ -4607,7 +7441,6 @@ exports.getStoredCores = onRequest(async (req, res) => {
     });
   }
 });
-
 // Use Stored Core (Consume or Slot) - Updated for Tier-Based System
 exports.useStoredCore = onRequest(async (req, res) => {
   // Enable CORS
@@ -5067,7 +7900,6 @@ exports.tradeStoredCore = onRequest(async (req, res) => {
     });
   }
 });
-
 // Function to get current user's characters
 exports.getCharacters = onRequest(async (req, res) => {
   // Enable CORS
@@ -5267,7 +8099,6 @@ exports.getPlayerCharacters = onRequest(async (req, res) => {
     return res.status(500).json({ ok: false, error: 'Internal server error' });
   }
 });
-
 // Search characters by playerName, characterName, or characterNumber (Super Admin only)
 exports.searchCharacters = onRequest(async (req, res) => {
   // Enable CORS
@@ -5814,7 +8645,6 @@ exports.testCharacterStructure = onRequest(async (req, res) => {
     return res.status(500).json({ ok: false, error: 'Internal server error: ' + error.message });
   }
 });
-
 // Function to check if a character number exists in the database
 exports.checkCharacterExists = onRequest(async (req, res) => {
   // Enable CORS
@@ -5878,7 +8708,6 @@ exports.checkCharacterExists = onRequest(async (req, res) => {
     return res.status(500).json({ ok: false, error: 'Internal server error' });
   }
 });
-
 // Function to initialize user structure after login
 exports.initializeUserStructure = onRequest(async (req, res) => {
   // Enable CORS
@@ -6025,7 +8854,6 @@ exports.initializeUserStructure = onRequest(async (req, res) => {
     return res.status(500).json({ ok: false, error: 'Internal server error' });
   }
 });
-
 // Temporary function to fix character playerUid field
 exports.fixCharacterPlayerUid = onRequest(async (req, res) => {
   // Enable CORS
@@ -6363,7 +9191,6 @@ exports.checkDiscordRateLimit = onRequest({ secrets: [DISCORD_TOKEN] }, async (r
     });
   }
 });
-
 // Sync Events to Discord
 exports.syncEventsToDiscord = onRequest({ secrets: [DISCORD_TOKEN] }, async (req, res) => {
   // Enable CORS
@@ -6532,14 +9359,40 @@ exports.syncEventsToDiscord = onRequest({ secrets: [DISCORD_TOKEN] }, async (req
 
         // Validate dates
         if (startDateTime.isBefore(moment())) {
-          console.log(`❌ Event ${event.id} start time is in the past: ${startDateTime.format()}`);
-          results.push({
-            eventId: event.id,
-            eventName: eventName,
-            status: 'error',
-            message: 'Event start time must be in the future'
-          });
+          console.log(`⏭️ Past event ${event.id} detected (starts at ${startDateTime.format()}); archiving Discord assets if any`);
+          try {
+            const archiveRes = await archiveDiscordAssetsForEvent(event);
+            results.push({
+              eventId: event.id,
+              eventName: eventName,
+              status: archiveRes.archived ? 'archived' : 'skipped',
+              message: archiveRes.archived ? 'Archived past event channels/category' : 'No assets to archive',
+              actions: archiveRes.actions
+            });
+          } catch (archErr) {
+            results.push({
+              eventId: event.id,
+              eventName: eventName,
+              status: 'error',
+              message: `Archive failed: ${archErr.response?.status || archErr.message}`
+            });
+          }
           continue;
+        }
+
+        // Ensure Discord artifacts for upcoming/active registrations
+        if (event.registrationActivated && event.registrationDetails) {
+          console.log(`🧩 Ensuring Discord assets for event ${event.id}...`);
+          try {
+            await ensureDiscordCategoryForEvent(event);
+            await ensureDiscordChannelForEvent(event);
+            await ensureDiscordRoleForEvent(event);
+            await updateEventDiscordMembershipsForAll(event, { skipEnsureNpcChannels: true });
+          } catch (assetErr) {
+            console.log('⚠️ Ensuring Discord assets failed:', assetErr.response?.data || assetErr.message || assetErr);
+          }
+        } else {
+          console.log(`ℹ️ Event ${event.id} has no active registration; skipping Discord channel/role ensure.`);
         }
 
         if (endDateTime.isBefore(startDateTime)) {
@@ -6814,7 +9667,6 @@ exports.syncEventsToDiscord = onRequest({ secrets: [DISCORD_TOKEN] }, async (req
           message: `Discord event created: ${discordResponse.data.name}`,
           discordEventId: discordResponse.data.id
         });
-
               } catch (error) {
           console.error(`❌ Error syncing event ${event.id}:`, error);
           console.error(`   Error details:`, {
@@ -6859,7 +9711,7 @@ exports.syncEventsToDiscord = onRequest({ secrets: [DISCORD_TOKEN] }, async (req
       message: 'Events sync completed',
       results: results,
       summary: {
-        total: events.length,
+        total: results.length,
         successful: results.filter(r => r.status === 'success').length,
         updated: results.filter(r => r.status === 'updated').length,
         errors: results.filter(r => r.status === 'error').length,
@@ -7088,7 +9940,6 @@ exports.getEventRegistrations = onRequest(async (req, res) => {
     });
   }
 });
-
 // Manual QR Code Regeneration for all users
 exports.regenerateAllQRCodes = onRequest({ secrets: [GAME_SECRET] }, async (req, res) => {
   // Enable CORS
