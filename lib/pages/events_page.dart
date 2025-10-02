@@ -8,6 +8,7 @@ import 'package:flutter/foundation.dart';
 import 'dart:convert';
 import '../config/app_config.dart';
 import 'dart:async';
+import '../shared/admin_cache_service.dart';
 
 
 class Event {
@@ -143,7 +144,14 @@ class EventAttendeeType {
 }
 
 class EventsPage extends StatefulWidget {
-  const EventsPage({super.key});
+  final bool isEventsLoading;
+  final bool isAdminStatusLoading;
+  
+  const EventsPage({
+    super.key,
+    this.isEventsLoading = false,
+    this.isAdminStatusLoading = false,
+  });
 
   @override
   _EventsPageState createState() => _EventsPageState();
@@ -206,60 +214,35 @@ class _EventsPageState extends State<EventsPage> {
   }
 
   Future<void> _checkPermissions() async {
-    try {
-      final user = _auth.currentUser;
-      if (user == null) {
-        setState(() {
-          isSuperAdmin = false;
-          isLoadingPermissions = false;
-        });
-        return;
-      }
-
-      print('🔍 Checking permissions for user: ${user.uid} (${user.email})');
-
-      // Get ID token for Firebase Function call
-      final idToken = await user.getIdToken();
-      
-      // Check if user is a super admin using Firebase Function
-      final response = await http.get(
-        Uri.parse('https://us-central1-crucible-helper.cloudfunctions.net/checkSuperAdmin'),
-        headers: {
-          'Authorization': 'Bearer $idToken',
-          'Content-Type': 'application/json',
-        },
-      );
-
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
-        final isAdmin = data['ok'] == true && data['isSuperAdmin'] == true;
-        
-        print('🔍 Super admin check result: $isAdmin');
-        
-        setState(() {
-          isSuperAdmin = isAdmin;
-          isLoadingPermissions = false;
-        });
-
-        if (isAdmin) {
-          print('✅ User is super admin');
-          _loadLocationsAndTypes();
-        }
-      } else {
-        print('❌ Error checking super admin status: ${response.statusCode}');
-        setState(() {
-          isSuperAdmin = false;
-          isLoadingPermissions = false;
-        });
-      }
-
-    } catch (error) {
-      print('❌ Error checking permissions: $error');
+    final user = _auth.currentUser;
+    if (user == null) {
       setState(() {
         isSuperAdmin = false;
         isLoadingPermissions = false;
       });
+      return;
     }
+
+    print('🔍 Checking permissions for user: ${user.uid} (${user.email})');
+
+    // Use cached admin status service for immediate UI update
+    await AdminCacheService.getAdminStatus(
+      onStatusUpdate: (isAdmin) {
+        print('🔍 Super admin check result: $isAdmin');
+        
+        if (mounted) {
+          setState(() {
+            isSuperAdmin = isAdmin;
+            isLoadingPermissions = false;
+          });
+
+          if (isAdmin) {
+            print('✅ User is super admin');
+            _loadLocationsAndTypes();
+          }
+        }
+      },
+    );
   }
 
   Future<void> checkEventRegistrationStatus(String eventId) async {
@@ -487,7 +470,49 @@ class _EventsPageState extends State<EventsPage> {
                           '${event.dateRange} • ${event.location}',
                           style: TextStyle(color: Colors.grey[400]),
                         ),
-                        trailing: Icon(Icons.chevron_right, color: Colors.amber),
+                        trailing: PopupMenuButton<String>(
+                          icon: Icon(Icons.more_vert, color: Colors.amber),
+                          onSelected: (value) {
+                            switch (value) {
+                              case 'view_details':
+                                Navigator.of(context).pop();
+                                _showRegistrationDetailsModal(event);
+                                break;
+                              case 'check_attending':
+                                _checkEventAttending(event);
+                                break;
+                            }
+                          },
+                          itemBuilder: (context) {
+                            final items = <PopupMenuEntry<String>>[
+                              PopupMenuItem(
+                                value: 'view_details',
+                                child: Row(
+                                  children: [
+                                    Icon(Icons.list_alt, size: 18),
+                                    SizedBox(width: 8),
+                                    Text('View Details'),
+                                  ],
+                                ),
+                              ),
+                            ];
+                            if (isSuperAdmin) {
+                              items.add(
+                                PopupMenuItem(
+                                  value: 'check_attending',
+                                  child: Row(
+                                    children: [
+                                      Icon(Icons.check_circle_outline, size: 18),
+                                      SizedBox(width: 8),
+                                      Text('Check Attending'),
+                                    ],
+                                  ),
+                                ),
+                              );
+                            }
+                            return items;
+                          },
+                        ),
                         onTap: () {
                           Navigator.of(context).pop();
                           _showRegistrationDetailsModal(event);
@@ -502,6 +527,154 @@ class _EventsPageState extends State<EventsPage> {
         );
       },
     );
+  }
+
+  Future<void> _checkEventAttending(Event event) async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) throw Exception('User not authenticated');
+      final idToken = await user.getIdToken();
+
+      // Show loading dialog
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => AlertDialog(
+          backgroundColor: Colors.grey[900],
+          title: Text('Checking Attending', style: TextStyle(color: Colors.white, fontFamily: 'Cinzel')),
+          content: Row(children: [
+            SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, valueColor: AlwaysStoppedAnimation<Color>(Colors.amber))),
+            SizedBox(width: 12),
+            Expanded(child: Text('Comparing check-ins with Master Logs...', style: TextStyle(color: Colors.white)))
+          ]),
+        ),
+      );
+
+      final resp = await http.post(
+        Uri.parse(AppConfig.verifyEventAttendingUrl),
+        headers: { 'Authorization': 'Bearer $idToken', 'Content-Type': 'application/json' },
+        body: json.encode({ 'eventId': event.id, 'resubmit': false })
+      );
+
+      if (Navigator.of(context).canPop()) Navigator.of(context).pop();
+
+      if (resp.statusCode != 200) {
+        throw Exception('HTTP ${resp.statusCode}: ${resp.body}');
+      }
+
+      final body = json.decode(resp.body) as Map<String, dynamic>;
+      if (body['ok'] != true) throw Exception(body['error'] ?? 'Unknown error');
+
+      final List found = body['found'] ?? [];
+      final List missing = body['missing'] ?? [];
+
+      // Build missing list text
+      String missingList = missing.isEmpty
+          ? 'None'
+          : missing.map((m) => (m['displayName'] ?? m['email'] ?? m['uid'] ?? 'Unknown').toString()).join('\n');
+
+      showDialog(
+        context: context,
+        builder: (_) => AlertDialog(
+          backgroundColor: Colors.grey[900],
+          title: Text('Attending Check Results', style: TextStyle(color: Colors.white, fontFamily: 'Cinzel')),
+          content: SingleChildScrollView(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+              Text('Event: ${event.type}', style: TextStyle(color: Colors.amber)),
+              SizedBox(height: 8),
+              Text('Found in Master Logs: ${found.length}', style: TextStyle(color: Colors.green)),
+              Text('Missing from Master Logs: ${missing.length}', style: TextStyle(color: Colors.redAccent)),
+              SizedBox(height: 12),
+              Text('Missing Players:', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+              SizedBox(height: 6),
+              Container(
+                constraints: BoxConstraints(maxHeight: 200),
+                padding: EdgeInsets.all(8),
+                decoration: BoxDecoration(color: Colors.grey[850], borderRadius: BorderRadius.circular(6), border: Border.all(color: Colors.grey[700]!)),
+                child: Text(missingList, style: TextStyle(color: Colors.white)),
+              ),
+            ]),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.of(context).pop(), child: Text('Close', style: TextStyle(color: Colors.grey))),
+            if (missing.isNotEmpty)
+              TextButton(
+                onPressed: () {
+                  Navigator.of(context).pop();
+                  _resubmitMissingAttending(event);
+                },
+                child: Text('Resubmit Missing', style: TextStyle(color: Colors.amber)),
+              ),
+          ],
+        ),
+      );
+    } catch (e) {
+      showDialog(
+        context: context,
+        builder: (_) => AlertDialog(
+          backgroundColor: Colors.grey[900],
+          title: Text('Error', style: TextStyle(color: Colors.white, fontFamily: 'Cinzel')),
+          content: Text('$e', style: TextStyle(color: Colors.white)),
+          actions: [TextButton(onPressed: () => Navigator.of(context).pop(), child: Text('OK'))],
+        ),
+      );
+    }
+  }
+
+  Future<void> _resubmitMissingAttending(Event event) async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) throw Exception('User not authenticated');
+      final idToken = await user.getIdToken();
+
+      // Show loading dialog
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => AlertDialog(
+          backgroundColor: Colors.grey[900],
+          title: Text('Resubmitting Missing', style: TextStyle(color: Colors.white, fontFamily: 'Cinzel')),
+          content: Row(children: [
+            SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, valueColor: AlwaysStoppedAnimation<Color>(Colors.amber))),
+            SizedBox(width: 12),
+            Expanded(child: Text('Writing rows to the Attending sheet...', style: TextStyle(color: Colors.white)))
+          ]),
+        ),
+      );
+
+      final resp = await http.post(
+        Uri.parse(AppConfig.verifyEventAttendingUrl),
+        headers: { 'Authorization': 'Bearer $idToken', 'Content-Type': 'application/json' },
+        body: json.encode({ 'eventId': event.id, 'resubmit': true })
+      );
+
+      if (Navigator.of(context).canPop()) Navigator.of(context).pop();
+
+      if (resp.statusCode != 200) throw Exception('HTTP ${resp.statusCode}: ${resp.body}');
+      final body = json.decode(resp.body) as Map<String, dynamic>;
+      if (body['ok'] != true) throw Exception(body['error'] ?? 'Unknown error');
+
+      final appended = body['appended'] ?? 0;
+      showDialog(
+        context: context,
+        builder: (_) => AlertDialog(
+          backgroundColor: Colors.grey[900],
+          title: Text('Resubmission Complete', style: TextStyle(color: Colors.white, fontFamily: 'Cinzel')),
+          content: Text('Appended $appended row(s) to the Attending sheet for ${event.type}.', style: TextStyle(color: Colors.white)),
+          actions: [TextButton(onPressed: () => Navigator.of(context).pop(), child: Text('OK', style: TextStyle(color: Colors.amber)))],
+        ),
+      );
+    } catch (e) {
+      showDialog(
+        context: context,
+        builder: (_) => AlertDialog(
+          backgroundColor: Colors.grey[900],
+          title: Text('Error', style: TextStyle(color: Colors.white, fontFamily: 'Cinzel')),
+          content: Text('$e', style: TextStyle(color: Colors.white)),
+          actions: [TextButton(onPressed: () => Navigator.of(context).pop(), child: Text('OK'))],
+        ),
+      );
+    }
   }
 
   Future<void> _loadLocationsAndTypes() async {
@@ -2274,6 +2447,43 @@ class _EventsPageState extends State<EventsPage> {
 
   @override
   Widget build(BuildContext context) {
+    // Show loading screen if events data is still loading
+    if (widget.isEventsLoading || widget.isAdminStatusLoading) {
+      return Scaffold(
+        backgroundColor: Colors.black,
+        appBar: AppBar(
+          title: Text(
+            'Events',
+            style: TextStyle(
+              color: Colors.amber,
+              fontFamily: 'Cinzel',
+              fontSize: 24,
+            ),
+          ),
+          backgroundColor: Colors.grey[900],
+          elevation: 0,
+        ),
+        body: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              CircularProgressIndicator(
+                valueColor: AlwaysStoppedAnimation<Color>(Colors.amber),
+              ),
+              SizedBox(height: 20),
+              Text(
+                widget.isEventsLoading ? 'Loading events...' : 'Loading permissions...',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 16,
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+    
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
@@ -9045,6 +9255,7 @@ class _RegistrationDetailsModalState extends State<_RegistrationDetailsModal> wi
       if (resp.statusCode == 200) {
         final body = json.decode(resp.body);
         if (body['ok'] == true) {
+          if (!mounted) return;
           setState(() {
             _npcCounts = Map<String, int>.from(Map<String, dynamic>.from(body['npcCounts']).map((k, v) => MapEntry(k, (v ?? 0) as int)));
             _cleanupCounts = Map<String, int>.from(Map<String, dynamic>.from(body['cleanupCounts']).map((k, v) => MapEntry(k, (v ?? 0) as int)));
@@ -9078,22 +9289,26 @@ class _RegistrationDetailsModalState extends State<_RegistrationDetailsModal> wi
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
         if (data['ok'] == true) {
+          if (!mounted) return;
           setState(() {
             _registrationData = data;
             _isLoading = false;
           });
         } else {
+          if (!mounted) return;
           setState(() {
             _isLoading = false;
           });
         }
       } else {
+        if (!mounted) return;
         setState(() {
           _isLoading = false;
         });
       }
     } catch (error) {
       print('❌ Error loading registration data: $error');
+      if (!mounted) return;
       setState(() {
         _isLoading = false;
       });

@@ -25,6 +25,8 @@ import 'pages/admin_page.dart';
 import 'pages/new_sheet_page.dart';
 import 'shared/character_cache_service.dart';
 import 'config/app_config.dart';
+import 'shared/impersonation_service.dart';
+import 'shared/admin_cache_service.dart';
 
 final RouteObserver<ModalRoute<void>> routeObserver = RouteObserver<ModalRoute<void>>();
 
@@ -187,7 +189,78 @@ class CrucibleHelperApp extends StatelessWidget {
       title: 'Crucible Helper',
       theme: ThemeData.dark(),
       navigatorObservers: [routeObserver],
-      home: LoginPage(), // Start at the login page
+      home: ImpersonationWrapper(child: LoginPage()), // Start at the login page
+    );
+  }
+}
+
+class ImpersonationWrapper extends StatelessWidget {
+  final Widget child;
+  
+  const ImpersonationWrapper({super.key, required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<bool>(
+      valueListenable: ImpersonationService.listenable,
+      builder: (context, isImpersonating, _) {
+        if (!isImpersonating) {
+          return child;
+        }
+        
+        return Scaffold(
+          body: Column(
+            children: [
+              // Global impersonation banner
+              Container(
+                width: double.infinity,
+                padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                color: Colors.red.withOpacity(0.9),
+                child: Row(
+                  children: [
+                    Icon(Icons.warning, color: Colors.white, size: 16),
+                    SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'IMPERSONATING: ${ImpersonationService.targetEmail ?? ImpersonationService.targetUid}',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 14,
+                        ),
+                      ),
+                    ),
+                    GestureDetector(
+                      onTap: () {
+                        ImpersonationService.stop();
+                        // Navigate back to home page to refresh
+                        Navigator.of(context).pushNamedAndRemoveUntil('/', (route) => false);
+                      },
+                      child: Container(
+                        padding: EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: Colors.orange,
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Text(
+                          'STOP IMPERSONATION',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              // Main content
+              Expanded(child: child),
+            ],
+          ),
+        );
+      },
     );
   }
 }
@@ -207,26 +280,145 @@ class _HomePageState extends State<HomePage> {
   Map<String, bool> eventCheckInStatus = {};
   Map<String, bool> isLoadingRegistrationStatus = {};
   bool _isSuperAdmin = false;
+  
+  // Individual loading states for different components
+  Map<String, bool> _loadingStates = {
+    'character': true,
+    'events': true,
+    'userStructure': true,
+    'adminStatus': true,
+  };
+  
+  // Impersonation state
+  bool _isImpersonating = false;
 
   @override
   void initState() {
     super.initState();
-    fetchCharacter();
-    fetchActiveEvents();
-    _initializeUserStructure();
-    _checkSuperAdminPermissions();
-    // Refresh cache from DB if last_sync is newer
+    // Initialize impersonation status immediately
+    _isImpersonating = ImpersonationService.isImpersonating;
+    _initializeApp();
+  }
+
+  /// Check if a specific component is loaded
+  bool isComponentLoaded(String component) {
+    return !(_loadingStates[component] ?? true);
+  }
+
+  /// Get loading state for events (used by EventsPage)
+  bool get isEventsLoading => _loadingStates['events'] ?? true;
+
+  /// Get loading state for admin status (used by EventsPage)
+  bool get isAdminStatusLoading => _loadingStates['adminStatus'] ?? true;
+
+  /// Mark a loading operation as complete
+  void _markLoadingComplete(String operation) {
+    setState(() {
+      _loadingStates[operation] = false;
+    });
+    print('✅ Completed loading: $operation');
+  }
+
+  /// Initialize all app components
+  Future<void> _initializeApp() async {
+    print('🚀 Starting app initialization...');
+    
+    // Start all initialization tasks
+    _fetchCharacterWithLoading();
+    _fetchActiveEventsWithLoading();
+    _initializeUserStructureWithLoading();
+    _checkSuperAdminPermissionsWithLoading();
+    
+    // Refresh cache from DB if last_sync is newer (non-blocking)
     CharacterCacheService.refreshIfStale().catchError((_) => false);
+    
+    // Set up impersonation callback to refresh character data
+    ImpersonationService.setOnImpersonationChange(() {
+      print('🎭 Impersonation callback triggered - mounted: $mounted');
+      if (mounted) {
+        print('🎭 Calling fetchCharacter from callback');
+        setState(() {
+          _isImpersonating = ImpersonationService.isImpersonating;
+        });
+        fetchCharacter();
+      }
+    });
+    
+    // Listen to impersonation status changes
+    ImpersonationService.listenable.addListener(() {
+      if (mounted) {
+        final wasImpersonating = _isImpersonating;
+        final nowImpersonating = ImpersonationService.isImpersonating;
+        
+        setState(() {
+          _isImpersonating = nowImpersonating;
+        });
+        
+        // If we stopped impersonating, refresh the character data
+        if (wasImpersonating && !nowImpersonating) {
+          print('🔄 HomePage: Impersonation stopped, refreshing character data...');
+          fetchCharacter();
+        }
+      }
+    });
+  }
+
+  /// Wrapper for fetchCharacter that tracks loading state
+  Future<void> _fetchCharacterWithLoading() async {
+    try {
+      await fetchCharacter();
+    } finally {
+      _markLoadingComplete('character');
+    }
+  }
+
+  /// Wrapper for fetchActiveEvents that tracks loading state
+  Future<void> _fetchActiveEventsWithLoading() async {
+    try {
+      await fetchActiveEvents();
+    } finally {
+      _markLoadingComplete('events');
+    }
+  }
+
+  /// Wrapper for _initializeUserStructure that tracks loading state
+  Future<void> _initializeUserStructureWithLoading() async {
+    try {
+      await _initializeUserStructure();
+    } finally {
+      _markLoadingComplete('userStructure');
+    }
+  }
+
+  /// Wrapper for _checkSuperAdminPermissions that tracks loading state
+  Future<void> _checkSuperAdminPermissionsWithLoading() async {
+    try {
+      await _checkSuperAdminPermissions();
+    } finally {
+      _markLoadingComplete('adminStatus');
+    }
   }
 
   Future<void> fetchCharacter() async {
     try {
       final user = FirebaseAuth.instance.currentUser;
-      final email = user?.email;
+      final effectiveUid = ImpersonationService.getEffectiveUid();
+      final email = ImpersonationService.getEffectiveEmail() ?? user?.email;
+      
+      print('🔄 fetchCharacter called - isImpersonating: ${ImpersonationService.isImpersonating}, effectiveUid: $effectiveUid, email: $email');
+      
       if (email == null) {
         throw Exception("User email is null");
       }
 
+      // If impersonating, load from Firestore via API instead of Storage
+      if (ImpersonationService.isImpersonating && effectiveUid != null) {
+        print('🎭 Loading character from API for impersonation');
+        await _loadCharacterFromAPI(effectiveUid);
+        return;
+      }
+
+      // Normal flow: load from Firebase Storage
       final ref = FirebaseStorage.instance.ref().child('users/$email/pc.json');
       final data = await ref.getData();
       if (data != null) {
@@ -246,6 +438,131 @@ class _HomePageState extends State<HomePage> {
       }
     } catch (e) {
       print('Error fetching character JSON: $e');
+    }
+  }
+
+  Future<void> _loadCharacterFromAPI(String targetUid) async {
+    try {
+      print('🎭 _loadCharacterFromAPI called for targetUid: $targetUid');
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) {
+        print('🎭 No user found, returning');
+        return;
+      }
+
+      final idToken = await user.getIdToken();
+      final baseUrl = AppConfig.getCharactersUrl;
+      final url = '$baseUrl?impersonateUid=$targetUid';
+      print('🎭 Making API call to: $url');
+      
+      final response = await http.get(
+        Uri.parse(url),
+        headers: {
+          'Authorization': 'Bearer $idToken',
+          'Content-Type': 'application/json',
+        },
+      );
+      
+      print('🎭 API response status: ${response.statusCode}');
+
+      if (response.statusCode == 200) {
+        final responseData = json.decode(response.body);
+        if (responseData['ok'] == true) {
+          final characters = responseData['characters'] as List<dynamic>;
+          if (characters.isNotEmpty) {
+            // Load the first character (or we could let user choose)
+            final characterData = characters.first;
+            final characterId = characterData['id'] as String;
+            
+            // Load the full character data from Firestore
+            await _loadCharacterDetails(characterId);
+            
+            // Download PC.json in background (non-blocking for better UX)
+            // Only download if we don't already have character data loaded
+            final targetEmail = ImpersonationService.getEffectiveEmail();
+            if (targetEmail != null && cachedCharacter == null) {
+              print('🔄 Starting background PC.json sync for $targetEmail');
+              _downloadPCJsonForImpersonation(targetEmail).catchError((error) {
+                print('⚠️ Background PC.json sync failed: $error');
+                // Don't block the UI for this
+              });
+            } else if (cachedCharacter != null) {
+              print('✅ Character already loaded, skipping PC.json download');
+            }
+          }
+        }
+      }
+    } catch (e) {
+      print('Error loading character from API: $e');
+    }
+  }
+
+  Future<void> _loadCharacterDetails(String characterId) async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) return;
+
+      final idToken = await user.getIdToken();
+      final response = await http.get(
+        Uri.parse('${AppConfig.getCharacterByIdUrl}?characterId=$characterId'),
+        headers: {
+          'Authorization': 'Bearer $idToken',
+          'Content-Type': 'application/json',
+        },
+      );
+
+      if (response.statusCode == 200) {
+        final responseData = json.decode(response.body);
+        if (responseData['ok'] == true) {
+          final characterJson = responseData['character'];
+          final fetchedCharacter = Character.fromJson(characterJson);
+          setState(() {
+            character = fetchedCharacter;
+          });
+          
+          // Set the global cachedCharacter so other pages can access it
+          cachedCharacter = fetchedCharacter;
+          print('✅ Character loaded from Firestore via API');
+        }
+      }
+    } catch (e) {
+      print('Error loading character details: $e');
+    }
+  }
+
+  Future<void> _downloadPCJsonForImpersonation(String targetEmail) async {
+    try {
+      print('🔄 Starting background PC.json sync for $targetEmail');
+      
+      // For impersonation, we need to use a backend function to download the PC.json
+      // since the admin doesn't have direct access to the target user's Storage
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) return;
+
+      final idToken = await user.getIdToken();
+      
+      // Add timeout to prevent hanging
+      final response = await http.get(
+        Uri.parse('${AppConfig.syncCharacterToFirestoreUrl}?email=${Uri.encodeQueryComponent(targetEmail)}'),
+        headers: {
+          'Authorization': 'Bearer $idToken',
+          'Content-Type': 'application/json',
+        },
+      ).timeout(Duration(seconds: 10));
+
+      if (response.statusCode == 200) {
+        final responseData = json.decode(response.body);
+        if (responseData['ok'] == true) {
+          print('✅ PC.json synced to Firestore for impersonation');
+        } else {
+          print('⚠️ PC.json sync returned error: ${responseData['error']}');
+        }
+      } else {
+        print('⚠️ PC.json sync failed with status: ${response.statusCode}');
+      }
+    } catch (e) {
+      print('⚠️ Background PC.json sync failed: $e');
+      // This is non-blocking, so we don't rethrow the error
     }
   }
 
@@ -449,35 +766,120 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _checkSuperAdminPermissions() async {
-    try {
-      final user = FirebaseAuth.instance.currentUser;
-      if (user == null) return;
-
-      final idToken = await user.getIdToken();
-      final response = await http.post(
-        Uri.parse(AppConfig.checkSuperAdminUrl),
-        headers: {
-          'Authorization': 'Bearer $idToken',
-          'Content-Type': 'application/json',
-        },
-        body: json.encode({'uid': user.uid}),
-      );
-
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
+    // Use cached admin status service for immediate UI update
+    await AdminCacheService.getAdminStatus(
+      onStatusUpdate: (isAdmin) {
         if (mounted) {
           setState(() {
-            _isSuperAdmin = data['isSuperAdmin'] ?? false;
+            _isSuperAdmin = isAdmin;
           });
         }
-      }
-    } catch (e) {
-      // ignore
-    }
+      },
+    );
+  }
+
+  /// Build loading screen with progress indicators
+
+  /// Build impersonation banner
+  Widget _buildImpersonationBanner() {
+    if (!_isImpersonating) return SizedBox.shrink();
+    
+    final targetEmail = ImpersonationService.targetEmail ?? 'Unknown User';
+    final targetUid = ImpersonationService.targetUid ?? '';
+    
+    return Container(
+      width: double.infinity,
+      padding: EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [Colors.orange.shade800, Colors.red.shade700],
+          begin: Alignment.centerLeft,
+          end: Alignment.centerRight,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.3),
+            blurRadius: 4,
+            offset: Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          Icon(
+            Icons.person_search,
+            color: Colors.white,
+            size: 20,
+          ),
+          SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  '🎭 IMPERSONATING USER',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 12,
+                    letterSpacing: 1.2,
+                  ),
+                ),
+                SizedBox(height: 2),
+                Text(
+                  targetEmail,
+                  style: TextStyle(
+                    color: Colors.white.withOpacity(0.9),
+                    fontSize: 14,
+                  ),
+                ),
+                if (targetUid.isNotEmpty)
+                  Text(
+                    'UID: ${targetUid.substring(0, 8)}...',
+                    style: TextStyle(
+                      color: Colors.white.withOpacity(0.7),
+                      fontSize: 10,
+                      fontFamily: 'monospace',
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          TextButton.icon(
+            onPressed: () {
+              ImpersonationService.stop();
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text('✅ Stopped impersonating user'),
+                  backgroundColor: Colors.green,
+                  duration: Duration(seconds: 2),
+                ),
+              );
+            },
+            icon: Icon(Icons.close, color: Colors.white, size: 16),
+            label: Text(
+              'STOP',
+              style: TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+                fontSize: 12,
+              ),
+            ),
+            style: TextButton.styleFrom(
+              backgroundColor: Colors.black.withOpacity(0.2),
+              padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              minimumSize: Size(0, 0),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
+    
     final isWide = MediaQuery.of(context).size.width >= 900;
     return Scaffold(
       backgroundColor: Colors.black,
@@ -535,7 +937,10 @@ class _HomePageState extends State<HomePage> {
                 IconButton(
                   tooltip: 'Events',
                   icon: Icon(Icons.calendar_today),
-                  onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => EventsPage())),
+                  onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => EventsPage(
+                    isEventsLoading: isEventsLoading,
+                    isAdminStatusLoading: isAdminStatusLoading,
+                  ))),
                 ),
                 IconButton(
                   tooltip: 'Rules',
@@ -554,12 +959,18 @@ class _HomePageState extends State<HomePage> {
         ),
       ),
       body: SafeArea(
-        child: isWide
-            ? Row(
-                children: [
+        child: Column(
+          children: [
+            // Impersonation banner (always at top)
+            _buildImpersonationBanner(),
+            // Main content
+            Expanded(
+              child: isWide
+                  ? Row(
+                      children: [
                   NavigationRail(
                     backgroundColor: Colors.black,
-                    selectedIndex: -1,
+                    selectedIndex: null,
                     labelType: NavigationRailLabelType.all,
                     leading: Padding(
                       padding: const EdgeInsets.symmetric(vertical: 12.0),
@@ -599,7 +1010,10 @@ class _HomePageState extends State<HomePage> {
                           Navigator.push(context, MaterialPageRoute(builder: (_) => DeathTimerPage()));
                           break;
                         case 2:
-                          Navigator.push(context, MaterialPageRoute(builder: (_) => EventsPage()));
+                          Navigator.push(context, MaterialPageRoute(builder: (_) => EventsPage(
+                            isEventsLoading: isEventsLoading,
+                            isAdminStatusLoading: isAdminStatusLoading,
+                          )));
                           break;
                         case 3:
                           Navigator.push(context, MaterialPageRoute(builder: (_) => RulesPage()));
@@ -612,11 +1026,14 @@ class _HomePageState extends State<HomePage> {
                       }
                     },
                   ),
-                  const VerticalDivider(width: 1),
-                  Expanded(child: _buildHomeCenterContent()),
-                ],
-              )
-            : _buildHomeCenterContent(),
+                        const VerticalDivider(width: 1),
+                        Expanded(child: _buildHomeCenterContent()),
+                      ],
+                    )
+                  : _buildHomeCenterContent(),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -682,7 +1099,10 @@ class _HomePageState extends State<HomePage> {
                       onTap: () {
                         Navigator.push(
                           context,
-                          MaterialPageRoute(builder: (_) => EventsPage()),
+                          MaterialPageRoute(builder: (_) => EventsPage(
+                            isEventsLoading: isEventsLoading,
+                            isAdminStatusLoading: isAdminStatusLoading,
+                          )),
                         );
                       },
                       child: Padding(
@@ -873,32 +1293,16 @@ class _QRScannerPageState extends State<QRScannerPage> {
   }
 
   Future<void> _checkSuperAdminPermissions() async {
-    try {
-      final user = _auth.currentUser;
-      if (user == null) return;
-
-      final idToken = await user.getIdToken();
-      
-      final response = await http.post(
-        Uri.parse(AppConfig.checkSuperAdminUrl),
-        headers: {
-          'Authorization': 'Bearer $idToken',
-          'Content-Type': 'application/json',
-        },
-        body: json.encode({
-          'uid': user.uid,
-        }),
-      );
-
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
-        setState(() {
-          isSuperAdmin = data['isSuperAdmin'] ?? false;
-        });
-      }
-    } catch (error) {
-      print('❌ Error checking super admin permissions: $error');
-    }
+    // Use cached admin status service for immediate UI update
+    await AdminCacheService.getAdminStatus(
+      onStatusUpdate: (isAdmin) {
+        if (mounted) {
+          setState(() {
+            isSuperAdmin = isAdmin;
+          });
+        }
+      },
+    );
   }
 
   void _openCameraScanner() {
@@ -1364,8 +1768,14 @@ class _QRScannerPageState extends State<QRScannerPage> {
       }
 
       final idToken = await user.getIdToken();
+      final effectiveUid = ImpersonationService.getEffectiveUid();
+      final baseUrl = AppConfig.getCharactersUrl;
+      final url = effectiveUid != null && effectiveUid != user.uid 
+          ? '$baseUrl?impersonateUid=$effectiveUid'
+          : baseUrl;
+      
       final charactersResponse = await http.get(
-        Uri.parse(AppConfig.getCharactersUrl),
+        Uri.parse(url),
         headers: {
           'Authorization': 'Bearer $idToken',
           'Content-Type': 'application/json',
@@ -2618,6 +3028,9 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
   bool _isEditMode = false;
   bool _isSuperAdmin = false;
   
+  // Impersonation state
+  bool _isImpersonating = false;
+  
   // Track unspent points for edit mode
   int _originalUnspentAffinityPoints = 0;
   int _originalUnspentBuildPoints = 0;
@@ -2636,6 +3049,27 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
     _loadSkillSortPreference();
     _loadUnsubmittedAdvancement();
     _checkSuperAdminPermissions();
+    
+    // Initialize impersonation status
+    _isImpersonating = ImpersonationService.isImpersonating;
+    
+    // Listen to impersonation status changes
+    ImpersonationService.listenable.addListener(() {
+      if (mounted) {
+        final wasImpersonating = _isImpersonating;
+        final nowImpersonating = ImpersonationService.isImpersonating;
+        
+        setState(() {
+          _isImpersonating = nowImpersonating;
+        });
+        
+        // If we stopped impersonating, navigate back to home to refresh
+        if (wasImpersonating && !nowImpersonating) {
+          print('🔄 ProfilePage: Impersonation stopped, navigating to home...');
+          Navigator.of(context).pushNamedAndRemoveUntil('/', (route) => false);
+        }
+      }
+    });
 
     RulesService.loadCachedRules().then((cached) {
       if (cached == null) {
@@ -2660,31 +3094,16 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
   }
 
   Future<void> _checkSuperAdminPermissions() async {
-    try {
-      final user = FirebaseAuth.instance.currentUser;
-      if (user == null) return;
-
-      final idToken = await user.getIdToken();
-      final response = await http.post(
-        Uri.parse(AppConfig.checkSuperAdminUrl),
-        headers: {
-          'Authorization': 'Bearer $idToken',
-          'Content-Type': 'application/json',
-        },
-        body: json.encode({'uid': user.uid}),
-      );
-
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
+    // Use cached admin status service for immediate UI update
+    await AdminCacheService.getAdminStatus(
+      onStatusUpdate: (isAdmin) {
         if (mounted) {
           setState(() {
-            _isSuperAdmin = data['isSuperAdmin'] ?? false;
+            _isSuperAdmin = isAdmin;
           });
         }
-      }
-    } catch (e) {
-      // ignore
-    }
+      },
+    );
   }
 
   // SharedPreferences functions for unsubmitted advancement
@@ -4427,8 +4846,9 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
       final idToken = await user.getIdToken();
       final character = widget.character;
       
-      // Use the current authenticated user's UID
-      final playerUid = user.uid;
+      // Use effective UID (impersonated user if impersonating, otherwise current user)
+      final playerUid = ImpersonationService.getEffectiveUid() ?? user.uid;
+      print('🔄 Calling calculate character for UID: $playerUid (impersonating: ${ImpersonationService.isImpersonating})');
 
       final response = await http.post(
         Uri.parse(AppConfig.calculateCharacterUrl),
@@ -4511,8 +4931,8 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
 
     try {
       final user = FirebaseAuth.instance.currentUser;
-      final email = user?.email;
-      if (email == null) {
+      final effectiveEmail = ImpersonationService.getEffectiveEmail() ?? user?.email;
+      if (effectiveEmail == null) {
         if (context.mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text('❌ User not authenticated')),
@@ -4521,13 +4941,30 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
         return;
       }
 
-      final ref = FirebaseStorage.instance.ref().child('users/$email/pc.json');
-      final data = await ref.getData();
+      print('🔄 Syncing character data for: $effectiveEmail (impersonating: ${ImpersonationService.isImpersonating})');
       
-      if (data != null) {
-        final jsonString = utf8.decode(data);
-        final jsonMap = json.decode(jsonString);
-        final newCharacter = Character.fromJson(jsonMap);
+      Character? newCharacter;
+      
+      // If impersonating, use API to get character data (can't access Storage directly)
+      if (ImpersonationService.isImpersonating) {
+        final effectiveUid = ImpersonationService.getEffectiveUid();
+        if (effectiveUid != null) {
+          print('🎭 Loading impersonated character via API for sync');
+          newCharacter = await _loadCharacterForSync(effectiveUid);
+        }
+      } else {
+        // Normal flow: load from Firebase Storage
+        final ref = FirebaseStorage.instance.ref().child('users/$effectiveEmail/pc.json');
+        final data = await ref.getData();
+        
+        if (data != null) {
+          final jsonString = utf8.decode(data);
+          final jsonMap = json.decode(jsonString);
+          newCharacter = Character.fromJson(jsonMap);
+        }
+      }
+      
+      if (newCharacter != null) {
         
         // Always trigger calculateCharacter function on refresh
         await _callCalculateCharacterFunction();
@@ -4539,7 +4976,7 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
             Navigator.pushReplacement(
               context,
               MaterialPageRoute(
-                builder: (_) => CharacterSheetPage(character: newCharacter),
+                builder: (_) => CharacterSheetPage(character: newCharacter!),
               ),
             );
             ScaffoldMessenger.of(context).showSnackBar(
@@ -4577,6 +5014,61 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
           ),
         );
       }
+    }
+  }
+
+  Future<Character?> _loadCharacterForSync(String targetUid) async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) {
+        print('❌ No user found for sync');
+        return null;
+      }
+
+      // Get character list first
+      final idToken = await user.getIdToken();
+      final response = await http.get(
+        Uri.parse('${AppConfig.getCharactersUrl}?impersonateUid=$targetUid'),
+        headers: {
+          'Authorization': 'Bearer $idToken',
+          'Content-Type': 'application/json',
+        },
+      );
+
+      if (response.statusCode == 200) {
+        final responseData = json.decode(response.body);
+        if (responseData['ok'] == true && responseData['characters'] != null) {
+          final characters = responseData['characters'] as List;
+          if (characters.isNotEmpty) {
+            // Get the character ID and load full details
+            final characterData = characters[0];
+            final characterId = characterData['id'] as String;
+            
+            // Load full character details
+            final detailResponse = await http.get(
+              Uri.parse('${AppConfig.getCharacterByIdUrl}?characterId=$characterId'),
+              headers: {
+                'Authorization': 'Bearer $idToken',
+                'Content-Type': 'application/json',
+              },
+            );
+
+            if (detailResponse.statusCode == 200) {
+              final detailData = json.decode(detailResponse.body);
+              if (detailData['ok'] == true) {
+                final characterJson = detailData['character'];
+                return Character.fromJson(characterJson);
+              }
+            }
+          }
+        }
+      }
+      
+      print('❌ Failed to load character for sync - Status: ${response.statusCode}');
+      return null;
+    } catch (e) {
+      print('❌ Error loading character for sync: $e');
+      return null;
     }
   }
 
@@ -4808,9 +5300,94 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
           ),
         ],
       ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(16),
-        child: Column(
+      body: Column(
+        children: [
+          // Impersonation banner (always at top)
+          if (_isImpersonating)
+            Container(
+              width: double.infinity,
+              padding: EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [Colors.orange.shade800, Colors.red.shade700],
+                  begin: Alignment.centerLeft,
+                  end: Alignment.centerRight,
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.3),
+                    blurRadius: 4,
+                    offset: Offset(0, 2),
+                  ),
+                ],
+              ),
+              child: Row(
+                children: [
+                  Icon(
+                    Icons.person_search,
+                    color: Colors.white,
+                    size: 20,
+                  ),
+                  SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          '🎭 IMPERSONATING USER',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 12,
+                            letterSpacing: 1.2,
+                          ),
+                        ),
+                        SizedBox(height: 2),
+                        Text(
+                          ImpersonationService.targetEmail ?? 'Unknown User',
+                          style: TextStyle(
+                            color: Colors.white.withOpacity(0.9),
+                            fontSize: 14,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  TextButton.icon(
+                    onPressed: () {
+                      ImpersonationService.stop();
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text('✅ Stopped impersonating user'),
+                          backgroundColor: Colors.green,
+                          duration: Duration(seconds: 2),
+                        ),
+                      );
+                    },
+                    icon: Icon(Icons.close, color: Colors.white, size: 16),
+                    label: Text(
+                      'STOP',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 12,
+                      ),
+                    ),
+                    style: TextButton.styleFrom(
+                      backgroundColor: Colors.black.withOpacity(0.2),
+                      padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                      minimumSize: Size(0, 0),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          // Main content
+          Expanded(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(16),
+              child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             // Character Header Layout
@@ -5094,10 +5671,10 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
                           Expanded(
                             child: RichText(
                               text: TextSpan(
-                                style: Theme.of(context).textTheme.bodyMedium!.copyWith(
+                                style: (Theme.of(context).textTheme.bodyMedium?.copyWith(
                                   color: hasUnsubmittedChanges ? Colors.amber : Colors.white,
                                   decoration: TextDecoration.none,
-                                ),
+                                )) ?? const TextStyle(color: Colors.white, decoration: TextDecoration.none),
                                 children: [
                                   TextSpan(
                                     text: skill.name,
@@ -5148,7 +5725,10 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
             }),
           ],
         ),
-      ),
+              ),
+            ),
+          ],
+        ),
     );
   }
 
@@ -7508,6 +8088,9 @@ class _ProfilePageState extends State<ProfilePage> {
   String? _discordChannelName;
   static const String _prefsDiscordLinkedKey = 'discord_linked';
   static const String _prefsDiscordDisplayKey = 'discord_display';
+  
+  // Impersonation state
+  bool _isImpersonating = false;
 
   Future<void> _disconnectDiscord() async {
     // Show loading while disconnecting
@@ -7567,6 +8150,27 @@ class _ProfilePageState extends State<ProfilePage> {
     _loadCachedDiscordLinkState();
     fetchCharacterFromFirebase();
     _refreshDiscordLinkStatus();
+    
+    // Initialize impersonation status
+    _isImpersonating = ImpersonationService.isImpersonating;
+    
+    // Listen to impersonation status changes
+    ImpersonationService.listenable.addListener(() {
+      if (mounted) {
+        final wasImpersonating = _isImpersonating;
+        final nowImpersonating = ImpersonationService.isImpersonating;
+        
+        setState(() {
+          _isImpersonating = nowImpersonating;
+        });
+        
+        // If we stopped impersonating, refresh character data
+        if (wasImpersonating && !nowImpersonating) {
+          print('🔄 ProfilePage (Discord): Impersonation stopped, refreshing character data...');
+          fetchCharacterFromFirebase();
+        }
+      }
+    });
   }
 
   Future<void> _loadCachedDiscordLinkState() async {
@@ -7586,10 +8190,10 @@ class _ProfilePageState extends State<ProfilePage> {
   Future<bool> fetchCharacterFromFirebase() async {
     try {
       final user = _auth.currentUser;
-      final email = user?.email;
-      if (email == null) return false;
+      final effectiveEmail = ImpersonationService.getEffectiveEmail() ?? user?.email;
+      if (effectiveEmail == null) return false;
 
-      final ref = FirebaseStorage.instance.ref().child('users/$email/pc.json');
+      final ref = FirebaseStorage.instance.ref().child('users/$effectiveEmail/pc.json');
       final data = await ref.getData();
 
       if (data != null) {
@@ -7604,7 +8208,7 @@ class _ProfilePageState extends State<ProfilePage> {
         print('✅ Character updated');
         
         // Also try to download QR code (don't fail if it doesn't exist)
-        _downloadQRCode(email);
+        _downloadQRCode(effectiveEmail);
         
         return true;
       }
@@ -7910,14 +8514,100 @@ class _ProfilePageState extends State<ProfilePage> {
   @override
   Widget build(BuildContext context) {
     final user = _auth.currentUser;
+    final effectiveEmail = ImpersonationService.getEffectiveEmail() ?? user?.email;
 
     return Scaffold(
       appBar: AppBar(title: Text('Profile')),
-      body: Center(
+      body: Column(
+        children: [
+          // Impersonation banner (always at top)
+          if (_isImpersonating)
+            Container(
+              width: double.infinity,
+              padding: EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [Colors.orange.shade800, Colors.red.shade700],
+                  begin: Alignment.centerLeft,
+                  end: Alignment.centerRight,
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.3),
+                    blurRadius: 4,
+                    offset: Offset(0, 2),
+                  ),
+                ],
+              ),
+              child: Row(
+                children: [
+                  Icon(
+                    Icons.person_search,
+                    color: Colors.white,
+                    size: 20,
+                  ),
+                  SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          '🎭 IMPERSONATING USER',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 12,
+                            letterSpacing: 1.2,
+                          ),
+                        ),
+                        SizedBox(height: 2),
+                        Text(
+                          ImpersonationService.targetEmail ?? 'Unknown User',
+                          style: TextStyle(
+                            color: Colors.white.withOpacity(0.9),
+                            fontSize: 14,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  TextButton.icon(
+                    onPressed: () {
+                      ImpersonationService.stop();
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text('✅ Stopped impersonating user'),
+                          backgroundColor: Colors.green,
+                          duration: Duration(seconds: 2),
+                        ),
+                      );
+                    },
+                    icon: Icon(Icons.close, color: Colors.white, size: 16),
+                    label: Text(
+                      'STOP',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 12,
+                      ),
+                    ),
+                    style: TextButton.styleFrom(
+                      backgroundColor: Colors.black.withOpacity(0.2),
+                      padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                      minimumSize: Size(0, 0),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          // Main content
+          Expanded(
+            child: Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Text('Signed in as ${user?.email ?? "Unknown"}', style: TextStyle(fontSize: 18)),
+            Text('Signed in as ${effectiveEmail ?? "Unknown"}', style: TextStyle(fontSize: 18)),
             SizedBox(height: 20),
             
             // Character Info Section
@@ -7948,7 +8638,7 @@ class _ProfilePageState extends State<ProfilePage> {
               SizedBox(height: 20),
               
               // QR Code Display
-              _QRCodeDisplay(email: _auth.currentUser?.email ?? ''),
+              _QRCodeDisplay(email: effectiveEmail ?? ''),
               SizedBox(height: 20),
             ] else ...[
               Text('No character data available', style: TextStyle(color: Colors.grey)),
@@ -8039,6 +8729,9 @@ class _ProfilePageState extends State<ProfilePage> {
             ),
           ],
         ),
+            ),
+          ),
+        ],
       ),
     );
   }

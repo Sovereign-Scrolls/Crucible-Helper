@@ -3,7 +3,10 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'dart:convert';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:http/http.dart' as http;
 import '../shared/character_cache_service.dart';
+import '../shared/impersonation_service.dart';
 
 class NewSheetPage extends StatefulWidget {
   const NewSheetPage({super.key});
@@ -15,7 +18,10 @@ class _NewSheetPageState extends State<NewSheetPage> {
   Map<String, dynamic>? _snapshot;
   bool _loading = true;
   String _selectedSkillSort = 'Alphabetical';
-  bool _isEditMode = false;
+  final bool _isEditMode = false;
+  
+  // Impersonation state
+  bool _isImpersonating = false;
 
   // Quick weapon stats
   int _hth1 = 1; // totals including base and penalties
@@ -33,22 +39,263 @@ class _NewSheetPageState extends State<NewSheetPage> {
     super.initState();
     _load();
     _loadSkillSortPreference();
+    
+    // Initialize impersonation status
+    _isImpersonating = ImpersonationService.isImpersonating;
+    
+    // Listen to impersonation status changes
+    ImpersonationService.listenable.addListener(() {
+      if (mounted) {
+        final wasImpersonating = _isImpersonating;
+        final nowImpersonating = ImpersonationService.isImpersonating;
+        
+        setState(() {
+          _isImpersonating = nowImpersonating;
+        });
+        
+        // Reload data if impersonation status changed
+        if (wasImpersonating != nowImpersonating) {
+          print('🎭 NewSheetPage: Impersonation status changed, reloading data');
+          _load();
+        }
+        
+        // If we stopped impersonating, navigate back to home
+        if (wasImpersonating && !nowImpersonating) {
+          print('🔄 NewSheetPage: Impersonation stopped, navigating to home...');
+          Navigator.of(context).pushNamedAndRemoveUntil('/', (route) => false);
+        }
+      }
+    });
   }
 
   Future<void> _load() async {
     setState(() { _loading = true; });
+    
     try {
-      await CharacterCacheService.refreshIfStale();
+      Map<String, dynamic>? snap;
+      
+      // Check if we're impersonating and load appropriate data
+      if (ImpersonationService.isImpersonating) {
+        print('🎭 NewSheetPage: Loading impersonated character data');
+        snap = await _loadImpersonatedCharacterData();
+      } else {
+        print('🔄 NewSheetPage: Loading normal character data');
+        try {
+          await CharacterCacheService.refreshIfStale();
+        } catch (e) {
+          debugPrint('NewSheetPage: refreshIfStale failed: $e');
+        }
+        snap = await CharacterCacheService.loadCachedSnapshot();
+        if (snap != null) {
+          print('🔄 NewSheetPage: Normal cached data keys: ${snap.keys.toList()}');
+          print('🔄 NewSheetPage: Normal character section: ${snap['character']}');
+          print('🔄 NewSheetPage: Normal affinities section: ${snap['affinities']}');
+        }
+      }
+      
+      setState(() { 
+        _snapshot = snap; 
+        _loading = false; 
+      });
+      
+      // Compute weapon quick stats once snapshot available
+      if (snap != null) {
+        _computeWeaponStats(snap);
+        await _loadTierOrder();
+        _computeBodyDr(snap);
+      }
     } catch (e) {
-      debugPrint('NewSheetPage: refreshIfStale failed: $e');
+      print('❌ NewSheetPage: Error loading character data: $e');
+      setState(() { 
+        _snapshot = null; 
+        _loading = false; 
+      });
     }
-    final snap = await CharacterCacheService.loadCachedSnapshot();
-    setState(() { _snapshot = snap; _loading = false; });
-    // Compute weapon quick stats once snapshot available
-    if (snap != null) {
-      _computeWeaponStats(snap);
-      await _loadTierOrder();
-      _computeBodyDr(snap);
+  }
+
+  Future<Map<String, dynamic>?> _loadImpersonatedCharacterData() async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) {
+        print('🎭 NewSheetPage: No user found for impersonation');
+        return null;
+      }
+
+      final targetUid = ImpersonationService.getEffectiveUid();
+      if (targetUid == null) {
+        print('🎭 NewSheetPage: No target UID for impersonation');
+        return null;
+      }
+
+      print('🎭 NewSheetPage: Loading character data for impersonated user: $targetUid');
+      
+      // Use the same approach as the main page - get character ID first, then load full details
+      final idToken = await user.getIdToken();
+      final response = await http.get(
+        Uri.parse('https://us-central1-crucible-helper.cloudfunctions.net/getCharacters?impersonateUid=$targetUid'),
+        headers: {
+          'Authorization': 'Bearer $idToken',
+          'Content-Type': 'application/json',
+        },
+      ).timeout(Duration(seconds: 30));
+
+      if (response.statusCode == 200) {
+        final responseData = json.decode(response.body);
+        if (responseData['ok'] == true && responseData['characters'] != null) {
+          final characters = responseData['characters'] as List;
+          if (characters.isNotEmpty) {
+            // Get the character ID and load full details (same as main page)
+            final characterData = characters[0];
+            final characterId = characterData['id'] as String;
+            print('🎭 NewSheetPage: Got character ID: $characterId, loading full details...');
+            
+            // Parse character number from the ID (format is usually {uid}_{characterNumber})
+            String characterNumber;
+            if (characterId.contains('_')) {
+              characterNumber = characterId.split('_').last;
+            } else {
+              characterNumber = characterId;
+            }
+            print('🎭 NewSheetPage: Using character number: $characterNumber');
+            
+            // Load full character details and build snapshot from Firestore
+            return await _loadImpersonatedCharacterSnapshot(characterNumber, targetUid);
+          }
+        }
+      }
+      
+      print('❌ NewSheetPage: Failed to load impersonated character data - Status: ${response.statusCode}');
+      return null;
+    } catch (e) {
+      print('❌ NewSheetPage: Error loading impersonated character data: $e');
+      return null;
+    }
+  }
+
+  Future<Map<String, dynamic>?> _loadImpersonatedCharacterSnapshot(String characterNumber, String targetUid) async {
+    try {
+      print('🎭 NewSheetPage: Building snapshot for character number $characterNumber in user $targetUid');
+      
+      final db = FirebaseFirestore.instance;
+      final charRef = db.collection('players').doc(targetUid).collection('characters').doc(characterNumber);
+      
+      // Check if character document exists
+      print('🎭 NewSheetPage: Checking path: ${charRef.path}');
+      final charSnap = await charRef.get();
+      if (!charSnap.exists) {
+        print('❌ NewSheetPage: Character document does not exist at path: ${charRef.path}');
+        
+        // Let's try to list what characters do exist for this user
+        final charactersQuery = await db.collection('players').doc(targetUid).collection('characters').get();
+        print('🎭 NewSheetPage: Available characters for user $targetUid:');
+        for (final doc in charactersQuery.docs) {
+          print('  - Character ID: ${doc.id}');
+        }
+        return null;
+      }
+
+      // Build the same structure as CharacterCacheService.fetchCharacterSnapshot
+      final futures = <Future>[];
+      Map<String, dynamic> result = {
+        'character': charSnap.data(),
+      };
+
+      // essence/summary
+      futures.add(charRef.collection('essence').doc('summary').get().then((s) {
+        result['essence'] = s.data() ?? {};
+      }));
+
+      // build (all + Total)
+      futures.add(charRef.collection('build').get().then((s) {
+        final entries = <Map<String, dynamic>>[];
+        Map<String, dynamic>? total;
+        for (final d in s.docs) {
+          if (d.id.toLowerCase() == 'total') {
+            total = d.data();
+          } else {
+            entries.add({'id': d.id, ...d.data()});
+          }
+        }
+        result['build'] = {'entries': entries, 'total': total};
+      }));
+
+      // affinity_points (all + Total)
+      futures.add(charRef.collection('affinity_points').get().then((s) {
+        final entries = <Map<String, dynamic>>[];
+        Map<String, dynamic>? total;
+        for (final d in s.docs) {
+          if (d.id.toLowerCase() == 'total') {
+            total = d.data();
+          } else {
+            entries.add({'id': d.id, ...d.data()});
+          }
+        }
+        result['affinity_points'] = {'entries': entries, 'total': total};
+      }));
+
+      // affinities (tiers)
+      futures.add(charRef.collection('affinities').get().then((aff) async {
+        final affMap = <String, dynamic>{};
+        for (final a in aff.docs) {
+          final tiers = await a.reference.collection('tiers').get();
+          final tierMap = <String, dynamic>{};
+          for (final t in tiers.docs) {
+            tierMap[t.id] = t.data();
+          }
+          affMap[a.id] = tierMap;
+        }
+        result['affinities'] = affMap;
+      }));
+
+      // skills/Total cost only
+      futures.add(charRef.collection('skills').doc('Total').get().then((s) {
+        result['skillsTotal'] = s.data() ?? {};
+      }));
+
+      // skills entries (full skills data)
+      futures.add(charRef.collection('skills').get().then((typesSnap) async {
+        final entries = <Map<String, dynamic>>[];
+        for (final typeDoc in typesSnap.docs) {
+          final typeId = typeDoc.id;
+          if (typeId.toLowerCase() == 'total') continue;
+          try {
+            final itemsSnap = await typeDoc.reference.collection('items').get();
+            for (final item in itemsSnap.docs) {
+              final data = Map<String, dynamic>.from(item.data());
+              data['name'] ??= item.id;
+              data['type'] ??= typeId;
+              // Normalize level to lowercase key alongside existing Level
+              final dynamic rawLevel = data['level'] ?? data['Level'];
+              if (rawLevel is num) data['level'] = rawLevel.toInt();
+              if (rawLevel is String) data['level'] = int.tryParse(rawLevel) ?? 0;
+              entries.add(data);
+            }
+          } catch (_) {
+            // If no items subcollection, fall back to using the type doc as one entry
+            final data = Map<String, dynamic>.from(typeDoc.data());
+            data['name'] ??= typeId;
+            data['type'] ??= typeId;
+            final dynamic rawLevel = data['level'] ?? data['Level'];
+            if (rawLevel is num) data['level'] = rawLevel.toInt();
+            if (rawLevel is String) data['level'] = int.tryParse(rawLevel) ?? 0;
+            entries.add(data);
+          }
+        }
+        result['skillsEntries'] = entries;
+      }));
+
+      await Future.wait(futures);
+
+      print('🎭 NewSheetPage: Successfully built snapshot with keys: ${result.keys.toList()}');
+      print('🎭 NewSheetPage: Character data: ${result['character']}');
+      print('🎭 NewSheetPage: Affinities data: ${result['affinities']}');
+      print('🎭 NewSheetPage: Skills entries count: ${(result['skillsEntries'] as List?)?.length ?? 0}');
+      print('🎭 NewSheetPage: Skills total: ${result['skillsTotal']}');
+      
+      return result;
+    } catch (e) {
+      print('❌ NewSheetPage: Error building impersonated character snapshot: $e');
+      return null;
     }
   }
 
@@ -60,11 +307,99 @@ class _NewSheetPageState extends State<NewSheetPage> {
         title: const Text('New Sheet'),
         backgroundColor: Colors.black,
       ),
-      body: _loading
+      body: Column(
+        children: [
+          // Impersonation banner (always at top)
+          if (_isImpersonating)
+            Container(
+              width: double.infinity,
+              padding: EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [Colors.orange.shade800, Colors.red.shade700],
+                  begin: Alignment.centerLeft,
+                  end: Alignment.centerRight,
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.3),
+                    blurRadius: 4,
+                    offset: Offset(0, 2),
+                  ),
+                ],
+              ),
+              child: Row(
+                children: [
+                  Icon(
+                    Icons.person_search,
+                    color: Colors.white,
+                    size: 20,
+                  ),
+                  SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          '🎭 IMPERSONATING USER',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 12,
+                            letterSpacing: 1.2,
+                          ),
+                        ),
+                        SizedBox(height: 2),
+                        Text(
+                          ImpersonationService.targetEmail ?? 'Unknown User',
+                          style: TextStyle(
+                            color: Colors.white.withOpacity(0.9),
+                            fontSize: 14,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  TextButton.icon(
+                    onPressed: () {
+                      ImpersonationService.stop();
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text('✅ Stopped impersonating user'),
+                          backgroundColor: Colors.green,
+                          duration: Duration(seconds: 2),
+                        ),
+                      );
+                    },
+                    icon: Icon(Icons.close, color: Colors.white, size: 16),
+                    label: Text(
+                      'STOP',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 12,
+                      ),
+                    ),
+                    style: TextButton.styleFrom(
+                      backgroundColor: Colors.black.withOpacity(0.2),
+                      padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                      minimumSize: Size(0, 0),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          // Main content
+          Expanded(
+            child: _loading
           ? const Center(child: CircularProgressIndicator())
           : _snapshot == null
               ? const Center(child: Text('No character data found'))
               : _buildContent(),
+          ),
+        ],
+      ),
     );
   }
 
@@ -81,12 +416,12 @@ class _NewSheetPageState extends State<NewSheetPage> {
   }
 
   Widget _buildContent() {
-    final character = (_snapshot!['character'] ?? {}) as Map<String, dynamic>;
-    final essence = (_snapshot!['essence'] ?? {}) as Map<String, dynamic>;
-    final build = (_snapshot!['build'] ?? {}) as Map<String, dynamic>;
-    final ap = (_snapshot!['affinity_points'] ?? {}) as Map<String, dynamic>;
-    final affinities = (_snapshot!['affinities'] ?? {}) as Map<String, dynamic>;
-    final skillsTotalDoc = (_snapshot!['skillsTotal'] ?? const {}) as Map<String, dynamic>;
+    final character = Map<String, dynamic>.from(_snapshot!['character'] ?? {});
+    final essence = Map<String, dynamic>.from(_snapshot!['essence'] ?? {});
+    final build = Map<String, dynamic>.from(_snapshot!['build'] ?? {});
+    final ap = Map<String, dynamic>.from(_snapshot!['affinity_points'] ?? {});
+    final affinities = Map<String, dynamic>.from(_snapshot!['affinities'] ?? {});
+    final skillsTotalDoc = Map<String, dynamic>.from(_snapshot!['skillsTotal'] ?? const {});
 
     final buildTotal = _asInt((build['total'] ?? const {})['amount']);
     final skillsCost = _asInt(skillsTotalDoc['Cost']);
@@ -99,7 +434,7 @@ class _NewSheetPageState extends State<NewSheetPage> {
     int affinitiesCost = 0;
     final List<Map<String, dynamic>> affinityCostRows = [];
     affinities.forEach((name, tiers) {
-      final total = (tiers['Total'] ?? const {}) as Map<String, dynamic>;
+      final total = Map<String, dynamic>.from(tiers['Total'] ?? const {});
       final cost = _asInt(total['Cost'] ?? total['cost'] ?? total['Amount'] ?? total['amount']);
       affinitiesCost += cost;
       affinityCostRows.add({'name': name.toString(), 'cost': cost, 'level': _asInt(total['Level'] ?? total['level'])});
@@ -243,7 +578,7 @@ class _NewSheetPageState extends State<NewSheetPage> {
                   padding: const EdgeInsets.only(top: 16.0, bottom: 8.0),
                   child: Text(groupName, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white)),
                 ),
-              ...skills.map((s) => _skillRow(s)).toList(),
+              ...skills.map((s) => _skillRow(s)),
             ];
           }),
         ],
@@ -265,7 +600,7 @@ class _NewSheetPageState extends State<NewSheetPage> {
       try {
         return value.map((k, v) => MapEntry(k.toString(), v));
       } catch (_) {
-        try { return Map<String, dynamic>.from(value as Map); } catch (_) {}
+        try { return Map<String, dynamic>.from(value); } catch (_) {}
       }
     }
     return <String, dynamic>{};
@@ -280,7 +615,7 @@ class _NewSheetPageState extends State<NewSheetPage> {
         final double itemWidth = (constraints.maxWidth - totalSpacing) / columns;
 
         final entries = affinities.entries.toList()..sort((a, b) => a.key.compareTo(b.key));
-        final character = (_snapshot?['character'] ?? const {}) as Map<String, dynamic>;
+        final character = Map<String, dynamic>.from(_snapshot?['character'] ?? const {});
         final currentTier = (character['cultivationTier'] ?? '').toString();
         final freeAffinity = (character['free_affinity'] ?? character['freeAffinity'] ?? '').toString();
         final tiersOrder = _tierOrder.isNotEmpty ? _tierOrder : ['Iron','Silver','Gold','Jade','Saint','Sovereign'];
@@ -391,7 +726,7 @@ class _NewSheetPageState extends State<NewSheetPage> {
     }
 
     // Tier order and current tier
-    final character = (_snapshot?['character'] ?? const {}) as Map<String, dynamic>;
+    final character = Map<String, dynamic>.from(_snapshot?['character'] ?? const {});
     final currentTier = (character['cultivationTier'] ?? '').toString();
     final tiersOrder = _tierOrder.isNotEmpty ? _tierOrder : ['Iron','Silver','Gold','Jade','Saint','Sovereign'];
     final currentIdx = tiersOrder.indexWhere((t) => t.toLowerCase() == currentTier.toLowerCase());
@@ -465,7 +800,7 @@ class _NewSheetPageState extends State<NewSheetPage> {
                         Padding(padding: const EdgeInsets.all(8), child: Text(r['tier'] as String)),
                         Padding(padding: const EdgeInsets.all(8), child: Text('${r['level']}', textAlign: TextAlign.center)),
                         Padding(padding: const EdgeInsets.all(8), child: Text('${r['cost']}', textAlign: TextAlign.right)),
-                      ])).toList(),
+                      ])),
                       TableRow(
                         decoration: BoxDecoration(color: Colors.grey[700]),
                         children: [
@@ -607,22 +942,22 @@ class _NewSheetPageState extends State<NewSheetPage> {
 
   void _showDRInfo(BuildContext context) {
     // Build DR breakdown using snapshot essence + current tier
-    final character = (_snapshot?['character'] ?? const {}) as Map<String, dynamic>;
+    final character = Map<String, dynamic>.from(_snapshot?['character'] ?? const {});
     final currentTier = (character['cultivationTier'] ?? '').toString();
     final tiers = (_tierOrder.isNotEmpty ? _tierOrder : ['Iron','Silver','Gold','Jade','Saint','Sovereign'])
         .where((t){ final k=t.toLowerCase(); return k!='mortal' && k!='moral'; })
         .toList();
     final currentIdx = tiers.indexWhere((t) => t.toLowerCase() == currentTier.toLowerCase());
     final listed = currentIdx >= 0 ? tiers.sublist(0, currentIdx + 1).reversed.toList() : <String>[];
-    final essence = (_snapshot?['essence'] ?? const {}) as Map<String, dynamic>;
-    final bodyByTier = (essence['bodyEssenceByTier'] ?? const {}) as Map<String, dynamic>;
+    final essence = Map<String, dynamic>.from(_snapshot?['essence'] ?? const {});
+    final bodyByTier = Map<String, dynamic>.from(essence['bodyEssenceByTier'] ?? const {});
 
     int drFromBodyLevel(int level) => level ~/ 3; // e.g., 6 -> 2
 
     // Precompute body DR per tier
     final Map<String, int> bodyDR = {};
     for (final t in tiers) {
-      final v = (bodyByTier[t] as Map<String, dynamic>?) ?? const {};
+      final v = Map<String, dynamic>.from(bodyByTier[t] ?? const {});
       final lvl = _asInt(v['Level'] ?? v['level']);
       bodyDR[t] = drFromBodyLevel(lvl);
     }
@@ -714,7 +1049,7 @@ class _NewSheetPageState extends State<NewSheetPage> {
   }
 
   void _showWeaponBreakdown(String title, String label) {
-    final character = (_snapshot?['character'] ?? const {}) as Map<String, dynamic>;
+    final character = Map<String, dynamic>.from(_snapshot?['character'] ?? const {});
     final currentTier = (character['cultivationTier'] ?? '').toString();
     final tiersOrder = (_tierOrder.isNotEmpty ? _tierOrder : ['Iron','Silver','Gold','Jade','Saint','Sovereign'])
         .where((t){ final k=t.toLowerCase(); return k!='mortal' && k!='moral'; })
@@ -769,7 +1104,7 @@ class _NewSheetPageState extends State<NewSheetPage> {
   Widget _buildEssence(Map<String, dynamic> essence) {
     final base = essence['base'] ?? 0;
     final hp = essence['hitPointsFromAdvancements'] ?? 0;
-    final body = (essence['bodyEssenceByTier'] ?? const {}) as Map<String, dynamic>;
+    final body = Map<String, dynamic>.from(essence['bodyEssenceByTier'] ?? const {});
     final total = essence['total'] ?? 0;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -780,11 +1115,11 @@ class _NewSheetPageState extends State<NewSheetPage> {
           const SizedBox(height: 4),
           const Text('Body Essence by Tier:', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
           ...body.entries.map((e) {
-            final tierData = (e.value as Map<String, dynamic>? ?? const {});
+            final tierData = Map<String, dynamic>.from(e.value ?? const {});
             final level = _asInt(tierData['Level'] ?? tierData['level']);
             final essenceAmt = _asInt(tierData['Essence'] ?? tierData['essence']);
             return Text('${e.key}: $essenceAmt (Level $level)', style: const TextStyle(color: Colors.white));
-          }).toList(),
+          }),
         ],
         Text('Total: $total', style: const TextStyle(color: Colors.white)),
       ],
@@ -795,7 +1130,7 @@ class _NewSheetPageState extends State<NewSheetPage> {
     final base = _asInt(essence['base']);
     final hp = _asInt(essence['hitPointsFromAdvancements']);
     final total = _asInt(essence['total']);
-    final body = (essence['bodyEssenceByTier'] ?? const {}) as Map<String, dynamic>;
+    final body = Map<String, dynamic>.from(essence['bodyEssenceByTier'] ?? const {});
     showDialog(
       context: context,
       builder: (_) => AlertDialog(
@@ -815,11 +1150,11 @@ class _NewSheetPageState extends State<NewSheetPage> {
                 const Text('None')
               else
                 ...body.entries.map((e) {
-                  final tierData = (e.value as Map<String, dynamic>? ?? const {});
+                  final tierData = Map<String, dynamic>.from(e.value ?? const {});
                   final level = _asInt(tierData['Level'] ?? tierData['level']);
                   final essenceAmt = _asInt(tierData['Essence'] ?? tierData['essence']);
                   return Text('${e.key}: $essenceAmt (Level $level)');
-                }).toList(),
+                }),
               const Divider(height: 16),
               Text('Total Essence: $total', style: const TextStyle(fontWeight: FontWeight.bold)),
             ],
@@ -944,7 +1279,8 @@ class _NewSheetPageState extends State<NewSheetPage> {
             Expanded(
               child: RichText(
                 text: TextSpan(
-                  style: Theme.of(context).textTheme.bodyMedium!.copyWith(color: Colors.white, decoration: TextDecoration.none),
+                  style: (Theme.of(context).textTheme.bodyMedium?.copyWith(color: Colors.white, decoration: TextDecoration.none))
+                      ?? const TextStyle(color: Colors.white, decoration: TextDecoration.none),
                   children: [
                     TextSpan(text: s['name']!, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
                     TextSpan(text: ' (${s['type']} • Level ', style: const TextStyle(fontSize: 14)),
@@ -994,12 +1330,12 @@ class _NewSheetPageState extends State<NewSheetPage> {
     for (final path in paths) {
       final cached = box?.get(path);
       if (cached is Map) {
-        try { return Map<String, dynamic>.from(cached as Map); } catch (_) {}
+        try { return Map<String, dynamic>.from(cached); } catch (_) {}
       }
       if (cached is String && cached.isNotEmpty) {
         try {
           final decoded = jsonDecode(cached);
-          if (decoded is Map) return Map<String, dynamic>.from(decoded as Map);
+          if (decoded is Map) return Map<String, dynamic>.from(decoded);
         } catch (_) {}
       }
     }
@@ -1031,16 +1367,20 @@ class _NewSheetPageState extends State<NewSheetPage> {
     final rulesText = (rule['rules'] ?? rule['Rules'] ?? rule['Description'] ?? s['description'] ?? '').toString();
     final baseBuild = _asInt(rule['Build'] ?? rule['BaseBuild'] ?? 0);
 
-    List<int> _calcCosts(int base, int lvl) {
+    List<int> calcCosts(int base, int lvl) {
       if (base <= 0 || lvl <= 0) return List<int>.filled(lvl, 1);
       return List<int>.generate(lvl, (i) => (base - i).clamp(1, base));
     }
 
-    final costs = _calcCosts(baseBuild, level);
+    final costs = calcCosts(baseBuild, level);
     final totalCost = costs.fold<int>(0, (sum, c) => sum + c);
     final hasVerbals = verbal.isNotEmpty;
 
     final usesChecked = List<bool>.filled(level, false);
+
+    // Load existing note (from cache, then Firestore if missing)
+    final String initialNote = await _loadSkillNote(type, name) ?? '';
+    final TextEditingController noteController = TextEditingController(text: initialNote);
 
     showDialog(
       context: context,
@@ -1093,14 +1433,14 @@ class _NewSheetPageState extends State<NewSheetPage> {
                 const SizedBox(height: 10),
                 Expanded(
                   child: DefaultTabController(
-                    length: hasVerbals ? 3 : 2,
+                    length: hasVerbals ? 4 : 3,
                     initialIndex: 0,
                     child: Column(
                       children: [
                         TabBar(
                           tabs: hasVerbals
-                              ? const [Tab(text: 'Verbal'), Tab(text: 'Rules'), Tab(text: 'Cost')]
-                              : const [Tab(text: 'Rules'), Tab(text: 'Cost')],
+                              ? const [Tab(text: 'Verbal'), Tab(text: 'Rules'), Tab(text: 'Cost'), Tab(text: 'Notes')]
+                              : const [Tab(text: 'Rules'), Tab(text: 'Cost'), Tab(text: 'Notes')],
                           labelColor: Colors.white,
                         ),
                         Expanded(
@@ -1124,6 +1464,19 @@ class _NewSheetPageState extends State<NewSheetPage> {
                                         textAlign: TextAlign.center,
                                       ),
                                     ),
+                                    Padding(
+                                      padding: const EdgeInsets.all(8),
+                                      child: TextField(
+                                        controller: noteController,
+                                        minLines: 6,
+                                        maxLines: null,
+                                        decoration: const InputDecoration(
+                                          labelText: 'Notes',
+                                          border: OutlineInputBorder(),
+                                          hintText: 'Write your notes about this skill here...'
+                                        ),
+                                      ),
+                                    ),
                                   ]
                                 : [
                                     SingleChildScrollView(
@@ -1139,6 +1492,19 @@ class _NewSheetPageState extends State<NewSheetPage> {
                                         textAlign: TextAlign.center,
                                       ),
                                     ),
+                                    Padding(
+                                      padding: const EdgeInsets.all(8),
+                                      child: TextField(
+                                        controller: noteController,
+                                        minLines: 6,
+                                        maxLines: null,
+                                        decoration: const InputDecoration(
+                                          labelText: 'Notes',
+                                          border: OutlineInputBorder(),
+                                          hintText: 'Write your notes about this skill here...'
+                                        ),
+                                      ),
+                                    ),
                                   ],
                           ),
                         ),
@@ -1150,6 +1516,13 @@ class _NewSheetPageState extends State<NewSheetPage> {
             ),
           ),
           actions: [
+            TextButton(
+              onPressed: () async {
+                await _saveSkillNote(type, name, noteController.text.trim());
+                Navigator.of(context).pop();
+              },
+              child: const Text('Save Notes'),
+            ),
             TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Close')),
           ],
         );
@@ -1189,9 +1562,9 @@ class _NewSheetPageState extends State<NewSheetPage> {
 
       // Derive Attack level from affinities (Total.Level)
       int attackLevel = 0;
-      final affinities = (snap['affinities'] ?? const {}) as Map<String, dynamic>;
-      final attackEntry = (affinities['Attack'] ?? affinities['attack'] ?? const {}) as Map<String, dynamic>;
-      final attackTotal = (attackEntry['Total'] ?? const {}) as Map<String, dynamic>;
+      final affinities = Map<String, dynamic>.from(snap['affinities'] ?? const {});
+      final attackEntry = Map<String, dynamic>.from(affinities['Attack'] ?? affinities['attack'] ?? const {});
+      final attackTotal = Map<String, dynamic>.from(attackEntry['Total'] ?? const {});
       attackLevel = _asInt(attackTotal['Level'] ?? attackTotal['level']);
 
       // Compute totals including base and ascension penalties for CURRENT tier
@@ -1247,19 +1620,19 @@ class _NewSheetPageState extends State<NewSheetPage> {
   }
 
   void _computeBodyDr(Map<String, dynamic> snap) {
-    final character = (snap['character'] ?? const {}) as Map<String, dynamic>;
+    final character = Map<String, dynamic>.from(snap['character'] ?? const {});
     final currentTier = (character['cultivationTier'] ?? '').toString();
     final tiers = (_tierOrder.isNotEmpty ? _tierOrder : ['Iron','Silver','Gold','Jade','Saint','Sovereign'])
         .where((t){ final k=t.toLowerCase(); return k!='mortal' && k!='moral'; })
         .toList();
     final currentIdx = tiers.indexWhere((t) => t.toLowerCase() == currentTier.toLowerCase());
-    final essence = (snap['essence'] ?? const {}) as Map<String, dynamic>;
-    final bodyByTier = (essence['bodyEssenceByTier'] ?? const {}) as Map<String, dynamic>;
+    final essence = Map<String, dynamic>.from(snap['essence'] ?? const {});
+    final bodyByTier = Map<String, dynamic>.from(essence['bodyEssenceByTier'] ?? const {});
 
     int drFromBodyLevel(int level) => level ~/ 3;
     final Map<String, int> bodyDR = {};
     for (final t in tiers) {
-      final v = (bodyByTier[t] as Map<String, dynamic>?) ?? const {};
+      final v = Map<String, dynamic>.from(bodyByTier[t] ?? const {});
       final lvl = _asInt(v['Level'] ?? v['level']);
       bodyDR[t] = drFromBodyLevel(lvl);
     }
@@ -1366,6 +1739,59 @@ class _NewSheetPageState extends State<NewSheetPage> {
         ],
       ),
     );
+  }
+
+  // Load/save skill notes (cached + Firestore), per character/skill
+  Future<String?> _loadSkillNote(String type, String skillName) async {
+    final boxName = 'skillNotes';
+    if (!Hive.isBoxOpen(boxName)) { try { await Hive.openBox(boxName); } catch (_) {} }
+    final box = Hive.isBoxOpen(boxName) ? Hive.box(boxName) : null;
+    final key = await _composeSkillNoteKey(type, skillName);
+    final cached = box?.get(key);
+    if (cached is String) return cached;
+    try {
+      final doc = await _skillDocRef(type, skillName).get();
+      final data = doc.data();
+      final note = (data != null) ? (data['Notes'] ?? data['notes'] ?? '') : '';
+      if (note is String) { await box?.put(key, note); return note; }
+    } catch (_) {}
+    return null;
+  }
+
+  Future<void> _saveSkillNote(String type, String skillName, String note) async {
+    final boxName = 'skillNotes';
+    if (!Hive.isBoxOpen(boxName)) { try { await Hive.openBox(boxName); } catch (_) {} }
+    final box = Hive.isBoxOpen(boxName) ? Hive.box(boxName) : null;
+    final key = await _composeSkillNoteKey(type, skillName);
+    try { await box?.put(key, note); } catch (_) {}
+    try { await _skillDocRef(type, skillName).set({'Notes': note}, SetOptions(merge: true)); } catch (_) {}
+  }
+
+  Future<String> _composeSkillNoteKey(String type, String skillName) async {
+    final path = _snapshot?['characterRefPath']?.toString();
+    if (path != null && path.contains('/')) return '$path|$type|$skillName|note';
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? 'unknown';
+    final charNum = (_snapshot?['character']?['characterNumber'] ?? 'unknown').toString();
+    return 'players/$uid/characters/$charNum|$type|$skillName|note';
+  }
+
+  DocumentReference<Map<String, dynamic>> _skillDocRef(String type, String skillName) {
+    final path = _snapshot?['characterRefPath']?.toString();
+    String uid;
+    String charNum;
+    if (path != null) {
+      final parts = path.split('/');
+      uid = parts.length >= 2 ? parts[1] : (FirebaseAuth.instance.currentUser?.uid ?? 'unknown');
+      charNum = parts.length >= 4 ? parts[3] : (_snapshot?['character']?['characterNumber'] ?? 'unknown').toString();
+    } else {
+      uid = FirebaseAuth.instance.currentUser?.uid ?? 'unknown';
+      charNum = (_snapshot?['character']?['characterNumber'] ?? 'unknown').toString();
+    }
+    return FirebaseFirestore.instance
+        .collection('players').doc(uid)
+        .collection('characters').doc(charNum)
+        .collection('skills').doc(type)
+        .collection('items').doc(skillName);
   }
 }
 

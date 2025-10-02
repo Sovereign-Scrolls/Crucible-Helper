@@ -98,6 +98,168 @@ exports.updateShiftAssignment = onRequest(async (req, res) => {
     return res.status(500).json({ ok: false, error: 'server_error' });
   }
 });
+
+// Grant check-in permission (super admin only)
+exports.grantCheckInPermission = onRequest(async (req, res) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
+  try {
+    if (!req.headers.authorization) return res.status(401).json({ ok: false, error: 'Missing authorization header' });
+    const idToken = req.headers.authorization.split(' ')[1];
+    const decoded = await getAuth().verifyIdToken(idToken);
+    const requesterUid = decoded.uid;
+    if (!(await isSuperAdmin(requesterUid))) return res.status(403).json({ ok: false, error: 'Must be super admin' });
+    const { targetUid, eventId, global } = req.body || {};
+    if (!targetUid) return res.status(400).json({ ok: false, error: 'targetUid required' });
+    if (global === true) {
+      await db.collection('roles').doc('checkin').collection('global').doc(targetUid).set({ grantedAt: admin.firestore.FieldValue.serverTimestamp(), grantedBy: requesterUid });
+    } else if (eventId) {
+      await db.collection('roles').doc('checkin').collection('events').doc(eventId).collection('members').doc(targetUid).set({ grantedAt: admin.firestore.FieldValue.serverTimestamp(), grantedBy: requesterUid });
+    } else {
+      return res.status(400).json({ ok: false, error: 'Provide eventId or set global=true' });
+    }
+    return res.status(200).json({ ok: true });
+  } catch (e) {
+    console.error('grantCheckInPermission error:', e);
+    return res.status(500).json({ ok: false, error: 'server_error', message: e.message });
+  }
+});
+
+// Revoke check-in permission (super admin only)
+exports.revokeCheckInPermission = onRequest(async (req, res) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
+  try {
+    if (!req.headers.authorization) return res.status(401).json({ ok: false, error: 'Missing authorization header' });
+    const idToken = req.headers.authorization.split(' ')[1];
+    const decoded = await getAuth().verifyIdToken(idToken);
+    const requesterUid = decoded.uid;
+    if (!(await isSuperAdmin(requesterUid))) return res.status(403).json({ ok: false, error: 'Must be super admin' });
+    const { targetUid, eventId, global } = req.body || {};
+    if (!targetUid) return res.status(400).json({ ok: false, error: 'targetUid required' });
+    if (global === true) {
+      await db.collection('roles').doc('checkin').collection('global').doc(targetUid).delete();
+    } else if (eventId) {
+      await db.collection('roles').doc('checkin').collection('events').doc(eventId).collection('members').doc(targetUid).delete();
+    } else {
+      return res.status(400).json({ ok: false, error: 'Provide eventId or set global=true' });
+    }
+    return res.status(200).json({ ok: true });
+  } catch (e) {
+    console.error('revokeCheckInPermission error:', e);
+    return res.status(500).json({ ok: false, error: 'server_error', message: e.message });
+  }
+});
+
+// List check-in permissions (super admin only)
+exports.listCheckInPermissions = onRequest(async (req, res) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
+  try {
+    if (!req.headers.authorization) return res.status(401).json({ ok: false, error: 'Missing authorization header' });
+    const idToken = req.headers.authorization.split(' ')[1];
+    const decoded = await getAuth().verifyIdToken(idToken);
+    const requesterUid = decoded.uid;
+    if (!(await isSuperAdmin(requesterUid))) return res.status(403).json({ ok: false, error: 'Must be super admin' });
+    const { eventId } = req.query;
+    const globalSnap = await db.collection('roles').doc('checkin').collection('global').get();
+    const global = globalSnap.docs.map(d => ({ uid: d.id, ...d.data() }));
+    let eventMembers = [];
+    if (eventId) {
+      const evSnap = await db.collection('roles').doc('checkin').collection('events').doc(String(eventId)).collection('members').get();
+      eventMembers = evSnap.docs.map(d => ({ uid: d.id, ...d.data() }));
+    }
+    return res.status(200).json({ ok: true, global, eventMembers });
+  } catch (e) {
+    console.error('listCheckInPermissions error:', e);
+    return res.status(500).json({ ok: false, error: 'server_error', message: e.message });
+  }
+});
+
+// List users (basic) for admin selection (super admin only)
+exports.listUsersBasic = onRequest(async (req, res) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') { res.status(204).send(''); return; }
+  try {
+    if (!req.headers.authorization) return res.status(401).json({ ok: false, error: 'Missing authorization header' });
+    const idToken = req.headers.authorization.split(' ')[1];
+    const decoded = await getAuth().verifyIdToken(idToken);
+    const requesterUid = decoded.uid;
+    if (!(await isSuperAdmin(requesterUid))) return res.status(403).json({ ok: false, error: 'Must be super admin' });
+
+    const q = ((req.query.q || '').toString() || '').toLowerCase();
+    const limitParam = parseInt((req.query.limit || '500').toString(), 10);
+    const maxResults = Math.max(1, Math.min(1000, isNaN(limitParam) ? 500 : limitParam));
+
+    const users = [];
+    let nextPageToken = undefined;
+    while (users.length < maxResults) {
+      const page = await getAuth().listUsers(1000, nextPageToken);
+      for (const u of page.users) {
+        const email = (u.email || '').toLowerCase();
+        const displayName = u.displayName || null;
+        if (!q || email.includes(q)) {
+          users.push({ uid: u.uid, email: u.email || null, displayName });
+          if (users.length >= maxResults) break;
+        }
+      }
+      nextPageToken = page.pageToken;
+      if (!nextPageToken) break;
+    }
+
+    // Try to attach a primary character number per user (best effort)
+    for (let i = 0; i < users.length; i++) {
+      const { uid } = users[i];
+      try {
+        const charsSnap = await db.collection('players').doc(uid).collection('characters').get();
+        let chosen = null;
+        charsSnap.forEach((doc) => {
+          const id = doc.id || '';
+          // prefer numeric, pick smallest; fallback to 'main'; else any
+          const asNum = parseInt(id, 10);
+          if (!isNaN(asNum)) {
+            if (chosen == null || (!isNaN(parseInt(chosen, 10)) && asNum < parseInt(chosen, 10))) chosen = id;
+            if (isNaN(parseInt(chosen || '', 10))) chosen = id;
+          } else if (!chosen) {
+            chosen = id; // take first non-numeric if nothing else
+          }
+        });
+        if (chosen) users[i].characterNumber = chosen;
+      } catch (e) {
+        // ignore; leave without characterNumber
+      }
+    }
+
+    // Sort by character number ascending, then email
+    users.sort((a, b) => {
+      const aNum = parseInt(a.characterNumber || '', 10);
+      const bNum = parseInt(b.characterNumber || '', 10);
+      const aIsNum = !isNaN(aNum);
+      const bIsNum = !isNaN(bNum);
+      if (aIsNum && bIsNum) {
+        if (aNum !== bNum) return aNum - bNum;
+      } else if (aIsNum) {
+        return -1;
+      } else if (bIsNum) {
+        return 1;
+      }
+      return (a.email || '').localeCompare(b.email || '');
+    });
+
+    return res.status(200).json({ ok: true, users });
+  } catch (e) {
+    console.error('listUsersBasic error:', e);
+    return res.status(500).json({ ok: false, error: 'server_error', message: e.message });
+  }
+});
 // (imports and initialization moved to top)
 // Discord OAuth: Get authorization URL
 exports.getDiscordAuthorizeUrl = onRequest(async (req, res) => {
@@ -2613,6 +2775,20 @@ exports.calculateCharacter = onRequest(async (req, res) => {
       return res.status(403).json({ ok: false, error: 'insufficient_permissions', message: 'You can only calculate your own characters unless you are a super admin' });
     }
 
+    // Ensure character structure exists before trying to calculate
+    console.log(`🏗️ Ensuring character structure exists for player ${uid}, character ${characterNumber}`);
+    try {
+      await ensureCharacterStructure(uid, String(characterNumber));
+      console.log(`✅ Character structure verified/created for ${uid}/${characterNumber}`);
+    } catch (structureError) {
+      console.error(`❌ Failed to ensure character structure: ${structureError.message}`);
+      return res.status(500).json({ 
+        ok: false, 
+        error: 'structure_initialization_failed', 
+        message: `Failed to initialize character structure: ${structureError.message}` 
+      });
+    }
+
     // Fetch advancement rows for this character
     const advRef = db.collection('players').doc(uid).collection('characters').doc(String(characterNumber)).collection('advancement');
     const advSnap = await advRef.get();
@@ -2868,11 +3044,44 @@ exports.calculateCharacter = onRequest(async (req, res) => {
     // Load character free affinity for per-tier first-level-free rule
     const charRootRef = db.collection('players').doc(uid).collection('characters').doc(String(characterNumber));
     let freeAffinityName = '';
+    let characterCultivationTier = '';
     try {
       const cSnap = await charRootRef.get();
       const cData = cSnap.exists ? (cSnap.data() || {}) : {};
       freeAffinityName = String(cData.free_affinity || cData.freeAffinity || '').trim();
+      characterCultivationTier = String(cData.cultivationTier || '').trim();
     } catch (_) {}
+
+    // Add free levels for the free affinity based on character's cultivation tier
+    if (freeAffinityName && characterCultivationTier) {
+      const tierOrder = ['Iron', 'Silver', 'Gold', 'Jade', 'Saint', 'Sovereign'];
+      const currentTierIndex = tierOrder.findIndex(t => t.toLowerCase() === characterCultivationTier.toLowerCase());
+      
+      if (currentTierIndex >= 0) {
+        const freeAffinityKey = freeAffinityName.toLowerCase();
+        
+        // Ensure free affinity entry exists in totals
+        if (!totals.has(freeAffinityKey)) {
+          totals.set(freeAffinityKey, {
+            name: freeAffinityName,
+            tiers: {},
+            Total: { Level: 0, Cost: 0 }
+          });
+        }
+        
+        const freeAgg = totals.get(freeAffinityKey);
+        
+        // Add +1 free level for each tier from Iron up to current tier
+        for (let i = 0; i <= currentTierIndex; i++) {
+          const tierName = tierOrder[i];
+          if (!freeAgg.tiers[tierName]) freeAgg.tiers[tierName] = { Level: 0, Cost: 0 };
+          freeAgg.tiers[tierName].Level += 1; // Add 1 free level
+          freeAgg.Total.Level += 1; // Add to total
+        }
+        
+        console.log(`🎁 Added free ${freeAffinityName} levels: ${currentTierIndex + 1} levels (Iron to ${characterCultivationTier})`);
+      }
+    }
 
     // Compute costs using multiplier and triangular numbers per tier (minus free first level per tier if matches free_affinity)
     const triangular = (n) => (n <= 0 ? 0 : (n * (n + 1)) / 2);
@@ -2919,7 +3128,8 @@ exports.calculateCharacter = onRequest(async (req, res) => {
 
     let written = 0;
     for (const [, agg] of totals.entries()) {
-      const affDocRef = affinitiesCol.doc(agg.name);
+      const sanitizedAffinityName = sanitizeDocIdLocal(agg.name, agg.name);
+      const affDocRef = affinitiesCol.doc(sanitizedAffinityName);
       await affDocRef.set({ name: agg.name, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
       // Write encountered tiers only
       for (const t of Object.keys(agg.tiers)) {
@@ -3067,7 +3277,8 @@ exports.calculateCharacter = onRequest(async (req, res) => {
     };
 
     for (const [skillType, byName] of skillsTotals.entries()) {
-      const typeDocRef = skillsRoot.doc(skillType);
+      const sanitizedSkillType = sanitizeDocIdLocal(skillType, skillType);
+      const typeDocRef = skillsRoot.doc(sanitizedSkillType);
       await typeDocRef.set({ type: skillType, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
       const itemsCol = typeDocRef.collection('items');
 
@@ -3362,7 +3573,8 @@ exports.calculateCharacter = onRequest(async (req, res) => {
         const charSnap = await charDocRef.get();
         const freeAffinity = (charSnap.exists ? (charSnap.data().free_affinity || '') : '') || '';
         if (freeAffinity) {
-          const affDocRef = charDocRef.collection('affinities').doc(freeAffinity);
+          const sanitizedFreeAffinity = sanitizeDocIdLocal(freeAffinity, freeAffinity);
+          const affDocRef = charDocRef.collection('affinities').doc(sanitizedFreeAffinity);
           // Increment Total level by 1 with cost 0
           const totalRef = affDocRef.collection('tiers').doc('Total');
           const totalSnap = await totalRef.get();
@@ -3453,7 +3665,8 @@ exports.calculateCharacter = onRequest(async (req, res) => {
     // Fallback: read from Firestore if not present in this run
     if (Object.keys(bodyLevelsByTier).length === 0) {
       try {
-        const bodyDoc = await charDocRef.collection('affinities').doc('Body').get();
+        const sanitizedBodyName = sanitizeDocIdLocal('Body', 'Body');
+        const bodyDoc = await charDocRef.collection('affinities').doc(sanitizedBodyName).get();
         if (bodyDoc.exists) {
           const tiersSnap = await bodyDoc.ref.collection('tiers').get();
           tiersSnap.forEach(d => {
@@ -3790,6 +4003,22 @@ async function isSuperAdmin(uid) {
     return false;
   }
 }
+
+// Check per-event or global check-in permission
+async function hasCheckInPermission(uid, eventId) {
+  try {
+    // Global permission
+    const globalDoc = await db.collection('roles').doc('checkin').collection('global').doc(uid).get();
+    if (globalDoc.exists) return true;
+    if (eventId) {
+      const evDoc = await db.collection('roles').doc('checkin').collection('events').doc(eventId).collection('members').doc(uid).get();
+      if (evDoc.exists) return true;
+    }
+  } catch (error) {
+    console.error('Error checking check-in permission:', error);
+  }
+  return false;
+}
 // Create a new event
 exports.createEvent = onRequest(async (req, res) => {
   // Enable CORS
@@ -3813,10 +4042,12 @@ exports.createEvent = onRequest(async (req, res) => {
     const decodedToken = await getAuth().verifyIdToken(idToken);
     const uid = decodedToken.uid;
 
-    // Check if user is super admin
+    // Check if user is super admin or has explicit check-in permission
     const isAdmin = await isSuperAdmin(uid);
-    if (!isAdmin) {
-      return res.status(403).json({ ok: false, error: 'User must be super admin' });
+    const { eventId } = req.body || {};
+    const isPermitted = isAdmin || (await hasCheckInPermission(uid, eventId));
+    if (!isPermitted) {
+      return res.status(403).json({ ok: false, error: 'User must be super admin or have check-in permission' });
     }
 
     const { startDate, endDate, locationId, typeId } = req.body;
@@ -7923,19 +8154,38 @@ exports.getCharacters = onRequest(async (req, res) => {
     const decodedToken = await getAuth().verifyIdToken(idToken);
     const uid = decodedToken.uid;
 
-    // Get user's characters from new structure: players/{uid}/characters
-    console.log(`🔍 Looking for characters for user ${uid} in new structure...`);
+    // Check for impersonation parameter
+    const impersonateUid = req.query.impersonateUid;
+    let targetUid = uid;
     
-    const playerRef = db.collection('players').doc(uid);
+    if (impersonateUid && impersonateUid !== uid) {
+      // Check if the requesting user is a super admin using the correct structure
+      const isAdmin = await isSuperAdmin(uid);
+      
+      if (!isAdmin) {
+        return res.status(403).json({ 
+          ok: false, 
+          error: 'Only super admins can impersonate other users' 
+        });
+      }
+      
+      targetUid = impersonateUid;
+      console.log(`🔍 Super admin ${uid} impersonating user ${targetUid}`);
+    }
+
+    // Get user's characters from new structure: players/{targetUid}/characters
+    console.log(`🔍 Looking for characters for user ${targetUid} in new structure...`);
+    
+    const playerRef = db.collection('players').doc(targetUid);
     const playerDoc = await playerRef.get();
     
     if (!playerDoc.exists) {
-      console.log(`❌ Player document not found for user ${uid}`);
+      console.log(`❌ Player document not found for user ${targetUid}`);
       return res.status(200).json({
         ok: true,
         characters: [],
         debug: {
-          searchedForUid: uid,
+          searchedForUid: targetUid,
           playerExists: false,
           message: 'Player document not found'
         }
@@ -7946,12 +8196,12 @@ exports.getCharacters = onRequest(async (req, res) => {
     const charactersSnapshot = await charactersRef.get();
     
     if (charactersSnapshot.empty) {
-      console.log(`❌ No characters found for user ${uid}`);
+      console.log(`❌ No characters found for user ${targetUid}`);
       return res.status(200).json({
         ok: true,
         characters: [],
         debug: {
-          searchedForUid: uid,
+          searchedForUid: targetUid,
           playerExists: true,
           charactersCount: 0,
           message: 'No characters found in player document'
@@ -7962,8 +8212,8 @@ exports.getCharacters = onRequest(async (req, res) => {
     const characters = [];
     charactersSnapshot.forEach(doc => {
       const data = doc.data();
-      // Create character ID in the format expected by the frontend: {uid}_{characterNumber}
-      const characterId = `${uid}_${doc.id}`;
+      // Create character ID in the format expected by the frontend: {targetUid}_{characterNumber}
+      const characterId = `${targetUid}_${doc.id}`;
       characters.push({
         id: characterId, // This is the format the frontend expects
         characterNumber: doc.id, // The actual character number from the document ID
@@ -7974,13 +8224,13 @@ exports.getCharacters = onRequest(async (req, res) => {
       });
     });
 
-    console.log(`📋 Found ${characters.length} characters for user ${uid}`);
+    console.log(`📋 Found ${characters.length} characters for user ${targetUid}`);
 
     return res.status(200).json({
       ok: true,
       characters: characters,
       debug: {
-        searchedForUid: uid,
+        searchedForUid: targetUid,
         playerExists: true,
         charactersCount: characters.length,
         message: 'Characters retrieved successfully'
@@ -8557,9 +8807,21 @@ exports.syncCharacterToFirestore = onRequest(async (req, res) => {
       
       console.log(`✅ Synced character ${characterId} to Firestore for user ${uid}`);
 
+      // Also run calculateCharacter automatically after sync
+      try {
+        const region = process.env.FUNCTIONS_EMULATOR === 'true' ? 'us-central1' : (process.env.GCLOUD_REGION || 'us-central1');
+        const projectId = process.env.GCLOUD_PROJECT || process.env.FIREBASE_CONFIG && JSON.parse(process.env.FIREBASE_CONFIG).projectId || 'crucible-helper';
+        const url = `https://${region}-${projectId}.cloudfunctions.net/calculateCharacter`;
+        const payload = { playerUid: uid, characterNumber: String(characterData.characterNumber || 'main') };
+        const calcResp = await axios.post(url, payload, { headers: { Authorization: `Bearer ${idToken}` } });
+        console.log('🧮 calculateCharacter after sync status:', calcResp.status);
+      } catch (e) {
+        console.error('⚠️ calculateCharacter after sync failed:', e.message || e);
+      }
+
       return res.status(200).json({
         ok: true,
-        message: 'Character synced to Firestore successfully',
+        message: 'Character synced to Firestore successfully (calculate attempted)',
         characterId: characterId,
         characterName: characterData.playerName || 'Unknown'
       });
@@ -9938,6 +10200,211 @@ exports.getEventRegistrations = onRequest(async (req, res) => {
       error: 'server_error',
       message: error.message
     });
+  }
+});
+
+// Verify Master Log "Attending Event" entries for an event's checked-in players and optionally resubmit
+exports.verifyEventAttending = onRequest(async (req, res) => {
+  // Enable CORS
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+
+  // Handle preflight requests
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return;
+  }
+
+  try {
+    // Auth required and must be super admin
+    if (!req.headers.authorization) {
+      return res.status(401).json({ ok: false, error: 'Missing authorization header' });
+    }
+    const idToken = req.headers.authorization.split(' ')[1];
+    const decodedToken = await getAuth().verifyIdToken(idToken);
+    const uid = decodedToken.uid;
+    const isAdmin = await isSuperAdmin(uid);
+    if (!isAdmin) {
+      return res.status(403).json({ ok: false, error: 'User must be super admin' });
+    }
+
+    const { eventId, resubmit, containerDocId } = req.body || {};
+    if (!eventId) {
+      return res.status(400).json({ ok: false, error: 'Event ID is required' });
+    }
+
+    // Load event to compute date range and name
+    const eventDoc = await db.collection('events').doc(eventId).get();
+    if (!eventDoc.exists) {
+      return res.status(404).json({ ok: false, error: 'Event not found' });
+    }
+    const eventData = eventDoc.data() || {};
+    const startDateRaw = eventData.startDate;
+    const endDateRaw = eventData.endDate;
+
+    const parseDateOnly = (v) => {
+      if (!v) return null;
+      const d = new Date(v);
+      return isNaN(d.getTime()) ? null : new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+    };
+    const formatYmd = (d) => d.toISOString().slice(0, 10);
+
+    const startDate = parseDateOnly(startDateRaw);
+    const endDate = parseDateOnly(endDateRaw);
+    if (!startDate || !endDate) {
+      return res.status(400).json({ ok: false, error: 'Event start/end dates are invalid' });
+    }
+    // Candidate dates inclusive between start and end
+    const candidateDates = [];
+    for (let d = new Date(startDate); d <= endDate; d = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1))) {
+      candidateDates.push(formatYmd(d));
+    }
+
+    // Determine event name for sheet row
+    let eventName = eventData.type || 'Unknown Event';
+    if (eventData.registrationActivated && eventData.registrationDetails && eventData.registrationDetails.eventName) {
+      eventName = eventData.registrationDetails.eventName;
+    }
+
+    // Load checked-in players for this event
+    const checkinsSnap = await db.collection('events').doc(eventId).collection('checkins').get();
+    const attendees = [];
+    for (const doc of checkinsSnap.docs) {
+      const playerUid = doc.id;
+      // Resolve email/display name
+      let email = null;
+      let displayName = null;
+      try {
+        const userRecord = await getAuth().getUser(playerUid);
+        email = userRecord.email || null;
+        displayName = userRecord.displayName || null;
+      } catch (e) {
+        const userDoc = await db.collection('users').doc(playerUid).get();
+        if (userDoc.exists) {
+          const u = userDoc.data() || {};
+          email = email || u.email || null;
+          displayName = displayName || u.displayName || null;
+        }
+      }
+      attendees.push({ uid: playerUid, email, displayName });
+    }
+
+    // Load Master Logs from Firestore mirror
+    const logsDocId = (containerDocId || 'root').toString();
+    const masterLogsRef = db.collection('Master Logs').doc(logsDocId).collection('All');
+    const masterLogsSnap = await masterLogsRef.get();
+
+    // Build index by normalized date for reason == 'Attending Event'
+    const normalizeDate = (value) => {
+      if (!value) return '';
+      const v = String(value).trim();
+      if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return v;
+      const dt = new Date(v);
+      if (!isNaN(dt.getTime())) return dt.toISOString().slice(0, 10);
+      const m = v.split('/');
+      if (m.length === 3) {
+        const month = String(parseInt(m[0], 10)).padStart(2, '0');
+        const day = String(parseInt(m[1], 10)).padStart(2, '0');
+        const year = String(parseInt(m[2], 10));
+        if (year && month && day) return `${year}-${month}-${day}`;
+      }
+      return '';
+    };
+    const getFieldValue = (rowObj, candidates) => {
+      for (const k of candidates) {
+        if (Object.prototype.hasOwnProperty.call(rowObj, k)) return rowObj[k];
+      }
+      return undefined;
+    };
+    const emailKeys = [
+      'Player Email', 'Email', 'PlayerEmail', 'Email Address', 'EmailAddress', 'Player E-mail', 'E-mail'
+    ];
+
+    const byDate = new Map();
+    masterLogsSnap.forEach((doc) => {
+      const row = doc.data() || {};
+      const reason = String(row['Advancement Reason'] || row['AdvancementReason'] || '').trim();
+      if (reason.toLowerCase() !== 'attending event') return;
+      const dateStr = normalizeDate(row['Date'] || row['date'] || row['_date']);
+      if (!dateStr) return;
+      if (!byDate.has(dateStr)) byDate.set(dateStr, []);
+      byDate.get(dateStr).push(row);
+    });
+
+    const found = [];
+    const missing = [];
+    for (const a of attendees) {
+      const playerEmail = (a.email || '').toLowerCase();
+      let matched = false;
+      if (playerEmail) {
+        for (const dateStr of candidateDates) {
+          const rows = byDate.get(dateStr) || [];
+          for (const row of rows) {
+            const rowEmail = String(getFieldValue(row, emailKeys) || '').toLowerCase().trim();
+            if (rowEmail && rowEmail === playerEmail) { matched = true; break; }
+          }
+          if (matched) break;
+        }
+      }
+      if (matched) found.push(a); else missing.push(a);
+    }
+
+    let appended = 0;
+    if (resubmit === true && missing.length > 0) {
+      // Prepare Google Sheets API once
+      const auth = new googleapis.auth.GoogleAuth({
+        scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+        keyFile: './service-account-key.json'
+      });
+      const sheets = googleapis.sheets({ version: 'v4', auth });
+
+      // Build rows to append for each missing attendee using their registration details
+      const rowsToAppend = [];
+      for (const m of missing) {
+        if (!m.email) continue; // cannot append without target email
+        // Load registration details for build/AP and attendingAs
+        const regDoc = await db.collection('events').doc(eventId).collection('registrations').doc(m.uid).get();
+        const reg = regDoc.exists ? (regDoc.data() || {}) : {};
+        const attendingAs = reg.attendeeTypeName || 'Unknown';
+        const buildAdjustment = reg.buildForEvent || 0;
+        const apAdjustment = reg.affinityPointsForEvent || 0;
+        rowsToAppend.push([
+          decodedToken.email || 'admin@local', // scanner/admin email
+          new Date().toISOString(),            // timestamp now
+          m.email,                              // player email
+          eventName,                            // event name
+          attendingAs,                          // attending as
+          buildAdjustment,                      // build adj
+          apAdjustment                          // ap adj
+        ]);
+      }
+
+      if (rowsToAppend.length > 0) {
+        const resp = await sheets.spreadsheets.values.append({
+          spreadsheetId: config.google_sheets.checkin_spreadsheet_id,
+          range: `${config.google_sheets.checkin_sheet_name}!A:G`,
+          valueInputOption: 'RAW',
+          insertDataOption: 'INSERT_ROWS',
+          resource: { values: rowsToAppend }
+        });
+        appended = rowsToAppend.length;
+        console.log('Resubmitted check-ins appended:', resp.data && appended);
+      }
+    }
+
+    return res.status(200).json({
+      ok: true,
+      eventId,
+      eventName,
+      candidateDates,
+      found,
+      missing,
+      appended
+    });
+  } catch (error) {
+    console.error('Error verifying event attending:', error);
+    res.status(500).json({ ok: false, error: 'server_error', message: error.message });
   }
 });
 // Manual QR Code Regeneration for all users

@@ -1,6 +1,11 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+    // Helper function to check if user is super admin
+    function isSuperAdmin() {
+      return request.auth != null && 
+             exists(/databases/$(database)/documents/roles/superadmin/members/$(request.auth.uid));
+    }
     // Allow authenticated users to read their own user data
     match /users/{userId} {
       allow read, write: if request.auth != null && request.auth.uid == userId;
@@ -81,19 +86,27 @@ service cloud.firestore {
               }
 
               // Allow authenticated users to read their own player and character data
+              // Super admins can access any player's data
               match /players/{playerId} {
                 // Player doc itself (if needed)
-                allow read: if request.auth != null && request.auth.uid == playerId;
+                allow read: if request.auth != null && (request.auth.uid == playerId || isSuperAdmin());
                 allow write: if false;
 
                 // Characters under the player
                 match /characters/{characterId} {
-                  allow read: if request.auth != null && request.auth.uid == playerId;
+                  allow read: if request.auth != null && (request.auth.uid == playerId || isSuperAdmin());
                   allow write: if false;
+
+                  // Allow owner writes to skills items for Notes (and other fields) only
+                  // Super admins can also write
+                  match /skills/{type}/items/{skillId} {
+                    allow read: if request.auth != null && (request.auth.uid == playerId || isSuperAdmin());
+                    allow write: if request.auth != null && (request.auth.uid == playerId || isSuperAdmin());
+                  }
 
                   // All nested subcollections and docs needed by the New Sheet
                   match /{subcollection=**}/{docId} {
-                    allow read: if request.auth != null && request.auth.uid == playerId;
+                    allow read: if request.auth != null && (request.auth.uid == playerId || isSuperAdmin());
                     allow write: if false;
                   }
                 }

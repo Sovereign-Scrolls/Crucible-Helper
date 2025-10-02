@@ -119,6 +119,25 @@ class AppConfig {
   static String get getShiftAttendeesUrl =>
     'https://$firebaseRegion-$firebaseProjectId.cloudfunctions.net/getShiftAttendees';
 
+  // Verify event attendance against Master Logs
+  static String get verifyEventAttendingUrl =>
+    'https://$firebaseRegion-$firebaseProjectId.cloudfunctions.net/verifyEventAttending';
+
+  // Permissions management
+  static String get grantCheckInPermissionUrl =>
+    'https://$firebaseRegion-$firebaseProjectId.cloudfunctions.net/grantCheckInPermission';
+  static String get revokeCheckInPermissionUrl =>
+    'https://$firebaseRegion-$firebaseProjectId.cloudfunctions.net/revokeCheckInPermission';
+  static String get listCheckInPermissionsUrl =>
+    'https://$firebaseRegion-$firebaseProjectId.cloudfunctions.net/listCheckInPermissions';
+
+  static String get listUsersBasicUrl =>
+    'https://$firebaseRegion-$firebaseProjectId.cloudfunctions.net/listUsersBasic';
+
+  // Events
+  static String get getEventsUrl =>
+    'https://$firebaseRegion-$firebaseProjectId.cloudfunctions.net/getEvents';
+
   // Development/Production flags
   static const bool isDevelopment = bool.fromEnvironment(
     'DEVELOPMENT_MODE',
