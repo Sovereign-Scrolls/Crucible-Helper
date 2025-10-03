@@ -1085,13 +1085,98 @@ class _NewSheetPageState extends State<NewSheetPage> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Attack Level: $_attackLevel'),
-            Text('Base: $base'),
-            Text('Bonus: $bonus'),
+            // Title
+            Text(
+              '$title • $label',
+              style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 16),
+            
+            // Separator line
+            Container(
+              width: double.infinity,
+              height: 1,
+              color: Colors.grey[600],
+            ),
+            const SizedBox(height: 16),
+            
+            // Base information
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text('Base:', style: TextStyle(fontSize: 16)),
+                Text('$base', style: const TextStyle(fontSize: 16)),
+              ],
+            ),
             const SizedBox(height: 8),
-            const Text('By Tier:', style: TextStyle(fontWeight: FontWeight.bold)),
-            const SizedBox(height: 4),
-            if (lines.isEmpty) const Text('No tiers available') else ...lines.map((s) => Text(s)),
+            
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text('Attack Bonus:', style: TextStyle(fontSize: 16)),
+                Text('$bonus', style: const TextStyle(fontSize: 16)),
+              ],
+            ),
+            const SizedBox(height: 8),
+            
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text('Ascension Adjustment:', style: TextStyle(fontSize: 16)),
+                Text(
+                  '-${(currentIdx - ironIdx).clamp(0, 999) * (isOneHanded ? 1 : 2)}',
+                  style: const TextStyle(fontSize: 16, color: Colors.orange),
+                ),
+              ],
+            ),
+            
+            const SizedBox(height: 16),
+            
+            // Separator line
+            Container(
+              width: double.infinity,
+              height: 1,
+              color: Colors.grey[600],
+            ),
+            const SizedBox(height: 16),
+            
+            // Total
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text('Total:', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                Text('${base + bonus - ((currentIdx - ironIdx).clamp(0, 999) * (isOneHanded ? 1 : 2))}', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              ],
+            ),
+            
+            const SizedBox(height: 16),
+            
+            // Rules section
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.grey[900],
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.grey[700]!),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Rules:',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    isOneHanded 
+                        ? 'The base weapon strike does $base. At each even purchase damage increases by 1.'
+                        : 'The base weapon strike does $base. At every third purchase damage increases by 2.',
+                    style: const TextStyle(fontSize: 14),
+                  ),
+                ],
+              ),
+            ),
           ],
         ),
         actions: [
@@ -1376,6 +1461,18 @@ class _NewSheetPageState extends State<NewSheetPage> {
     final totalCost = costs.fold<int>(0, (sum, c) => sum + c);
     final hasVerbals = verbal.isNotEmpty;
 
+    // Calculate ascension adjustment
+    final character = Map<String, dynamic>.from(_snapshot?['character'] ?? const {});
+    final currentTier = (character['cultivationTier'] ?? '').toString();
+    final tiersOrder = _tierOrder.isNotEmpty ? _tierOrder : ['Iron','Silver','Gold','Jade','Saint','Sovereign'];
+    final ironIdx = tiersOrder.indexWhere((t) => t.toLowerCase() == 'iron');
+    final currentIdx = tiersOrder.indexWhere((t) => t.toLowerCase() == currentTier.toLowerCase());
+    final ascensions = (ironIdx >= 0 && currentIdx >= 0) ? (currentIdx - ironIdx) : 0;
+    final ascensionAdjustment = ascensions; // Each ascension reduces by 1
+    final adjustedLevel = (level - ascensionAdjustment).clamp(0, level);
+    final adjustedCosts = calcCosts(baseBuild, adjustedLevel);
+    final adjustedTotalCost = adjustedCosts.fold<int>(0, (sum, c) => sum + c);
+
     final usesChecked = List<bool>.filled(level, false);
 
     // Load existing note (from cache, then Firestore if missing)
@@ -1458,8 +1555,8 @@ class _NewSheetPageState extends State<NewSheetPage> {
                                     Center(
                                       child: Text(
                                         baseBuild > 0
-                                            ? 'Skill Build Total: $totalCost (${costs.join(" + ")})\nBase Cost: $baseBuild'
-                                            : 'Skill Build Total: $totalCost (${costs.join(" + ")})',
+                                            ? 'Skill Build Total: $adjustedTotalCost (${adjustedCosts.join(" + ")})\nBase Cost: $baseBuild'
+                                            : 'Skill Build Total: $adjustedTotalCost (${adjustedCosts.join(" + ")})',
                                         style: const TextStyle(fontSize: 16),
                                         textAlign: TextAlign.center,
                                       ),
@@ -1486,8 +1583,8 @@ class _NewSheetPageState extends State<NewSheetPage> {
                                     Center(
                                       child: Text(
                                         baseBuild > 0
-                                            ? 'Skill Build Total: $totalCost (${costs.join(" + ")})\nBase Cost: $baseBuild'
-                                            : 'Skill Build Total: $totalCost (${costs.join(" + ")})',
+                                            ? 'Skill Build Total: $adjustedTotalCost (${adjustedCosts.join(" + ")})\nBase Cost: $baseBuild'
+                                            : 'Skill Build Total: $adjustedTotalCost (${adjustedCosts.join(" + ")})',
                                         style: const TextStyle(fontSize: 16),
                                         textAlign: TextAlign.center,
                                       ),

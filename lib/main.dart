@@ -928,7 +928,7 @@ class _HomePageState extends State<HomePage> {
                   onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => QRScannerPage())),
                 ),
                 IconButton(
-                  tooltip: 'Death',
+                  tooltip: 'Timers',
                   icon: Icon(Icons.timer),
                   onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => DeathTimerPage())),
                 ),
@@ -992,7 +992,7 @@ class _HomePageState extends State<HomePage> {
                     ),
                     destinations: [
                       NavigationRailDestination(icon: Icon(Icons.qr_code_scanner), label: Text('Scan')),
-                      NavigationRailDestination(icon: Icon(Icons.timer), label: Text('Death')),
+                      NavigationRailDestination(icon: Icon(Icons.timer), label: Text('Timers')),
                       NavigationRailDestination(icon: Icon(Icons.calendar_today), label: Text('Events')),
                       NavigationRailDestination(icon: Icon(Icons.menu_book), label: Text('Rules')),
                       if (_isSuperAdmin)
@@ -5177,9 +5177,6 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
                 case 'new_sheet':
                   Navigator.push(context, MaterialPageRoute(builder: (_) => NewSheetPage()));
                   break;
-                case 'open_other':
-                  _showOpenOtherCharacterDialog();
-                  break;
                 case 'edit':
                   if (!_isEditMode) {
                     // Check if we can enter edit mode
@@ -5275,16 +5272,6 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
                   ),
                 ),
                 if (_isSuperAdmin)
-                  PopupMenuItem(
-                    value: 'open_other',
-                    child: Row(
-                      children: [
-                        Icon(Icons.manage_search, size: 20),
-                        SizedBox(width: 12),
-                        Text('Open Other Character'),
-                      ],
-                    ),
-                  ),
                 PopupMenuItem(
                   value: 'edit',
                   child: Row(
@@ -5939,189 +5926,7 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
   }
 
   // Helper methods
-  void _showOpenOtherCharacterDialog() {
-    final playerController = TextEditingController();
-    final characterNameController = TextEditingController();
-    final characterNumberController = TextEditingController();
 
-    showDialog(
-      context: context,
-      builder: (BuildContext context) {
-        return AlertDialog(
-          backgroundColor: Colors.grey[900],
-          title: Text('Open Other Character', style: TextStyle(color: Colors.white)),
-          content: SingleChildScrollView(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('Player Name', style: TextStyle(color: Colors.grey)),
-                TextField(controller: playerController, style: TextStyle(color: Colors.white)),
-                SizedBox(height: 12),
-                Text('Character Name', style: TextStyle(color: Colors.grey)),
-                TextField(controller: characterNameController, style: TextStyle(color: Colors.white)),
-                SizedBox(height: 12),
-                Text('Character Number', style: TextStyle(color: Colors.grey)),
-                TextField(controller: characterNumberController, keyboardType: TextInputType.number, style: TextStyle(color: Colors.white)),
-              ],
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: Text('Cancel'),
-            ),
-            ElevatedButton(
-              onPressed: () async {
-                Navigator.of(context).pop();
-                await _openOtherCharacter(
-                  playerName: playerController.text.trim(),
-                  characterName: characterNameController.text.trim(),
-                  characterNumber: characterNumberController.text.trim(),
-                );
-              },
-              child: Text('Search'),
-            ),
-          ],
-        );
-      },
-    );
-  }
-
-  Future<void> _openOtherCharacter({String? playerName, String? characterName, String? characterNumber}) async {
-    try {
-      final user = FirebaseAuth.instance.currentUser;
-      if (user == null) return;
-
-      final idToken = await user.getIdToken();
-
-      final query = {
-        if (playerName != null && playerName.isNotEmpty) 'playerName': playerName,
-        if (characterName != null && characterName.isNotEmpty) 'characterName': characterName,
-        if (characterNumber != null && characterNumber.isNotEmpty) 'characterNumber': characterNumber,
-      };
-
-      if (query.isEmpty) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Enter at least one search field')),
-        );
-        return;
-      }
-
-      final uri = Uri.parse(AppConfig.searchCharactersUrl).replace(queryParameters: query);
-      final response = await http.get(
-        uri,
-        headers: {
-          'Authorization': 'Bearer $idToken',
-          'Content-Type': 'application/json',
-        },
-      );
-
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
-        if (data['ok'] == true) {
-          final results = List<Map<String, dynamic>>.from(data['characters'] as List);
-          // Log to terminal for visibility
-          print('🔎 [openOtherCharacter.search] Found ${results.length} result(s) for query: '
-              'playerName="$playerName" characterName="$characterName" characterNumber="$characterNumber"');
-          if (results.isEmpty) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text('No matching characters found')),
-            );
-            return;
-          }
-          _showCharacterPickDialog(results);
-        } else {
-          throw Exception(data['error'] ?? 'Search failed');
-        }
-      } else {
-        throw Exception('HTTP ${response.statusCode}: ${response.body}');
-      }
-    } catch (e, st) {
-      print('❌ [openOtherCharacter.search] $e');
-      print(st);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error searching: $e')),
-      );
-    }
-  }
-
-  void _showCharacterPickDialog(List<Map<String, dynamic>> results) {
-    showDialog(
-      context: context,
-      builder: (BuildContext context) {
-        return AlertDialog(
-          backgroundColor: Colors.grey[900],
-          title: Text('Select Character', style: TextStyle(color: Colors.white)),
-          content: SizedBox(
-            width: double.maxFinite,
-            child: ListView.builder(
-              shrinkWrap: true,
-              itemCount: results.length,
-              itemBuilder: (context, index) {
-                final c = results[index];
-                final display = '${c['playerName'] ?? 'Unknown'} • ${c['characterName'] ?? 'Character'} • #${c['characterNumber'] ?? '?'}';
-                return ListTile(
-                  title: Text(display, style: TextStyle(color: Colors.white)),
-                  onTap: () async {
-                    Navigator.of(context).pop();
-                    final selectedId = (c['id'] ?? c['characterId'])?.toString();
-                    if (selectedId == null || selectedId.isEmpty) {
-                      if (!mounted) return;
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(content: Text('Invalid character id in result')),
-                      );
-                      return;
-                    }
-                    await _loadAndOpenCharacter(selectedId);
-                  },
-                );
-              },
-            ),
-          ),
-        );
-      },
-    );
-  }
-
-  Future<void> _loadAndOpenCharacter(String characterId) async {
-    try {
-      final user = FirebaseAuth.instance.currentUser;
-      if (user == null) return;
-
-      final idToken = await user.getIdToken();
-      final response = await http.get(
-        Uri.parse(AppConfig.getCharacterByIdUrl).replace(queryParameters: {'characterId': characterId}),
-        headers: {
-          'Authorization': 'Bearer $idToken',
-          'Content-Type': 'application/json',
-        },
-      );
-
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
-        if (data['ok'] == true) {
-          final characterJson = data['character'];
-          final character = Character.fromJson(characterJson);
-          if (!mounted) return;
-          Navigator.of(context).push(
-            MaterialPageRoute(
-              builder: (_) => CharacterSheetPage(character: character),
-            ),
-          );
-        } else {
-          throw Exception(data['error'] ?? 'Failed to load character');
-        }
-      } else {
-        throw Exception('HTTP ${response.statusCode}: ${response.body}');
-      }
-    } catch (e, st) {
-      print('❌ [openOtherCharacter.getById:$characterId] $e');
-      print(st);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error loading character: $e')),
-      );
-    }
-  }
   Widget _StatBox({required String label, required String value, required VoidCallback onTap, bool isEditMode = false}) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.center,
