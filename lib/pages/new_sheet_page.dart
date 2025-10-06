@@ -423,23 +423,26 @@ class _NewSheetPageState extends State<NewSheetPage> {
     final affinities = Map<String, dynamic>.from(_snapshot!['affinities'] ?? {});
     final skillsTotalDoc = Map<String, dynamic>.from(_snapshot!['skillsTotal'] ?? const {});
 
-    final buildTotal = _asInt((build['total'] ?? const {})['amount']);
-    final skillsCost = _asInt(skillsTotalDoc['Cost']);
-    final hpFromAdv = _asInt(essence['hitPointsFromAdvancements']);
-    final hpCost = hpFromAdv * 2;
-    final spentBuild = skillsCost + hpCost;
-    final unspentBuild = buildTotal - spentBuild;
-    final totalAP = _asInt((ap['total'] ?? const {})['amount']);
-    // Sum costs across each affinity's Total
-    int affinitiesCost = 0;
+    // Use Total document data for build calculations
+    final buildTotalDoc = Map<String, dynamic>.from(build['total'] ?? const {});
+    final buildTotal = _asInt(buildTotalDoc['amount']);
+    final skillsCost = _asInt(buildTotalDoc['skills'] ?? skillsTotalDoc['Cost']); // Fallback to old calculation
+    final essenceCost = _asInt(buildTotalDoc['essence'] ?? 0);
+    final spentBuild = _asInt(buildTotalDoc['spent'] ?? 0); // This will be negative
+    final unspentBuild = _asInt(buildTotalDoc['unspent'] ?? 0);
+    // Use Total document data for affinity points calculations
+    final apTotalDoc = Map<String, dynamic>.from(ap['total'] ?? const {});
+    final totalAP = _asInt(apTotalDoc['amount']);
+    final affinitiesCost = _asInt(apTotalDoc['spent'] ?? 0);
+    final unspentAP = _asInt(apTotalDoc['unspent'] ?? 0);
+    
+    // Build affinity cost rows from Total document
     final List<Map<String, dynamic>> affinityCostRows = [];
     affinities.forEach((name, tiers) {
       final total = Map<String, dynamic>.from(tiers['Total'] ?? const {});
       final cost = _asInt(total['Cost'] ?? total['cost'] ?? total['Amount'] ?? total['amount']);
-      affinitiesCost += cost;
       affinityCostRows.add({'name': name.toString(), 'cost': cost, 'level': _asInt(total['Level'] ?? total['level'])});
     });
-    final unspentAP = totalAP - affinitiesCost;
     final totalHP = essence['total'] ?? essence['hitPointsFromAdvancements'] ?? 0;
 
     return SingleChildScrollView(
@@ -488,8 +491,9 @@ class _NewSheetPageState extends State<NewSheetPage> {
                         context,
                         totalBuild: buildTotal,
                         skillsCost: skillsCost,
-                        hitPointsFromAdvancements: hpFromAdv,
-                        hpCost: hpCost,
+                        hitPointsFromAdvancements: _asInt(essence['hitPointsFromAdvancements']),
+                        hpCost: essenceCost,
+                        spent: spentBuild,
                         unspent: unspentBuild,
                       ),
                       bottomTitle: 'Affinity Points',
@@ -645,11 +649,13 @@ class _NewSheetPageState extends State<NewSheetPage> {
                 purchasedSum += lvl;
               }
             }
-            final freeBonus = isFree ? (currentIdx >= 0 ? (currentIdx - ironIdx + 1).clamp(0, 99) : 0) : 0; // +1 per tier from Iron to current
-            final effectiveLevel = (purchasedSum + freeBonus - penalty).clamp(0, 9999);
+            // Get Effective Level from database Total entry
+            final affinityTiers = _toMap(entry.value);
+            final totalData = _toMap(affinityTiers['Total']);
+            final dbEffectiveLevel = _asInt(totalData['Effective Level'] ?? totalData['effectiveLevel'] ?? 0);
 
             return Semantics(
-              label: '$name affinity, effective level $effectiveLevel',
+              label: '$name affinity, effective level $dbEffectiveLevel',
               button: true,
               child: InkWell(
                 onTap: () => _showAffinityBreakdown(
@@ -657,7 +663,7 @@ class _NewSheetPageState extends State<NewSheetPage> {
                   totalLevel: purchasedSum + (isFree ? (currentIdx >= 0 ? (currentIdx - ironIdx + 1).clamp(0, 99) : 0) : 0),
                   penaltyPerTier: penaltyPerTier,
                   penaltyTiers: penaltyTiers,
-                  effectiveLevel: effectiveLevel,
+                  effectiveLevel: dbEffectiveLevel,
                   isFreeAffinity: isFree,
                   freeTiers: isFree ? (ironIdx >= 0 && currentIdx >= ironIdx ? tiersOrder.sublist(ironIdx, currentIdx + 1) : <String>[]) : const <String>[],
                 ),
@@ -677,7 +683,7 @@ class _NewSheetPageState extends State<NewSheetPage> {
                             Expanded(
                               child: Center(
                                 child: Text(
-                                  '$name: $effectiveLevel',
+                                  '$name: $dbEffectiveLevel',
                                   style: const TextStyle(fontSize: 14),
                                 ),
                               ),
@@ -705,18 +711,6 @@ class _NewSheetPageState extends State<NewSheetPage> {
     required bool isFreeAffinity,
     required List<String> freeTiers,
   }) async {
-    // Load multiplier from Rules DB
-    double multiplier = 1.0;
-    try {
-      final doc = await FirebaseFirestore.instance.collection('Rules').doc('Affinities').collection('All').doc(name).get();
-      final data = doc.data();
-      if (data != null) {
-        final m = data['Multiplier'] ?? data['multiplier'] ?? data['Multipler'];
-        if (m is num) multiplier = m.toDouble();
-        if (m is String) multiplier = double.tryParse(m) ?? multiplier;
-      }
-    } catch (_) {}
-
     // Gather tier levels for this affinity from cached snapshot
     final affinities = _toMap(_snapshot?['affinities']);
     final entry = _toMap(affinities[name]);
@@ -725,32 +719,76 @@ class _NewSheetPageState extends State<NewSheetPage> {
       tiersMap[e.key] = _toMap(e.value);
     }
 
+    // Get data from Total entry in database
+    final total = Map<String, dynamic>.from(tiersMap['Total'] ?? const {});
+    final dbTotalLevel = _asInt(total['Level'] ?? total['level']);
+    final dbTotalCost = _asInt(total['Cost'] ?? total['cost']);
+    final dbAscensionAdjustment = _asInt(total['Ascension Adjustment'] ?? total['ascensionAdjustment'] ?? 0);
+    final dbEffectiveLevel = _asInt(total['Effective Level'] ?? total['effectiveLevel'] ?? effectiveLevel);
+
     // Tier order and current tier
     final character = Map<String, dynamic>.from(_snapshot?['character'] ?? const {});
     final currentTier = (character['cultivationTier'] ?? '').toString();
     final tiersOrder = _tierOrder.isNotEmpty ? _tierOrder : ['Iron','Silver','Gold','Jade','Saint','Sovereign'];
     final currentIdx = tiersOrder.indexWhere((t) => t.toLowerCase() == currentTier.toLowerCase());
 
-    int calcCost(int level, {required bool freeFirstLevel}) {
-      if (level <= 0) return 0;
-      if (freeFirstLevel) {
-        // cost = multiplier * (triangular(level+1) - 1)
-        final base = ((level + 1) * (level + 1 + 1)) / 2.0 - 1.0;
-        return (base * multiplier).round();
-      } else {
-        final base = (level * (level + 1)) / 2.0;
-        return (base * multiplier).round();
+    // Build table rows for all tiers that have levels > 0
+    final tableRows = <TableRow>[];
+    
+    // Add header row
+    tableRows.add(TableRow(
+      decoration: BoxDecoration(color: Colors.grey[800]),
+      children: const [
+        Padding(padding: EdgeInsets.all(8), child: Text('Adjustment', style: TextStyle(fontWeight: FontWeight.bold))),
+        Padding(padding: EdgeInsets.all(8), child: Text('Level', textAlign: TextAlign.center, style: TextStyle(fontWeight: FontWeight.bold))),
+        Padding(padding: EdgeInsets.all(8), child: Text('Cost', textAlign: TextAlign.right, style: TextStyle(fontWeight: FontWeight.bold))),
+      ],
+    ));
+    
+    // Add tier rows for tiers that have levels > 0
+    for (final tier in tiersOrder) {
+      final tierData = Map<String, dynamic>.from(_toMap(tiersMap[tier]));
+      final tierLevel = _asInt(tierData['Level'] ?? tierData['level']);
+      
+      if (tierLevel > 0) {
+        final tierCost = _asInt(tierData['Cost'] ?? tierData['cost']);
+        final isFreeTier = isFreeAffinity && tiersOrder.indexOf(tier) <= currentIdx;
+        final adjustmentText = isFreeTier ? '$tier Tier (+1 Race)' : '$tier Tier';
+        
+        tableRows.add(TableRow(children: [
+          Padding(padding: const EdgeInsets.all(8), child: Text(adjustmentText)),
+          Padding(padding: const EdgeInsets.all(8), child: Text('$tierLevel', textAlign: TextAlign.center)),
+          Padding(padding: const EdgeInsets.all(8), child: Text('$tierCost', textAlign: TextAlign.right)),
+        ]));
       }
     }
-
-    // Build purchases table rows for tiers up to current
-    final shownTiers = currentIdx >= 0 ? tiersOrder.sublist(0, currentIdx + 1) : <String>[];
-    final rows = shownTiers.map((tier) {
-      final purchased = _asInt((_toMap(tiersMap[tier]))['Level'] ?? (_toMap(tiersMap[tier]))['level']);
-      final displayLevel = isFreeAffinity ? purchased + 1 : purchased; // show free included
-      final cost = calcCost(purchased, freeFirstLevel: isFreeAffinity);
-      return {'tier': tier, 'level': displayLevel, 'cost': cost};
-    }).toList();
+    
+    // Add Total Level row
+    tableRows.add(TableRow(
+      decoration: BoxDecoration(color: Colors.grey[700]),
+      children: [
+        const Padding(padding: EdgeInsets.all(8), child: Text('Total Level', style: TextStyle(fontWeight: FontWeight.bold))),
+        Padding(padding: const EdgeInsets.all(8), child: Text('$dbTotalLevel', textAlign: TextAlign.center, style: const TextStyle(fontWeight: FontWeight.bold))),
+        Padding(padding: const EdgeInsets.all(8), child: Text('$dbTotalCost', textAlign: TextAlign.right, style: const TextStyle(fontWeight: FontWeight.bold))),
+      ],
+    ));
+    
+    // Add Ascension Adjustment row
+    tableRows.add(TableRow(children: [
+      const Padding(padding: EdgeInsets.all(8), child: Text('Ascension Adjustment')),
+      Padding(padding: const EdgeInsets.all(8), child: Text('-$dbAscensionAdjustment', textAlign: TextAlign.center)),
+      const Padding(padding: EdgeInsets.all(8), child: Text('-', textAlign: TextAlign.right)),
+    ]));
+    
+    // Add Effective Level row
+    tableRows.add(TableRow(
+      decoration: BoxDecoration(color: Colors.grey[700]),
+      children: [
+        const Padding(padding: EdgeInsets.all(8), child: Text('Effective Level', style: TextStyle(fontWeight: FontWeight.bold))),
+        Padding(padding: const EdgeInsets.all(8), child: Text('$dbEffectiveLevel', textAlign: TextAlign.center, style: const TextStyle(fontWeight: FontWeight.bold))),
+        Padding(padding: const EdgeInsets.all(8), child: Text('$dbTotalCost', textAlign: TextAlign.right, style: const TextStyle(fontWeight: FontWeight.bold))),
+      ],
+    ));
 
     showDialog(
       context: context,
@@ -758,27 +796,22 @@ class _NewSheetPageState extends State<NewSheetPage> {
         title: Text('$name Affinity Details'),
         contentPadding: const EdgeInsets.all(24),
         content: SizedBox(
-          width: 500,
+          width: 600,
           child: SingleChildScrollView(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Text('Effective Level', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-                const SizedBox(height: 8),
-                Text('$currentTier: $effectiveLevel', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-                if (currentIdx > 0 || isFreeAffinity) ...[
-                  const SizedBox(height: 8),
-                  const Text('Tier adjustments:', style: TextStyle(fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 4),
-                  if (penaltyTiers.isEmpty && !isFreeAffinity) const Text('None'),
-                  if (penaltyTiers.isNotEmpty) ...penaltyTiers.map((t) => Text('−$penaltyPerTier: $t (Ascention adjustment)')),
-                  if (isFreeAffinity && freeTiers.isNotEmpty)
-                    ...freeTiers.map((t) => Text('+1: $t (Race Affinty)')),
-                ],
+                // Centered Effective Level
+                Center(
+                  child: Text(
+                    'Effective Level: $dbEffectiveLevel',
+                    style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  ),
+                ),
                 const SizedBox(height: 16),
-                const Text('Purchases by Tier:', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold)),
-                const SizedBox(height: 8),
+                
+                // Table
                 Container(
                   decoration: BoxDecoration(
                     border: Border.all(color: Colors.grey),
@@ -786,30 +819,8 @@ class _NewSheetPageState extends State<NewSheetPage> {
                   ),
                   child: Table(
                     border: TableBorder.all(color: Colors.grey),
-                    columnWidths: const { 0: FlexColumnWidth(2), 1: FlexColumnWidth(1), 2: FlexColumnWidth(1) },
-                    children: [
-                      TableRow(
-                        decoration: BoxDecoration(color: Colors.grey[800]),
-                        children: const [
-                          Padding(padding: EdgeInsets.all(8), child: Text('Bought in Tier', style: TextStyle(fontWeight: FontWeight.bold))),
-                          Padding(padding: EdgeInsets.all(8), child: Text('Level', textAlign: TextAlign.center, style: TextStyle(fontWeight: FontWeight.bold))),
-                          Padding(padding: EdgeInsets.all(8), child: Text('Cost', textAlign: TextAlign.right, style: TextStyle(fontWeight: FontWeight.bold))),
-                        ],
-                      ),
-                      ...rows.map((r) => TableRow(children: [
-                        Padding(padding: const EdgeInsets.all(8), child: Text(r['tier'] as String)),
-                        Padding(padding: const EdgeInsets.all(8), child: Text('${r['level']}', textAlign: TextAlign.center)),
-                        Padding(padding: const EdgeInsets.all(8), child: Text('${r['cost']}', textAlign: TextAlign.right)),
-                      ])),
-                      TableRow(
-                        decoration: BoxDecoration(color: Colors.grey[700]),
-                        children: [
-                          const Padding(padding: EdgeInsets.all(8), child: Text('Total', style: TextStyle(fontWeight: FontWeight.bold))),
-                          Padding(padding: const EdgeInsets.all(8), child: Text('${rows.fold<int>(0, (s, r) => s + (r['level'] as int))}', textAlign: TextAlign.center, style: const TextStyle(fontWeight: FontWeight.bold))),
-                          Padding(padding: const EdgeInsets.all(8), child: Text('${rows.fold<int>(0, (s, r) => s + (r['cost'] as int))}', textAlign: TextAlign.right, style: const TextStyle(fontWeight: FontWeight.bold))),
-                        ],
-                      ),
-                    ],
+                    columnWidths: const { 0: FlexColumnWidth(3), 1: FlexColumnWidth(1), 2: FlexColumnWidth(1) },
+                    children: tableRows,
                   ),
                 ),
               ],
@@ -1113,7 +1124,12 @@ class _NewSheetPageState extends State<NewSheetPage> {
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                const Text('Attack Bonus:', style: TextStyle(fontSize: 16)),
+                Text(
+                  isOneHanded 
+                      ? 'Attack Bonus: (Attack $_attackLevel/2)'
+                      : 'Attack Bonus: (2 × Attack $_attackLevel/3)',
+                  style: const TextStyle(fontSize: 16),
+                ),
                 Text('$bonus', style: const TextStyle(fontSize: 16)),
               ],
             ),
@@ -1170,8 +1186,8 @@ class _NewSheetPageState extends State<NewSheetPage> {
                   const SizedBox(height: 8),
                   Text(
                     isOneHanded 
-                        ? 'The base weapon strike does $base. At each even purchase damage increases by 1.'
-                        : 'The base weapon strike does $base. At every third purchase damage increases by 2.',
+                        ? 'The base weapon strike does $base. At each even purchase damage increases by 1.\n-1 attack bonus every ascension.'
+                        : 'The base weapon strike does $base. At every third purchase damage increases by 2.\n-2 attack bonus every ascension.',
                     style: const TextStyle(fontSize: 14),
                   ),
                 ],
@@ -1258,6 +1274,7 @@ class _NewSheetPageState extends State<NewSheetPage> {
       required int skillsCost,
       required int hitPointsFromAdvancements,
       required int hpCost,
+      required int spent,
       required int unspent,
     }
   ) {
@@ -1272,7 +1289,8 @@ class _NewSheetPageState extends State<NewSheetPage> {
             Text('Total Build: $totalBuild'),
             const SizedBox(height: 8),
             Text('− Skills: $skillsCost'),
-            Text('− Hit Points (2 × $hitPointsFromAdvancements): $hpCost'),
+            Text('− Essence: $hpCost'),
+            Text('Total Spent: $spent'),
             const Divider(height: 16),
             Text('Unspent Build: $unspent', style: const TextStyle(fontWeight: FontWeight.bold)),
           ],

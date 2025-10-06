@@ -2732,6 +2732,373 @@ exports.syncMasterLogs = onRequest(async (req, res) => {
     return res.status(500).json({ ok: false, error: error.message });
   }
 });
+
+// Create NPC function
+exports.createNPC = onRequest(async (req, res) => {
+  // CORS
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return;
+  }
+
+  try {
+    // Auth: super admin only
+    if (!req.headers.authorization) {
+      return res.status(401).json({ ok: false, error: 'Missing authorization header' });
+    }
+    const idToken = req.headers.authorization.split(' ')[1];
+    const decodedToken = await getAuth().verifyIdToken(idToken);
+    const uid = decodedToken.uid;
+    const isAdmin = await isSuperAdmin(uid);
+    if (!isAdmin) {
+      return res.status(403).json({ ok: false, error: 'User must be super admin' });
+    }
+
+    // Get inputs
+    const { name, type } = req.body;
+    if (!name || !type) {
+      return res.status(400).json({ ok: false, error: 'Missing name or type' });
+    }
+
+    if (type !== 'Cultivator' && type !== 'Monster') {
+      return res.status(400).json({ ok: false, error: 'Type must be either "Cultivator" or "Monster"' });
+    }
+
+    // Check if NPC already exists
+    const npcRef = db.collection('NPCs').doc(type).collection('names').doc(name);
+    const existingSnap = await npcRef.get();
+    
+    if (existingSnap.exists) {
+      return res.status(409).json({ 
+        ok: false, 
+        error: 'npc_already_exists', 
+        message: `NPC "${name}" already exists as a ${type}` 
+      });
+    }
+
+    // Create the NPC document
+    await npcRef.set({
+      name: name,
+      type: type,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      createdBy: uid,
+    });
+
+    // Update the last updated timestamp for NPCs
+    await db.collection('NPCs').doc('_meta').set({
+      lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+
+    console.log(`✅ Created NPC: ${name} as ${type}`);
+
+    return res.status(200).json({ 
+      ok: true, 
+      message: `NPC "${name}" created successfully as ${type}`,
+      npc: { name, type }
+    });
+
+  } catch (error) {
+    console.error('createNPC error', error);
+    return res.status(500).json({ ok: false, error: 'server_error', message: error.message });
+  }
+});
+
+// List NPCs function
+exports.listNPCs = onRequest(async (req, res) => {
+  // CORS
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return;
+  }
+
+  try {
+    // Auth: super admin only
+    if (!req.headers.authorization) {
+      return res.status(401).json({ ok: false, error: 'Missing authorization header' });
+    }
+    const idToken = req.headers.authorization.split(' ')[1];
+    const decodedToken = await getAuth().verifyIdToken(idToken);
+    const uid = decodedToken.uid;
+    const isAdmin = await isSuperAdmin(uid);
+    if (!isAdmin) {
+      return res.status(403).json({ ok: false, error: 'User must be super admin' });
+    }
+
+    // Get type parameter
+    const type = req.query.type;
+    if (!type || (type !== 'Cultivator' && type !== 'Monster')) {
+      return res.status(400).json({ ok: false, error: 'Type must be either "Cultivator" or "Monster"' });
+    }
+
+    // Get all NPCs of the specified type
+    const npcsRef = db.collection('NPCs').doc(type).collection('names');
+    const npcsSnap = await npcsRef.get();
+    
+    const npcs = [];
+    const userUids = new Set();
+    
+    // Collect all unique UIDs first
+    npcsSnap.forEach(doc => {
+      const data = doc.data();
+      if (data.createdBy) {
+        userUids.add(data.createdBy);
+      }
+    });
+    
+    // Fetch user display names
+    const userNames = {};
+    for (const uid of userUids) {
+      try {
+        const userRecord = await getAuth().getUser(uid);
+        userNames[uid] = userRecord.displayName || userRecord.email || 'Unknown User';
+      } catch (error) {
+        console.log(`Could not fetch user ${uid}:`, error.message);
+        userNames[uid] = 'Unknown User';
+      }
+    }
+    
+    // Build NPCs list with display names
+    npcsSnap.forEach(doc => {
+      const data = doc.data();
+      npcs.push({
+        id: doc.id,
+        name: data.name,
+        type: data.type,
+        createdAt: data.createdAt,
+        createdBy: userNames[data.createdBy] || 'Unknown User',
+        createdByUid: data.createdBy, // Keep UID for reference if needed
+      });
+    });
+
+    // Sort by name
+    npcs.sort((a, b) => a.name.localeCompare(b.name));
+
+    console.log(`✅ Listed ${npcs.length} ${type}s`);
+
+    return res.status(200).json({ 
+      ok: true, 
+      npcs: npcs,
+      count: npcs.length,
+      type: type
+    });
+
+  } catch (error) {
+    console.error('listNPCs error', error);
+    return res.status(500).json({ ok: false, error: 'server_error', message: error.message });
+  }
+});
+
+// Edit NPC function
+exports.editNPC = onRequest(async (req, res) => {
+  // CORS
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return;
+  }
+
+  try {
+    // Auth: super admin only
+    if (!req.headers.authorization) {
+      return res.status(401).json({ ok: false, error: 'Missing authorization header' });
+    }
+    const idToken = req.headers.authorization.split(' ')[1];
+    const decodedToken = await getAuth().verifyIdToken(idToken);
+    const uid = decodedToken.uid;
+    const isAdmin = await isSuperAdmin(uid);
+    if (!isAdmin) {
+      return res.status(403).json({ ok: false, error: 'User must be super admin' });
+    }
+
+    // Get inputs
+    const { id, name, type } = req.body;
+    if (!id || !name || !type) {
+      return res.status(400).json({ ok: false, error: 'Missing id, name, or type' });
+    }
+
+    if (type !== 'Cultivator' && type !== 'Monster') {
+      return res.status(400).json({ ok: false, error: 'Type must be either "Cultivator" or "Monster"' });
+    }
+
+    // Check if NPC exists
+    const npcRef = db.collection('NPCs').doc(type).collection('names').doc(id);
+    const existingSnap = await npcRef.get();
+    
+    if (!existingSnap.exists) {
+      return res.status(404).json({ 
+        ok: false, 
+        error: 'npc_not_found', 
+        message: `NPC with id "${id}" not found` 
+      });
+    }
+
+    // Check if new name already exists (excluding current NPC)
+    if (name !== existingSnap.data().name) {
+      const nameCheckRef = db.collection('NPCs').doc(type).collection('names').where('name', '==', name);
+      const nameCheckSnap = await nameCheckRef.get();
+      
+      if (!nameCheckSnap.empty) {
+        return res.status(409).json({ 
+          ok: false, 
+          error: 'npc_name_exists', 
+          message: `NPC "${name}" already exists as a ${type}` 
+        });
+      }
+    }
+
+    // Update the NPC document
+    await npcRef.update({
+      name: name,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedBy: uid,
+    });
+
+    // Update the last updated timestamp for NPCs
+    await db.collection('NPCs').doc('_meta').set({
+      lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+
+    console.log(`✅ Updated NPC: ${name} as ${type}`);
+
+    return res.status(200).json({ 
+      ok: true, 
+      message: `NPC "${name}" updated successfully`,
+      npc: { id, name, type }
+    });
+
+  } catch (error) {
+    console.error('editNPC error', error);
+    return res.status(500).json({ ok: false, error: 'server_error', message: error.message });
+  }
+});
+
+// Delete NPC function
+exports.deleteNPC = onRequest(async (req, res) => {
+  // CORS
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return;
+  }
+
+  try {
+    // Auth: super admin only
+    if (!req.headers.authorization) {
+      return res.status(401).json({ ok: false, error: 'Missing authorization header' });
+    }
+    const idToken = req.headers.authorization.split(' ')[1];
+    const decodedToken = await getAuth().verifyIdToken(idToken);
+    const uid = decodedToken.uid;
+    const isAdmin = await isSuperAdmin(uid);
+    if (!isAdmin) {
+      return res.status(403).json({ ok: false, error: 'User must be super admin' });
+    }
+
+    // Get inputs
+    const { id, type } = req.body;
+    if (!id || !type) {
+      return res.status(400).json({ ok: false, error: 'Missing id or type' });
+    }
+
+    if (type !== 'Cultivator' && type !== 'Monster') {
+      return res.status(400).json({ ok: false, error: 'Type must be either "Cultivator" or "Monster"' });
+    }
+
+    // Check if NPC exists
+    const npcRef = db.collection('NPCs').doc(type).collection('names').doc(id);
+    const existingSnap = await npcRef.get();
+    
+    if (!existingSnap.exists) {
+      return res.status(404).json({ 
+        ok: false, 
+        error: 'npc_not_found', 
+        message: `NPC with id "${id}" not found` 
+      });
+    }
+
+    const npcName = existingSnap.data().name;
+
+    // Delete the NPC document
+    await npcRef.delete();
+
+    // Update the last updated timestamp for NPCs
+    await db.collection('NPCs').doc('_meta').set({
+      lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+
+    console.log(`✅ Deleted NPC: ${npcName} (${type})`);
+
+    return res.status(200).json({ 
+      ok: true, 
+      message: `NPC "${npcName}" deleted successfully`,
+      npc: { id, name: npcName, type }
+    });
+
+  } catch (error) {
+    console.error('deleteNPC error', error);
+    return res.status(500).json({ ok: false, error: 'server_error', message: error.message });
+  }
+});
+
+// Get NPCs last updated timestamp
+exports.getNPCsLastUpdated = onRequest(async (req, res) => {
+  // CORS
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return;
+  }
+
+  try {
+    // Auth: super admin only
+    if (!req.headers.authorization) {
+      return res.status(401).json({ ok: false, error: 'Missing authorization header' });
+    }
+    const idToken = req.headers.authorization.split(' ')[1];
+    const decodedToken = await getAuth().verifyIdToken(idToken);
+    const uid = decodedToken.uid;
+    const isAdmin = await isSuperAdmin(uid);
+    if (!isAdmin) {
+      return res.status(403).json({ ok: false, error: 'User must be super admin' });
+    }
+
+    // Get the last updated timestamp
+    const metaRef = db.collection('NPCs').doc('_meta');
+    const metaSnap = await metaRef.get();
+    
+    if (!metaSnap.exists) {
+      return res.status(200).json({ 
+        ok: true, 
+        lastUpdated: null,
+        message: 'No NPCs have been created yet'
+      });
+    }
+
+    const lastUpdated = metaSnap.data().lastUpdated;
+
+    return res.status(200).json({ 
+      ok: true, 
+      lastUpdated: lastUpdated
+    });
+
+  } catch (error) {
+    console.error('getNPCsLastUpdated error', error);
+    return res.status(500).json({ ok: false, error: 'server_error', message: error.message });
+  }
+});
+
 // Calculate per-character advancement summaries (Affinities first)
 exports.calculateCharacter = onRequest(async (req, res) => {
   // CORS
@@ -2775,6 +3142,19 @@ exports.calculateCharacter = onRequest(async (req, res) => {
       return res.status(403).json({ ok: false, error: 'insufficient_permissions', message: 'You can only calculate your own characters unless you are a super admin' });
     }
 
+    // Helper to sanitize doc ids similar to syncRulesDb
+    const sanitizeDocIdLocal = (name, fallback) => {
+      try {
+        let id = String(name || '').trim();
+        if (!id) return fallback;
+        // Match syncRulesDb behavior: replace '/' and collapse whitespace
+        id = id.replace(/\//g, ' - ');
+        id = id.replace(/\s+/g, ' ').trim();
+        if (id.length > 1500) id = id.substring(0, 1500);
+        return id;
+      } catch (_) { return fallback; }
+    };
+
     // Ensure character structure exists before trying to calculate
     console.log(`🏗️ Ensuring character structure exists for player ${uid}, character ${characterNumber}`);
     try {
@@ -2812,6 +3192,27 @@ exports.calculateCharacter = onRequest(async (req, res) => {
       if (!isNaN(m) && m > 0) affinityToMultiplier.set(name.toLowerCase(), m);
       knownAffinityNames.push(name);
     });
+
+    // Load Cultivation Tiers from rules to get their order
+    const cultivationTiersRef = db.collection('Rules').doc('Cultivation Tiers').collection('All');
+    const cultivationTiersSnap = await cultivationTiersRef.get();
+    const cultivationTierOrder = [];
+    cultivationTiersSnap.forEach((doc) => {
+      const d = doc.data() || {};
+      const name = doc.id;
+      const maxBuild = Number(d['Max Build'] ?? d.maxBuild ?? d.MaxBuild ?? 0);
+      if (!isNaN(maxBuild) && maxBuild > 0) {
+        cultivationTierOrder.push({ name, maxBuild });
+      }
+    });
+    // Sort by Max Build to get correct order
+    cultivationTierOrder.sort((a, b) => a.maxBuild - b.maxBuild);
+    console.log('🔍 CULTIVATION TIER ORDER LOADED:', cultivationTierOrder.map(t => `${t.name}(${t.maxBuild})`).join(', '));
+    console.log('🔍 CULTIVATION TIER ORDER DETAILED:');
+    cultivationTierOrder.forEach((tier, index) => {
+      console.log(`🔍   Index ${index}: ${tier.name} (Max Build: ${tier.maxBuild})`);
+    });
+    const debugInfo = { cultivationTierOrder: cultivationTierOrder.map(t => ({ name: t.name, maxBuild: t.maxBuild })) };
 
     // Helpers to extract fields from a master log row
     const normalizeKey = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -2856,6 +3257,9 @@ exports.calculateCharacter = onRequest(async (req, res) => {
     };
 
     const totals = new Map(); // affinityName(lower) -> { name, tiers: { [tier: string]: { Level:number, Cost:number } }, Total:{Level:number, Cost:number} }
+
+    // Initialize breakdown fields for all affinities and tiers
+    const affinityTierOrder = ['Iron', 'Silver', 'Gold', 'Jade', 'Saint', 'Sovereign'];
 
     let detectedAffinityRows = 0;
     const skippedSamples = [];
@@ -2908,6 +3312,14 @@ exports.calculateCharacter = onRequest(async (req, res) => {
               continue;
             }
           }
+          // Special-case: Ascension bonus - ignore this reason
+          if (reasonNorm === 'ascensionbonus') {
+            continue;
+          }
+          // Special-case: Free Racial - ignore this reason
+          if (reasonNorm === 'freeracial') {
+            continue;
+          }
           // Special-case: reason "slotting cores" with positive AP is handled in AP section
           if (reasonNorm === 'slottingcores') {
             const rawApOnly = getFirstNonEmptyFieldValue(row, affinityPointAdjustmentKeys);
@@ -2952,6 +3364,10 @@ exports.calculateCharacter = onRequest(async (req, res) => {
           if (reasonNorm === 'freeaffintyafterascending' || reasonNorm === 'freeaffinityafterascending') {
             continue;
           }
+          // Special-case: reason "Ascension Bonus" - ignore all entries
+          if (reasonNorm === 'ascensionbonus') {
+            continue;
+          }
           console.log(`⚠️ Unrecognized reason in affinity section: Doc ${doc.id}: reason="${rawReason}" normalized="${reasonNorm}"`);
           advancementErrorLog.push({
             docId: doc.id,
@@ -2965,6 +3381,16 @@ exports.calculateCharacter = onRequest(async (req, res) => {
         }
         continue; 
       }
+      // Special-case: reason "Character Initialization" - ignore affinity and affinity level entries
+      if (reasonNorm === 'characterinitialization') {
+        // Check if this row has affinity-related fields that should be ignored
+        const hasAffinityName = affinityNameKeys.some(key => getFirstNonEmptyFieldValue(row, [key]));
+        const hasAffinityLevel = levelChangeKeys.some(key => getFirstNonEmptyFieldValue(row, [key]));
+        if (hasAffinityName || hasAffinityLevel) {
+          continue; // Skip this entry if it contains affinity data
+        }
+      }
+
       let affinityNameRaw = String(getFirstNonEmptyFieldValue(row, [...affinityNameKeys, 'Affinity Purchased', 'Affinity Purchased Name']) || '').trim();
       if (!affinityNameRaw) {
         // Heuristic: search for any known affinity name present in row values
@@ -3035,9 +3461,17 @@ exports.calculateCharacter = onRequest(async (req, res) => {
         });
       }
       const agg = totals.get(key);
-      if (!agg.tiers[tierNorm]) agg.tiers[tierNorm] = { Level: 0, Cost: 0 };
+      if (!agg.tiers[tierNorm]) {
+        agg.tiers[tierNorm] = { 
+          Level: 0, 
+          Cost: 0,
+          'From Advancement': 0,
+          'Free Affinity': 0
+        };
+      }
       agg.tiers[tierNorm].Level += delta;
-      agg.Total.Level += delta;
+      agg.tiers[tierNorm]['From Advancement'] += delta; // Track advancement levels
+      // Don't add to Total here - it will be calculated as sum of all tiers later
       detectedAffinityRows += 1;
     }
 
@@ -3050,12 +3484,17 @@ exports.calculateCharacter = onRequest(async (req, res) => {
       const cData = cSnap.exists ? (cSnap.data() || {}) : {};
       freeAffinityName = String(cData.free_affinity || cData.freeAffinity || '').trim();
       characterCultivationTier = String(cData.cultivationTier || '').trim();
+      console.log('🔍 CHARACTER CULTIVATION TIER:', characterCultivationTier);
+      console.log('🔍 CHARACTER DATA KEYS:', Object.keys(cData));
+      console.log('🔍 CHARACTER DATA CULTIVATION TIER FIELD:', cData.cultivationTier);
+      debugInfo.characterCultivationTier = characterCultivationTier;
     } catch (_) {}
 
+    // Track advancement vs free affinity levels separately for each tier
+    
     // Add free levels for the free affinity based on character's cultivation tier
     if (freeAffinityName && characterCultivationTier) {
-      const tierOrder = ['Iron', 'Silver', 'Gold', 'Jade', 'Saint', 'Sovereign'];
-      const currentTierIndex = tierOrder.findIndex(t => t.toLowerCase() === characterCultivationTier.toLowerCase());
+      const currentTierIndex = affinityTierOrder.findIndex(t => t.toLowerCase() === characterCultivationTier.toLowerCase());
       
       if (currentTierIndex >= 0) {
         const freeAffinityKey = freeAffinityName.toLowerCase();
@@ -3073,34 +3512,113 @@ exports.calculateCharacter = onRequest(async (req, res) => {
         
         // Add +1 free level for each tier from Iron up to current tier
         for (let i = 0; i <= currentTierIndex; i++) {
-          const tierName = tierOrder[i];
-          if (!freeAgg.tiers[tierName]) freeAgg.tiers[tierName] = { Level: 0, Cost: 0 };
-          freeAgg.tiers[tierName].Level += 1; // Add 1 free level
-          freeAgg.Total.Level += 1; // Add to total
+          const tierName = affinityTierOrder[i];
+          if (!freeAgg.tiers[tierName]) {
+            freeAgg.tiers[tierName] = { 
+              Level: 0, 
+              Cost: 0,
+              'From Advancement': 0,
+              'Free Affinity': 0
+            };
+          }
+          freeAgg.tiers[tierName]['Free Affinity'] += 1; // Track free levels
+          freeAgg.tiers[tierName].Level += 1; // Add 1 free level to total
+          // Don't add to Total here - it will be calculated as sum of all tiers later
         }
         
         console.log(`🎁 Added free ${freeAffinityName} levels: ${currentTierIndex + 1} levels (Iron to ${characterCultivationTier})`);
       }
     }
 
-    // Compute costs using multiplier and triangular numbers per tier (minus free first level per tier if matches free_affinity)
+    // Initialize breakdown fields for all affinities and tiers (moved to before advancement processing)
+
+    // Compute costs using multiplier and triangular numbers per tier
     const triangular = (n) => (n <= 0 ? 0 : (n * (n + 1)) / 2);
+    let totalAffinityCosts = 0; // Track total affinity costs for affinity_points tracking
     for (const [key, agg] of totals.entries()) {
       const m = affinityToMultiplier.get(key) || affinityToMultiplier.get(agg.name.toLowerCase()) || 1;
-      let totalCost = 0;
-      for (const t of Object.keys(agg.tiers)) {
-        const n = Number(agg.tiers[t].Level || 0); // purchased levels in this tier
-        let cost;
-        if (freeAffinityName && String(agg.name || '').toLowerCase() === freeAffinityName.toLowerCase()) {
-          // Free level is granted per tier, so cost is triangular(n + 1) - triangular(1) = triangular(n + 1) - 1
-          cost = Math.round(m * (triangular(n + 1) - 1));
-        } else {
-          cost = Math.round(m * triangular(n));
+      const isFreeAffinity = freeAffinityName && String(agg.name || '').toLowerCase() === freeAffinityName.toLowerCase();
+      
+      // Ensure all tiers exist for this affinity
+      for (const tierName of affinityTierOrder) {
+        if (!agg.tiers[tierName]) {
+          agg.tiers[tierName] = { 
+            Level: 0, 
+            Cost: 0,
+            'From Advancement': 0,
+            'Free Affinity': 0
+          };
         }
-        agg.tiers[t].Cost = cost;
-        totalCost += cost;
       }
+      
+      let totalCost = 0;
+      let totalLevel = 0;
+      let ascensionAdjustment = 0;
+      
+      for (const tierName of affinityTierOrder) {
+        const tier = agg.tiers[tierName];
+        const level = Number(tier.Level || 0);
+        
+        // Calculate cost based on whether it's free affinity or not
+        let cost;
+        if (isFreeAffinity) {
+          // Free affinity: (LEVEL * (LEVEL + 1) / 2) * Multiplier - (1 * Multiplier)
+          cost = Math.round((triangular(level) * m) - (1 * m));
+        } else {
+          // Regular affinity: (LEVEL * (LEVEL + 1) / 2) * Multiplier
+          cost = Math.round(triangular(level) * m);
+        }
+        
+        tier.Cost = Math.max(0, cost); // Ensure cost is never negative
+        totalCost += tier.Cost;
+        totalLevel += level;
+        
+        // Ascension adjustment is calculated once per affinity, not per tier
+        // This will be set after the tier loop
+      }
+      
+      // Calculate ascension adjustment based on character's cultivation tier order
+      // Ascension count = tier order in rules
+      let ascensionCount = 0;
+      if (characterCultivationTier) {
+        const tierIndex = cultivationTierOrder.findIndex(tier => 
+          tier.name.toLowerCase() === characterCultivationTier.toLowerCase()
+        );
+        if (tierIndex >= 0) {
+          ascensionCount = Math.max(0, tierIndex - 1); // Subtract 1 to make Iron (index 1) = 0, Silver (index 2) = 1, etc.
+          console.log(`🔍 Ascension Debug - Character: ${characterCultivationTier}, Tier Index: ${tierIndex}, Ascension Count: ${ascensionCount}, Ascension Adjustment will be: ${ascensionCount * 2}`);
+          console.log(`🔍 Cultivation Tier Order:`, cultivationTierOrder.map(t => `${t.name}(${t.maxBuild})`).join(', '));
+          console.log(`🔍 Detailed Tier Match - Looking for: "${characterCultivationTier.toLowerCase()}", Found at index: ${tierIndex}`);
+          console.log(`🔍 Tier at index ${tierIndex}: "${cultivationTierOrder[tierIndex].name}" (Max Build: ${cultivationTierOrder[tierIndex].maxBuild})`);
+          console.log(`🔍 Ascension Count Calculation: ${tierIndex} - 1 = ${ascensionCount} (Iron tier has no ascension adjustment)`);
+        } else {
+          console.log(`🔍 Ascension Debug - Character tier "${characterCultivationTier}" not found in cultivation tier order!`);
+          console.log(`🔍 Available tiers:`, cultivationTierOrder.map(t => t.name).join(', '));
+        }
+      }
+      ascensionAdjustment = ascensionCount * 2;
+      
+      // Debug output for troubleshooting ascension calculation
+      console.log(`🔍 ASCENSION DEBUG - Character: ${characterCultivationTier}, Ascension Count: ${ascensionCount}, Ascension Adjustment: ${ascensionAdjustment}`);
+      console.log(`🔍 ASCENSION SUMMARY - For affinity "${key}":`);
+      console.log(`🔍   Character Cultivation Tier: "${characterCultivationTier}"`);
+      console.log(`🔍   Cultivation Tier Index: ${ascensionCount}`);
+      console.log(`🔍   Ascension Adjustment Formula: ${ascensionCount} * 2 = ${ascensionAdjustment}`);
+      console.log(`🔍   Final Ascension Adjustment: ${ascensionAdjustment}`);
+      console.log(`🔍   This means the character is ${ascensionCount} tiers above Iron tier`);
+      
+      // Update Total entry
+      agg.Total.Level = totalLevel;
       agg.Total.Cost = totalCost;
+      agg.Total['Ascension Adjustment'] = ascensionAdjustment;
+      agg.Total['Effective Level'] = Math.max(0, totalLevel - ascensionAdjustment);
+      
+      // Track total affinity costs for affinity_points tracking
+      totalAffinityCosts += totalCost;
+      
+      // Confirm ascension adjustment was applied
+      console.log(`✅ APPLIED Ascension Adjustment to affinity "${key}": ${ascensionAdjustment}`);
+      console.log(`✅ Total Level: ${totalLevel}, Effective Level: ${Math.max(0, totalLevel - ascensionAdjustment)}`);
     }
 
     // Write results under character root: characters/{characterNumber}/affinities/{AffinityName}/tiers/{Tier}
@@ -3131,17 +3649,37 @@ exports.calculateCharacter = onRequest(async (req, res) => {
       const sanitizedAffinityName = sanitizeDocIdLocal(agg.name, agg.name);
       const affDocRef = affinitiesCol.doc(sanitizedAffinityName);
       await affDocRef.set({ name: agg.name, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-      // Write encountered tiers only
+      // Write encountered tiers only (skip tiers with level 0)
       for (const t of Object.keys(agg.tiers)) {
+        const tier = agg.tiers[t];
+        const tierLevel = tier.Level || 0;
+        
+        // Skip writing tier entries if level is 0
+        if (tierLevel === 0) {
+          continue;
+        }
+        
         const docRef = affDocRef.collection('tiers').doc(t);
-        const payload = { Level: agg.tiers[t].Level || 0, Cost: agg.tiers[t].Cost || 0, updatedAt: admin.firestore.FieldValue.serverTimestamp() };
+        const payload = { 
+          Level: tierLevel, 
+          Cost: tier.Cost || 0,
+          'From Advancement': tier['From Advancement'] || 0,
+          'Free Affinity': tier['Free Affinity'] || 0,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp() 
+        };
         await docRef.set(payload, { merge: true });
         written += 1;
       }
       // Write Total
       {
         const docRef = affDocRef.collection('tiers').doc('Total');
-        const payload = { Level: agg.Total.Level || 0, Cost: agg.Total.Cost || 0, updatedAt: admin.firestore.FieldValue.serverTimestamp() };
+        const payload = { 
+          Level: agg.Total.Level || 0, 
+          Cost: agg.Total.Cost || 0,
+          'Ascension Adjustment': agg.Total['Ascension Adjustment'] || 0,
+          'Effective Level': agg.Total['Effective Level'] || 0,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp() 
+        };
         await docRef.set(payload, { merge: true });
         written += 1;
       }
@@ -3211,19 +3749,6 @@ exports.calculateCharacter = onRequest(async (req, res) => {
       byName.set(skillName, (byName.get(skillName) || 0) + adj);
       detectedSkillRows += 1;
     }
-
-    // Helper to sanitize doc ids similar to syncRulesDb
-    const sanitizeDocIdLocal = (name, fallback) => {
-      try {
-        let id = String(name || '').trim();
-        if (!id) return fallback;
-        // Match syncRulesDb behavior: replace '/' and collapse whitespace
-        id = id.replace(/\//g, ' - ');
-        id = id.replace(/\s+/g, ' ').trim();
-        if (id.length > 1500) id = id.substring(0, 1500);
-        return id;
-      } catch (_) { return fallback; }
-    };
 
     // Load character for race
     const charDoc = await charDocRef.get();
@@ -3539,15 +4064,24 @@ exports.calculateCharacter = onRequest(async (req, res) => {
       }
     }
 
-    // Write Build total
+    // Write Build total (other build entries will be added after essence calculation)
     await buildColRef.doc('Total').set({
       amount: totalBuildAdjustment,
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     }, { merge: true });
 
-    // Write Affinity Points total
+    // Prepare affinity costs object for Total document
+    const affinityCosts = {};
+    for (const [affinityName, agg] of totals.entries()) {
+      affinityCosts[affinityName] = -agg.Total.Cost;
+    }
+    
+    // Write Affinity Points Total with all affinity costs and spent total
     await affinityPointsColRef.doc('Total').set({
       amount: totalAffinityPointAdjustment,
+      spent: -totalAffinityCosts, // Negative since it's spent/cost
+      unspent: totalAffinityPointAdjustment - totalAffinityCosts, // amount - |spent|
+      ...affinityCosts,
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     }, { merge: true });
 
@@ -3568,21 +4102,8 @@ exports.calculateCharacter = onRequest(async (req, res) => {
         }
       } catch (_) {}
 
-      // Free affinity +1 level on ascend
-      try {
-        const charSnap = await charDocRef.get();
-        const freeAffinity = (charSnap.exists ? (charSnap.data().free_affinity || '') : '') || '';
-        if (freeAffinity) {
-          const sanitizedFreeAffinity = sanitizeDocIdLocal(freeAffinity, freeAffinity);
-          const affDocRef = charDocRef.collection('affinities').doc(sanitizedFreeAffinity);
-          // Increment Total level by 1 with cost 0
-          const totalRef = affDocRef.collection('tiers').doc('Total');
-          const totalSnap = await totalRef.get();
-          const currentLevel = Number((totalSnap.data() || {}).Level || 0) || 0;
-          await affDocRef.set({ name: freeAffinity, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-          await totalRef.set({ Level: currentLevel + 1, Cost: Number((totalSnap.data() || {}).Cost || 0), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-        }
-      } catch (_) {}
+      // Free affinity levels are handled correctly in the main affinity calculation
+      // No additional processing needed here
     }
     // 2.b Process "Buying Hit Points" advancements 
     console.log(`🔋 Starting essence/hit point processing loop with ${advSnap.docs.length} documents`);
@@ -3734,6 +4255,18 @@ exports.calculateCharacter = onRequest(async (req, res) => {
 
     const essenceRef = charDocRef.collection('essence').doc('summary');
     await essenceRef.set(essenceData, { merge: true });
+    
+    // Now update the Build Total document with additional entries (after essence calculation is complete)
+    const essenceCost = hitPointsFromAdvancements * 2; // Only cost for extra essence from advancements
+    const buildSpent = -(totalSkillsCost + essenceCost); // Negative since it's spent/cost
+    await buildColRef.doc('Total').set({
+      amount: totalBuildAdjustment,
+      skills: -totalSkillsCost,
+      essence: -essenceCost, // Only cost for extra essence from advancements
+      spent: buildSpent,
+      unspent: totalBuildAdjustment + buildSpent, // amount + spent (both positive)
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
 
     // Record last_sync for advancement calculations
     try {
@@ -3767,6 +4300,25 @@ exports.calculateCharacter = onRequest(async (req, res) => {
       } catch (_) {}
     }
 
+    // Final summary log for ascension adjustment
+    console.log(`🎯 FINAL ASCENSION SUMMARY for character ${characterNumber}:`);
+    console.log(`🎯   Character Cultivation Tier: "${debugInfo.characterCultivationTier || 'Unknown'}"`);
+    console.log(`🎯   Cultivation Tier Index: ${debugInfo.cultivationTierOrder?.findIndex(t => t.name.toLowerCase() === (debugInfo.characterCultivationTier || '').toLowerCase()) || 'Not found'}`);
+    console.log(`🎯   Ascension Adjustment Applied: ${(debugInfo.cultivationTierOrder?.findIndex(t => t.name.toLowerCase() === (debugInfo.characterCultivationTier || '').toLowerCase()) || 0) * 2}`);
+    console.log(`🎯   Total Affinities Calculated: ${written}`);
+    console.log(`🎯 BUILD & AFFINITY TRACKING:`);
+    console.log(`🎯   Skills Cost: ${totalSkillsCost}`);
+    console.log(`🎯   Essence Cost (hitPointsFromAdvancements * 2): ${hitPointsFromAdvancements * 2}`);
+    console.log(`🎯   Essence Total: ${totalEssence}`);
+    console.log(`🎯   Total Affinity Costs: ${totalAffinityCosts}`);
+    console.log(`🎯   Spent (Skills + Essence Cost): ${totalSkillsCost + (hitPointsFromAdvancements * 2)}`);
+
+    // Calculate final ascension info for response
+    const finalCultivationTier = debugInfo.characterCultivationTier || 'Unknown';
+    const finalTierIndex = debugInfo.cultivationTierOrder?.findIndex(t => t.name.toLowerCase() === finalCultivationTier.toLowerCase()) || 0;
+    const finalAscensionCount = Math.max(0, finalTierIndex - 1); // Subtract 1 to make Iron (index 1) = 0, Silver (index 2) = 1, etc.
+    const finalAscensionAdjustment = finalAscensionCount * 2;
+
     return res.status(200).json({ 
       ok: true, 
       uid, 
@@ -3785,7 +4337,14 @@ exports.calculateCharacter = onRequest(async (req, res) => {
         total: totalEssence
       },
       advancementErrors: advancementErrorLog.length,
-      debug: debug ? { skippedSamples, advancementErrors: advancementErrorLog } : undefined 
+      ascensionInfo: {
+        cultivationTier: finalCultivationTier,
+        tierIndex: finalTierIndex,
+        ascensionCount: finalAscensionCount,
+        ascensionAdjustment: finalAscensionAdjustment,
+        cultivationTierOrder: debugInfo.cultivationTierOrder?.map(t => t.name) || []
+      },
+      debug: debug ? { skippedSamples, advancementErrors: advancementErrorLog, ascensionDebug: debugInfo } : undefined 
     });
   } catch (error) {
     console.error('calculateCharacter error', error);
@@ -8809,14 +9368,21 @@ exports.syncCharacterToFirestore = onRequest(async (req, res) => {
 
       // Also run calculateCharacter automatically after sync
       try {
+        console.log('🔍 SYNC DEBUG - Character data being synced:');
+        console.log('🔍 SYNC DEBUG - Character cultivation tier:', characterData.cultivationTier);
+        console.log('🔍 SYNC DEBUG - Character data keys:', Object.keys(characterData));
+        
         const region = process.env.FUNCTIONS_EMULATOR === 'true' ? 'us-central1' : (process.env.GCLOUD_REGION || 'us-central1');
         const projectId = process.env.GCLOUD_PROJECT || process.env.FIREBASE_CONFIG && JSON.parse(process.env.FIREBASE_CONFIG).projectId || 'crucible-helper';
         const url = `https://${region}-${projectId}.cloudfunctions.net/calculateCharacter`;
         const payload = { playerUid: uid, characterNumber: String(characterData.characterNumber || 'main') };
+        console.log('🔍 SYNC DEBUG - Calling calculateCharacter with payload:', payload);
         const calcResp = await axios.post(url, payload, { headers: { Authorization: `Bearer ${idToken}` } });
         console.log('🧮 calculateCharacter after sync status:', calcResp.status);
+        console.log('🧮 calculateCharacter after sync response:', calcResp.data);
       } catch (e) {
         console.error('⚠️ calculateCharacter after sync failed:', e.message || e);
+        console.error('⚠️ calculateCharacter after sync error details:', e.response?.data || 'No response data');
       }
 
       return res.status(200).json({

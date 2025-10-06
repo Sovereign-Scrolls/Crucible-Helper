@@ -134,6 +134,18 @@ class AppConfig {
   static String get listUsersBasicUrl =>
     'https://$firebaseRegion-$firebaseProjectId.cloudfunctions.net/listUsersBasic';
 
+  // NPCs
+  static String get createNPCUrl =>
+    'https://$firebaseRegion-$firebaseProjectId.cloudfunctions.net/createNPC';
+  static String get listNPCsUrl =>
+    'https://$firebaseRegion-$firebaseProjectId.cloudfunctions.net/listNPCs';
+  static String get editNPCUrl =>
+    'https://$firebaseRegion-$firebaseProjectId.cloudfunctions.net/editNPC';
+  static String get deleteNPCUrl =>
+    'https://$firebaseRegion-$firebaseProjectId.cloudfunctions.net/deleteNPC';
+  static String get getNPCsLastUpdatedUrl =>
+    'https://$firebaseRegion-$firebaseProjectId.cloudfunctions.net/getNPCsLastUpdated';
+
   // Events
   static String get getEventsUrl =>
     'https://$firebaseRegion-$firebaseProjectId.cloudfunctions.net/getEvents';

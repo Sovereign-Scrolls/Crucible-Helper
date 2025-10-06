@@ -282,11 +282,12 @@ class _HomePageState extends State<HomePage> {
   bool _isSuperAdmin = false;
   
   // Individual loading states for different components
-  Map<String, bool> _loadingStates = {
+  final Map<String, bool> _loadingStates = {
     'character': true,
     'events': true,
     'userStructure': true,
     'adminStatus': true,
+    'impersonation': false,
   };
   
   // Impersonation state
@@ -307,9 +308,12 @@ class _HomePageState extends State<HomePage> {
 
   /// Get loading state for events (used by EventsPage)
   bool get isEventsLoading => _loadingStates['events'] ?? true;
-
+  
   /// Get loading state for admin status (used by EventsPage)
   bool get isAdminStatusLoading => _loadingStates['adminStatus'] ?? true;
+  
+  /// Get loading state for impersonation
+  bool get isImpersonationLoading => _loadingStates['impersonation'] ?? false;
 
   /// Mark a loading operation as complete
   void _markLoadingComplete(String operation) {
@@ -435,18 +439,125 @@ class _HomePageState extends State<HomePage> {
         
         // Also try to download QR code (don't fail if it doesn't exist)
         _downloadQRCode(email);
+      } else {
+        // No character data found - check if they have data in Firestore and trigger calculation
+        print('📋 No character data found in Storage, checking Firestore...');
+        await _checkAndCalculateCharacterIfNeeded(user?.uid ?? '', email);
       }
     } catch (e) {
       print('Error fetching character JSON: $e');
     }
   }
 
+  /// Check if user has character data in Firestore and trigger calculation if needed
+  Future<void> _checkAndCalculateCharacterIfNeeded(String uid, String email) async {
+    try {
+      print('🔍 Checking if user has character data in Firestore...');
+      
+      // Check if user has any characters in Firestore
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) return;
+      
+      final idToken = await user.getIdToken();
+      final response = await http.get(
+        Uri.parse(AppConfig.getCharactersUrl),
+        headers: {
+          'Authorization': 'Bearer $idToken',
+          'Content-Type': 'application/json',
+        },
+      );
+      
+      if (response.statusCode == 200) {
+        final responseData = json.decode(response.body);
+        if (responseData['ok'] == true && responseData['characters'] != null) {
+          final characters = responseData['characters'] as List;
+          if (characters.isNotEmpty) {
+            print('📊 Found ${characters.length} character(s) in Firestore, triggering calculation...');
+            
+            // Get the first character and trigger calculation
+            final characterData = characters.first;
+            final characterId = characterData['id'] as String;
+            
+            // Extract character number from characterId (format: uid_characterNumber)
+            final parts = characterId.split('_');
+            if (parts.length >= 2) {
+              final characterNumber = parts[1];
+              print('🎯 Triggering calculate character for character number: $characterNumber');
+              
+              // Call calculate character function
+              await _callCalculateCharacterFunctionForLogin(uid, characterNumber);
+            }
+          } else {
+            print('📭 No characters found in Firestore for user');
+          }
+        } else {
+          print('⚠️ Failed to get characters from API: ${responseData['error']}');
+        }
+      } else {
+        print('⚠️ Failed to check characters: ${response.statusCode}');
+      }
+    } catch (e) {
+      print('❌ Error checking character data: $e');
+    }
+  }
+
+  /// Call calculate character function for login initialization
+  Future<void> _callCalculateCharacterFunctionForLogin(String uid, String characterNumber) async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) {
+        print('❌ User not authenticated for calculate character');
+        return;
+      }
+
+      final idToken = await user.getIdToken();
+      print('🔄 Calling calculate character for UID: $uid, character: $characterNumber');
+
+      final response = await http.post(
+        Uri.parse(AppConfig.calculateCharacterUrl),
+        headers: {
+          'Authorization': 'Bearer $idToken',
+          'Content-Type': 'application/json',
+        },
+        body: json.encode({
+          'playerUid': uid,
+          'characterNumber': characterNumber,
+        }),
+      );
+
+      if (response.statusCode == 200) {
+        final responseData = json.decode(response.body);
+        if (responseData['ok'] == true) {
+          print('✅ Character calculation completed successfully');
+          // After successful calculation, try to fetch the character again
+          await fetchCharacter();
+        } else {
+          print('⚠️ Character calculation failed: ${responseData['error']}');
+        }
+      } else {
+        print('❌ Calculate character HTTP error: ${response.statusCode}');
+        print('❌ Response body: ${response.body}');
+      }
+    } catch (e) {
+      print('❌ Error calling calculate character: $e');
+    }
+  }
+
   Future<void> _loadCharacterFromAPI(String targetUid) async {
     try {
       print('🎭 _loadCharacterFromAPI called for targetUid: $targetUid');
+      
+      // Set loading state for impersonation
+      setState(() {
+        _loadingStates['impersonation'] = true;
+      });
+      
       final user = FirebaseAuth.instance.currentUser;
       if (user == null) {
         print('🎭 No user found, returning');
+        setState(() {
+          _loadingStates['impersonation'] = false;
+        });
         return;
       }
 
@@ -525,8 +636,18 @@ class _HomePageState extends State<HomePage> {
           print('✅ Character loaded from Firestore via API');
         }
       }
+      
+      // Mark impersonation loading as complete
+      setState(() {
+        _loadingStates['impersonation'] = false;
+      });
     } catch (e) {
       print('Error loading character details: $e');
+      
+      // Mark impersonation loading as complete even on error
+      setState(() {
+        _loadingStates['impersonation'] = false;
+      });
     }
   }
 
@@ -1039,6 +1160,28 @@ class _HomePageState extends State<HomePage> {
   }
 
   Widget _buildHomeCenterContent() {
+    // Show loading screen if impersonation is loading
+    if (isImpersonationLoading) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            CircularProgressIndicator(
+              valueColor: AlwaysStoppedAnimation<Color>(Colors.amber),
+            ),
+            SizedBox(height: 20),
+            Text(
+              'Loading character data...',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 16,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+    
     return Column(
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
@@ -4849,6 +4992,8 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
       // Use effective UID (impersonated user if impersonating, otherwise current user)
       final playerUid = ImpersonationService.getEffectiveUid() ?? user.uid;
       print('🔄 Calling calculate character for UID: $playerUid (impersonating: ${ImpersonationService.isImpersonating})');
+      print('🔍 CLIENT DEBUG - Character cultivation tier: ${character.cultivationTier}');
+      print('🔍 CLIENT DEBUG - Character number: ${character.characterNumber}');
 
       final response = await http.post(
         Uri.parse(AppConfig.calculateCharacterUrl),
@@ -4864,11 +5009,23 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
 
       if (response.statusCode == 200) {
         final responseData = json.decode(response.body);
+        print('🔍 CLIENT DEBUG - Calculate character response: $responseData');
         if (responseData['ok'] == true) {
           print('✅ Character calculations updated');
           print('📊 Advancement errors: ${responseData['advancementErrors'] ?? 'unknown'}');
           print('📊 Hit point rows detected: ${responseData['detectedHitPointRows'] ?? 'unknown'}');
           print('📊 Essence calculated: ${responseData['essenceCalculated'] ?? 'unknown'}');
+          
+          // Display ascension information if available
+          if (responseData['ascensionInfo'] != null) {
+            final ascensionInfo = responseData['ascensionInfo'];
+            print('🔍 ASCENSION INFO FROM SERVER:');
+            print('🔍   Cultivation Tier: ${ascensionInfo['cultivationTier']}');
+            print('🔍   Tier Index: ${ascensionInfo['tierIndex']}');
+            print('🔍   Ascension Count: ${ascensionInfo['ascensionCount']} (Tier Index - 1)');
+            print('🔍   Ascension Adjustment: ${ascensionInfo['ascensionAdjustment']} (Count * 2)');
+            print('🔍   Cultivation Tier Order: ${ascensionInfo['cultivationTierOrder']}');
+          }
           if (context.mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(

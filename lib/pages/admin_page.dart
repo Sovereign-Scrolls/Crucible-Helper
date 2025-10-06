@@ -4,6 +4,7 @@ import 'package:http/http.dart' as http;
 import 'dart:convert';
 import '../config/app_config.dart';
 import '../shared/impersonation_service.dart';
+import '../shared/npc_cache_service.dart';
 
 class AdminPage extends StatefulWidget {
   const AdminPage({super.key});
@@ -164,6 +165,9 @@ class _AdminPageState extends State<AdminPage> {
             _buildSectionHeader('System Tools'),
             _buildSystemToolsSection(),
             SizedBox(height: 32),
+            _buildSectionHeader('NPCs'),
+            _buildNPCsSection(),
+            SizedBox(height: 32),
                   _buildSectionHeader('Status'),
                   _buildStatusSection(),
                 ],
@@ -239,6 +243,34 @@ class _AdminPageState extends State<AdminPage> {
               description: 'Temporarily act as another user in the app',
               onPressed: _showImpersonateDialog,
               color: Colors.red,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildNPCsSection() {
+    return Card(
+      color: Colors.grey[900],
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          children: [
+            _buildAdminAction(
+              icon: Icons.person_add,
+              title: 'Create NPC',
+              description: 'Create a new NPC (Cultivator or Monster)',
+              onPressed: _showCreateNPCDialog,
+              color: Colors.orange,
+            ),
+            SizedBox(height: 12),
+            _buildAdminAction(
+              icon: Icons.list,
+              title: 'List NPCs',
+              description: 'View all NPCs (Cultivators and Monsters)',
+              onPressed: _showListNPCsDialog,
+              color: Colors.blue,
             ),
           ],
         ),
@@ -512,6 +544,22 @@ class _AdminPageState extends State<AdminPage> {
           ),
         ],
       ),
+    );
+  }
+
+  /// Show dialog to create a new NPC
+  void _showCreateNPCDialog() {
+    showDialog(
+      context: context,
+      builder: (context) => _CreateNPCDialog(),
+    );
+  }
+
+  /// Show dialog to list all NPCs
+  void _showListNPCsDialog() {
+    showDialog(
+      context: context,
+      builder: (context) => _ListNPCsDialog(),
     );
   }
 }
@@ -906,5 +954,561 @@ class _ImpersonateDialogState extends State<_ImpersonateDialog> {
         ),
       ],
     );
+  }
+}
+
+class _CreateNPCDialog extends StatefulWidget {
+  @override
+  State<_CreateNPCDialog> createState() => _CreateNPCDialogState();
+}
+
+class _CreateNPCDialogState extends State<_CreateNPCDialog> {
+  final TextEditingController _nameController = TextEditingController();
+  String _selectedType = 'Cultivator';
+  bool _isLoading = false;
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      backgroundColor: Colors.grey[900],
+      title: Text('Create NPC', style: TextStyle(color: Colors.amber)),
+      content: SizedBox(
+        width: 400,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            TextField(
+              controller: _nameController,
+              style: TextStyle(color: Colors.white),
+              decoration: InputDecoration(
+                labelText: 'NPC Name',
+                labelStyle: TextStyle(color: Colors.grey),
+                enabledBorder: OutlineInputBorder(
+                  borderSide: BorderSide(color: Colors.grey),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderSide: BorderSide(color: Colors.amber),
+                ),
+              ),
+            ),
+            SizedBox(height: 16),
+            Text('Type:', style: TextStyle(color: Colors.white, fontSize: 16)),
+            SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: RadioListTile<String>(
+                    title: Text('Cultivator', style: TextStyle(color: Colors.white)),
+                    value: 'Cultivator',
+                    groupValue: _selectedType,
+                    onChanged: (value) => setState(() => _selectedType = value!),
+                    activeColor: Colors.amber,
+                  ),
+                ),
+                Expanded(
+                  child: RadioListTile<String>(
+                    title: Text('Monster', style: TextStyle(color: Colors.white)),
+                    value: 'Monster',
+                    groupValue: _selectedType,
+                    onChanged: (value) => setState(() => _selectedType = value!),
+                    activeColor: Colors.amber,
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: _isLoading ? null : () => Navigator.of(context).pop(),
+          child: Text('Cancel', style: TextStyle(color: Colors.grey)),
+        ),
+        ElevatedButton(
+          onPressed: _isLoading ? null : _createNPC,
+          style: ElevatedButton.styleFrom(backgroundColor: Colors.amber),
+          child: _isLoading 
+              ? SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2, valueColor: AlwaysStoppedAnimation<Color>(Colors.black)),
+                )
+              : Text('Create', style: TextStyle(color: Colors.black)),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _createNPC() async {
+    final name = _nameController.text.trim();
+    if (name.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Please enter a name for the NPC')),
+      );
+      return;
+    }
+
+    setState(() => _isLoading = true);
+
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) {
+        throw Exception('User not authenticated');
+      }
+
+      final idToken = await user.getIdToken();
+      
+      // Create the NPC document in Firestore
+      final response = await http.post(
+        Uri.parse(AppConfig.createNPCUrl),
+        headers: {
+          'Authorization': 'Bearer $idToken',
+          'Content-Type': 'application/json',
+        },
+        body: json.encode({
+          'name': name,
+          'type': _selectedType,
+        }),
+      );
+
+                  if (response.statusCode == 200) {
+                    final responseData = json.decode(response.body);
+                    if (responseData['ok'] == true) {
+                      Navigator.of(context).pop();
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text('✅ NPC "$name" created successfully as $_selectedType'),
+                          backgroundColor: Colors.green,
+                        ),
+                      );
+                      // Clear cache so it will refresh next time
+                      await NPCCacheService.clearCache();
+                    } else {
+                      throw Exception(responseData['error'] ?? 'Failed to create NPC');
+                    }
+                  } else {
+                    throw Exception('HTTP ${response.statusCode}: ${response.body}');
+                  }
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('❌ Error creating NPC: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
+    }
+  }
+}
+
+class _ListNPCsDialog extends StatefulWidget {
+  @override
+  State<_ListNPCsDialog> createState() => _ListNPCsDialogState();
+}
+
+class _ListNPCsDialogState extends State<_ListNPCsDialog> with TickerProviderStateMixin {
+  late TabController _tabController;
+  List<Map<String, dynamic>> _cultivators = [];
+  List<Map<String, dynamic>> _monsters = [];
+  bool _isLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _tabController = TabController(length: 2, vsync: this);
+    _loadNPCs();
+  }
+
+  @override
+  void dispose() {
+    _tabController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadNPCs() async {
+    try {
+      // Use cache service to get NPCs
+      final npcsData = await NPCCacheService.getNPCs();
+      
+      if (mounted && npcsData != null) {
+        setState(() {
+          _cultivators = List<Map<String, dynamic>>.from(npcsData['cultivators'] ?? []);
+          _monsters = List<Map<String, dynamic>>.from(npcsData['monsters'] ?? []);
+          _isLoading = false;
+        });
+      } else if (mounted) {
+        setState(() => _isLoading = false);
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('❌ Error loading NPCs: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      backgroundColor: Colors.grey[900],
+      title: Text('NPCs', style: TextStyle(color: Colors.amber)),
+      content: SizedBox(
+        width: 600,
+        height: 500,
+        child: Column(
+          children: [
+            TabBar(
+              controller: _tabController,
+              labelColor: Colors.amber,
+              unselectedLabelColor: Colors.grey,
+              indicatorColor: Colors.amber,
+              tabs: [
+                Tab(
+                  icon: Icon(Icons.person),
+                  text: 'Cultivators (${_cultivators.length})',
+                ),
+                Tab(
+                  icon: Icon(Icons.pets),
+                  text: 'Monsters (${_monsters.length})',
+                ),
+              ],
+            ),
+            Expanded(
+              child: TabBarView(
+                controller: _tabController,
+                children: [
+                  _buildNPCList(_cultivators, 'Cultivator'),
+                  _buildNPCList(_monsters, 'Monster'),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: Text('Close', style: TextStyle(color: Colors.amber)),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildNPCList(List<Map<String, dynamic>> npcs, String type) {
+    if (_isLoading) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            CircularProgressIndicator(color: Colors.amber),
+            SizedBox(height: 16),
+            Text('Loading ${type.toLowerCase()}s...', style: TextStyle(color: Colors.white)),
+          ],
+        ),
+      );
+    }
+
+    if (npcs.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.info_outline, color: Colors.grey, size: 48),
+            SizedBox(height: 16),
+            Text(
+              'No ${type.toLowerCase()}s found',
+              style: TextStyle(color: Colors.grey, fontSize: 16),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return ListView.builder(
+      itemCount: npcs.length,
+      itemBuilder: (context, index) {
+        final npc = npcs[index];
+        final name = npc['name'] ?? 'Unknown';
+        final createdAt = npc['createdAt'];
+        final createdBy = npc['createdBy'] ?? 'Unknown';
+
+        return Card(
+          color: Colors.grey[800],
+          margin: EdgeInsets.symmetric(vertical: 4),
+          child: ListTile(
+            leading: Icon(
+              type == 'Cultivator' ? Icons.person : Icons.pets,
+              color: type == 'Cultivator' ? Colors.blue : Colors.red,
+            ),
+            title: Text(
+              name,
+              style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+            ),
+            subtitle: Text(
+              'Created by: $createdBy',
+              style: TextStyle(color: Colors.grey),
+            ),
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (createdAt != null)
+                  Text(
+                    'Created: ${_formatDate(createdAt)}',
+                    style: TextStyle(color: Colors.grey, fontSize: 12),
+                  ),
+                SizedBox(width: 8),
+                IconButton(
+                  icon: Icon(Icons.edit, color: Colors.amber, size: 20),
+                  onPressed: () => _editNPC(npc, type),
+                ),
+                IconButton(
+                  icon: Icon(Icons.delete, color: Colors.red, size: 20),
+                  onPressed: () => _deleteNPC(npc, type),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  String _formatDate(dynamic timestamp) {
+    try {
+      if (timestamp is Map && timestamp['_seconds'] != null) {
+        final date = DateTime.fromMillisecondsSinceEpoch(timestamp['_seconds'] * 1000);
+        return '${date.day}/${date.month}/${date.year}';
+      }
+      return 'Unknown';
+    } catch (e) {
+      return 'Unknown';
+    }
+  }
+
+  Future<void> _editNPC(Map<String, dynamic> npc, String type) async {
+    final nameController = TextEditingController(text: npc['name']);
+    String selectedType = type;
+    bool isLoading = false;
+
+    showDialog(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setState) => AlertDialog(
+          backgroundColor: Colors.grey[900],
+          title: Text('Edit NPC', style: TextStyle(color: Colors.amber)),
+          content: SizedBox(
+            width: 400,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                TextField(
+                  controller: nameController,
+                  style: TextStyle(color: Colors.white),
+                  decoration: InputDecoration(
+                    labelText: 'NPC Name',
+                    labelStyle: TextStyle(color: Colors.grey),
+                    enabledBorder: OutlineInputBorder(
+                      borderSide: BorderSide(color: Colors.grey),
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderSide: BorderSide(color: Colors.amber),
+                    ),
+                  ),
+                ),
+                SizedBox(height: 16),
+                Text('Type:', style: TextStyle(color: Colors.white, fontSize: 16)),
+                SizedBox(height: 8),
+                Row(
+                  children: [
+                    Expanded(
+                      child: RadioListTile<String>(
+                        title: Text('Cultivator', style: TextStyle(color: Colors.white)),
+                        value: 'Cultivator',
+                        groupValue: selectedType,
+                        onChanged: (value) => setState(() => selectedType = value!),
+                        activeColor: Colors.amber,
+                      ),
+                    ),
+                    Expanded(
+                      child: RadioListTile<String>(
+                        title: Text('Monster', style: TextStyle(color: Colors.white)),
+                        value: 'Monster',
+                        groupValue: selectedType,
+                        onChanged: (value) => setState(() => selectedType = value!),
+                        activeColor: Colors.amber,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: isLoading ? null : () => Navigator.of(context).pop(),
+              child: Text('Cancel', style: TextStyle(color: Colors.grey)),
+            ),
+            ElevatedButton(
+              onPressed: isLoading ? null : () async {
+                final name = nameController.text.trim();
+                if (name.isEmpty) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('Please enter a name for the NPC')),
+                  );
+                  return;
+                }
+
+                setState(() => isLoading = true);
+
+                try {
+                  final user = FirebaseAuth.instance.currentUser;
+                  if (user == null) throw Exception('User not authenticated');
+
+                  final idToken = await user.getIdToken();
+                  
+                  final response = await http.post(
+                    Uri.parse(AppConfig.editNPCUrl),
+                    headers: {
+                      'Authorization': 'Bearer $idToken',
+                      'Content-Type': 'application/json',
+                    },
+                    body: json.encode({
+                      'id': npc['id'],
+                      'name': name,
+                      'type': selectedType,
+                    }),
+                  );
+
+                  if (response.statusCode == 200) {
+                    final responseData = json.decode(response.body);
+                    if (responseData['ok'] == true) {
+                      Navigator.of(context).pop();
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text('✅ NPC "$name" updated successfully'),
+                          backgroundColor: Colors.green,
+                        ),
+                      );
+                      // Clear cache and reload
+                      await NPCCacheService.clearCache();
+                      _loadNPCs();
+                    } else {
+                      throw Exception(responseData['error'] ?? 'Failed to update NPC');
+                    }
+                  } else {
+                    throw Exception('HTTP ${response.statusCode}: ${response.body}');
+                  }
+                } catch (e) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text('❌ Error updating NPC: $e'),
+                      backgroundColor: Colors.red,
+                    ),
+                  );
+                } finally {
+                  if (mounted) setState(() => isLoading = false);
+                }
+              },
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.amber),
+              child: isLoading 
+                  ? SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2, valueColor: AlwaysStoppedAnimation<Color>(Colors.black)),
+                    )
+                  : Text('Update', style: TextStyle(color: Colors.black)),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _deleteNPC(Map<String, dynamic> npc, String type) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: Colors.grey[900],
+        title: Text('Delete NPC', style: TextStyle(color: Colors.red)),
+        content: Text(
+          'Are you sure you want to delete "${npc['name']}"? This action cannot be undone.',
+          style: TextStyle(color: Colors.white),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: Text('Cancel', style: TextStyle(color: Colors.grey)),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            child: Text('Delete', style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true) {
+      try {
+        final user = FirebaseAuth.instance.currentUser;
+        if (user == null) throw Exception('User not authenticated');
+
+        final idToken = await user.getIdToken();
+        
+        final response = await http.post(
+          Uri.parse(AppConfig.deleteNPCUrl),
+          headers: {
+            'Authorization': 'Bearer $idToken',
+            'Content-Type': 'application/json',
+          },
+          body: json.encode({
+            'id': npc['id'],
+            'type': type,
+          }),
+        );
+
+        if (response.statusCode == 200) {
+          final responseData = json.decode(response.body);
+          if (responseData['ok'] == true) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('✅ NPC "${npc['name']}" deleted successfully'),
+                backgroundColor: Colors.green,
+              ),
+            );
+            // Clear cache and reload
+            await NPCCacheService.clearCache();
+            _loadNPCs();
+          } else {
+            throw Exception(responseData['error'] ?? 'Failed to delete NPC');
+          }
+        } else {
+          throw Exception('HTTP ${response.statusCode}: ${response.body}');
+        }
+      } catch (e) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('❌ Error deleting NPC: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
   }
 }
