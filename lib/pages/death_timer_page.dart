@@ -1,7 +1,8 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import '../shared/timer_preferences_service.dart';
 
-enum TimerType { death, exhaustion, imprison }
+enum TimerType { death, exhaustion, imprison, regeneration }
 enum TimerState { ready, running, paused, completed }
 enum DeathStage { bleedingOut, unconscious, dead }
 
@@ -17,6 +18,12 @@ class TimerData {
   int stage1Seconds;
   int stage2Seconds;
   bool isStage1Active;
+  
+  // For regeneration timer - 1 minute repeating + 5 minute total
+  int regenMinuteSeconds;  // Current minute timer (resets every minute)
+  int regenTotalSeconds;   // Total 5 minute countdown
+  int regenMinutesElapsed; // How many complete minutes have elapsed
+  bool shouldFlash;        // Flag for visual flash
 
   TimerData({
     required this.type,
@@ -26,7 +33,11 @@ class TimerData {
   }) : remainingSeconds = totalSeconds,
        stage1Seconds = type == TimerType.death ? 60 : 0,  // 1 minute for stage 1
        stage2Seconds = type == TimerType.death ? 120 : 0, // 2 minutes for stage 2
-       isStage1Active = type == TimerType.death;
+       isStage1Active = type == TimerType.death,
+       regenMinuteSeconds = type == TimerType.regeneration ? 60 : 0,  // 1 minute countdown
+       regenTotalSeconds = type == TimerType.regeneration ? 300 : 0,  // 5 minutes total
+       regenMinutesElapsed = 0,
+       shouldFlash = false;
 
   String get displayName {
     switch (type) {
@@ -36,12 +47,28 @@ class TimerData {
         return 'Exhaustion/1 minute';
       case TimerType.imprison:
         return 'Imprison';
+      case TimerType.regeneration:
+        return 'Regenerations';
     }
   }
 
   String get timeDisplay {
     final minutes = remainingSeconds ~/ 60;
     final seconds = remainingSeconds % 60;
+    return '$minutes:${seconds.toString().padLeft(2, '0')}';
+  }
+  
+  // For regeneration timer - display the minute timer
+  String get regenMinuteDisplay {
+    final minutes = regenMinuteSeconds ~/ 60;
+    final seconds = regenMinuteSeconds % 60;
+    return '$minutes:${seconds.toString().padLeft(2, '0')}';
+  }
+  
+  // For regeneration timer - display the total timer
+  String get regenTotalDisplay {
+    final minutes = regenTotalSeconds ~/ 60;
+    final seconds = regenTotalSeconds % 60;
     return '$minutes:${seconds.toString().padLeft(2, '0')}';
   }
 
@@ -55,6 +82,7 @@ class TimerData {
           if (deathStage == DeathStage.unconscious) return Colors.purple[600]!;
           return Colors.grey[800]!; // dead
         }
+        if (type == TimerType.regeneration) return Colors.cyan[400]!;
         return type == TimerType.exhaustion ? Colors.orange[400]! : Colors.blue[400]!;
       case TimerState.paused:
         return Colors.yellow[600]!;
@@ -77,7 +105,9 @@ class TimerData {
       case TimerState.paused:
         return 'Paused';
       case TimerState.completed:
-        return type == TimerType.death ? 'Dead' : 'Completed';
+        if (type == TimerType.death) return 'Dead';
+        if (type == TimerType.regeneration) return 'Regeneration Complete';
+        return 'Completed';
     }
   }
 }
@@ -96,7 +126,7 @@ class _DeathTimerPageState extends State<DeathTimerPage> with TickerProviderStat
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 3, vsync: this);
+    _tabController = TabController(length: 4, vsync: this);
     
     _timers = {
       TimerType.death: TimerData(
@@ -111,6 +141,10 @@ class _DeathTimerPageState extends State<DeathTimerPage> with TickerProviderStat
       TimerType.imprison: TimerData(
         type: TimerType.imprison,
         totalSeconds: 180, // 3 minutes
+      ),
+      TimerType.regeneration: TimerData(
+        type: TimerType.regeneration,
+        totalSeconds: 300, // 5 minutes
       ),
     };
     
@@ -133,17 +167,58 @@ class _DeathTimerPageState extends State<DeathTimerPage> with TickerProviderStat
 
     setState(() {
       timerData.state = TimerState.running;
+      timerData.shouldFlash = false; // Clear any existing flash
     });
 
     timerData.timer = Timer.periodic(Duration(seconds: 1), (timer) {
       if (!mounted) return;
       
       setState(() {
+        // Clear flash after it's been shown
+        if (timerData.shouldFlash) {
+          timerData.shouldFlash = false;
+        }
+        
         if (timerData.remainingSeconds > 0) {
           timerData.remainingSeconds--;
           
+          // Handle regeneration timer logic
+          if (type == TimerType.regeneration) {
+            // Decrement both timers
+            if (timerData.regenMinuteSeconds > 0) {
+              timerData.regenMinuteSeconds--;
+            }
+            if (timerData.regenTotalSeconds > 0) {
+              timerData.regenTotalSeconds--;
+            }
+            
+            // Check if minute timer hit zero (completed a minute)
+            if (timerData.regenMinuteSeconds == 0 && timerData.regenTotalSeconds > 0) {
+              timerData.regenMinutesElapsed++;
+              timerData.regenMinuteSeconds = 60; // Reset to 1 minute
+              timerData.shouldFlash = true; // Trigger flash
+              
+              // Play sound and vibrate
+              TimerPreferencesService.alertUser();
+              
+              print('🔔 Regeneration: Minute ${timerData.regenMinutesElapsed} complete! (${timerData.regenTotalDisplay} remaining)');
+            }
+            
+            // Check if total timer hit zero (5 minutes complete)
+            if (timerData.regenTotalSeconds == 0) {
+              timerData.state = TimerState.completed;
+              timer.cancel();
+              timerData.shouldFlash = true; // Final flash
+              
+              // Play sound and vibrate for completion
+              TimerPreferencesService.alertUser();
+              
+              print('✅ Regeneration: All 5 minutes complete!');
+            }
+          }
+          
           // Handle death timer stage transitions
-          if (type == TimerType.death) {
+          else if (type == TimerType.death) {
             if (timerData.isStage1Active) {
               // We're in Stage 1 (Bleeding Out)
               timerData.deathStage = DeathStage.bleedingOut;
@@ -153,6 +228,11 @@ class _DeathTimerPageState extends State<DeathTimerPage> with TickerProviderStat
                 timerData.isStage1Active = false;
                 timerData.remainingSeconds = timerData.stage2Seconds; // Start Stage 2 with 2 minutes
                 timerData.deathStage = DeathStage.unconscious;
+                timerData.shouldFlash = true;
+                
+                // Play sound and vibrate
+                TimerPreferencesService.alertUser();
+                
                 print('🔄 Death timer: Stage 1 complete, starting Stage 2 (2:00)');
               }
             } else {
@@ -164,15 +244,24 @@ class _DeathTimerPageState extends State<DeathTimerPage> with TickerProviderStat
                 timerData.deathStage = DeathStage.dead;
                 timerData.state = TimerState.completed;
                 timer.cancel();
+                timerData.shouldFlash = true;
+                
+                // Play sound and vibrate
+                TimerPreferencesService.alertUser();
+                
                 print('💀 Death timer: Character is dead');
               }
             }
           }
         } else {
-          // For non-death timers, just complete
-          if (type != TimerType.death) {
+          // For non-death, non-regeneration timers, just complete
+          if (type != TimerType.death && type != TimerType.regeneration) {
             timer.cancel();
             timerData.state = TimerState.completed;
+            timerData.shouldFlash = true;
+            
+            // Play sound and vibrate
+            TimerPreferencesService.alertUser();
           }
         }
       });
@@ -196,10 +285,17 @@ class _DeathTimerPageState extends State<DeathTimerPage> with TickerProviderStat
         timerData.remainingSeconds = timerData.stage1Seconds; // 1 minute
         timerData.isStage1Active = true;
         timerData.deathStage = DeathStage.bleedingOut;
+      } else if (type == TimerType.regeneration) {
+        // Reset regeneration timer
+        timerData.remainingSeconds = timerData.totalSeconds; // 5 minutes
+        timerData.regenMinuteSeconds = 60; // 1 minute
+        timerData.regenTotalSeconds = 300; // 5 minutes
+        timerData.regenMinutesElapsed = 0;
       } else {
         timerData.remainingSeconds = timerData.totalSeconds;
       }
       timerData.state = TimerState.ready;
+      timerData.shouldFlash = false;
     });
   }
 
@@ -228,6 +324,8 @@ class _DeathTimerPageState extends State<DeathTimerPage> with TickerProviderStat
     
     if (type == TimerType.death) {
       return _buildDeathTimerTab(timerData);
+    } else if (type == TimerType.regeneration) {
+      return _buildRegenerationTimerTab(timerData);
     } else {
       return _buildSimpleTimerTab(timerData);
     }
@@ -457,6 +555,232 @@ class _DeathTimerPageState extends State<DeathTimerPage> with TickerProviderStat
     );
   }
 
+  Widget _buildRegenerationTimerTab(TimerData timerData) {
+    // Determine background color based on flash state
+    Color backgroundColor = timerData.shouldFlash 
+        ? Colors.white.withOpacity(0.3) 
+        : Colors.black;
+    
+    return AnimatedContainer(
+      duration: Duration(milliseconds: 200),
+      color: backgroundColor,
+      child: Padding(
+        padding: const EdgeInsets.all(24.0),
+        child: Column(
+          children: [
+            // 1-Minute Repeating Timer
+            Expanded(
+              child: Container(
+                width: double.infinity,
+                margin: EdgeInsets.only(bottom: 16),
+                decoration: BoxDecoration(
+                  color: timerData.state == TimerState.running
+                      ? Colors.cyan[400]!.withOpacity(0.2)
+                      : Colors.grey[900],
+                  border: Border.all(
+                    color: timerData.state == TimerState.running
+                        ? Colors.cyan[400]!
+                        : Colors.grey[700]!,
+                    width: 2,
+                  ),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.all(20.0),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(
+                            Icons.refresh,
+                            color: Colors.cyan[400],
+                            size: 28,
+                          ),
+                          SizedBox(width: 8),
+                          Text(
+                            '1 Minute Timer (Repeating)',
+                            style: TextStyle(
+                              fontSize: 24,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.white,
+                            ),
+                          ),
+                        ],
+                      ),
+                      SizedBox(height: 16),
+                      Text(
+                        timerData.state == TimerState.running || timerData.state == TimerState.paused
+                            ? timerData.regenMinuteDisplay
+                            : '1:00',
+                        style: TextStyle(
+                          fontSize: 48,
+                          fontWeight: FontWeight.bold,
+                          color: timerData.state == TimerState.running
+                              ? Colors.cyan[400]
+                              : Colors.grey[400],
+                        ),
+                      ),
+                      SizedBox(height: 16),
+                      Container(
+                        padding: EdgeInsets.all(16),
+                        decoration: BoxDecoration(
+                          color: Colors.grey[800],
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Text(
+                          'This timer counts down 1 minute and resets every minute. Beep/vibration at end of each minute.',
+                          style: TextStyle(
+                            fontSize: 14,
+                            color: Colors.grey[300],
+                            fontStyle: FontStyle.italic,
+                          ),
+                          textAlign: TextAlign.center,
+                        ),
+                      ),
+                      if (timerData.regenMinutesElapsed > 0)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 12.0),
+                          child: Text(
+                            '${timerData.regenMinutesElapsed} minute(s) elapsed',
+                            style: TextStyle(
+                              fontSize: 16,
+                              color: Colors.amber[400],
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            
+            // 5-Minute Total Timer
+            Expanded(
+              child: Container(
+                width: double.infinity,
+                decoration: BoxDecoration(
+                  color: timerData.state == TimerState.running
+                      ? Colors.cyan[600]!.withOpacity(0.2)
+                      : Colors.grey[900],
+                  border: Border.all(
+                    color: timerData.state == TimerState.running
+                        ? Colors.cyan[600]!
+                        : Colors.grey[700]!,
+                    width: 2,
+                  ),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.all(20.0),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(
+                            Icons.hourglass_full,
+                            color: Colors.cyan[600],
+                            size: 28,
+                          ),
+                          SizedBox(width: 8),
+                          Text(
+                            '5 Minute Total Timer',
+                            style: TextStyle(
+                              fontSize: 24,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.white,
+                            ),
+                          ),
+                        ],
+                      ),
+                      SizedBox(height: 16),
+                      Text(
+                        timerData.state == TimerState.running || timerData.state == TimerState.paused
+                            ? timerData.regenTotalDisplay
+                            : '5:00',
+                        style: TextStyle(
+                          fontSize: 48,
+                          fontWeight: FontWeight.bold,
+                          color: timerData.state == TimerState.running
+                              ? Colors.cyan[600]
+                              : Colors.grey[400],
+                        ),
+                      ),
+                      SizedBox(height: 16),
+                      Container(
+                        padding: EdgeInsets.all(16),
+                        decoration: BoxDecoration(
+                          color: Colors.grey[800],
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Text(
+                          'This timer counts down the full 5 minutes. Both timers stop when this reaches 0:00.',
+                          style: TextStyle(
+                            fontSize: 14,
+                            color: Colors.grey[300],
+                            fontStyle: FontStyle.italic,
+                          ),
+                          textAlign: TextAlign.center,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            
+            SizedBox(height: 24),
+            
+            // Control buttons
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              children: [
+                ElevatedButton.icon(
+                  onPressed: timerData.state == TimerState.ready || timerData.state == TimerState.paused
+                      ? () => _startTimer(TimerType.regeneration)
+                      : null,
+                  icon: Icon(Icons.play_arrow),
+                  label: Text('Start'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.cyan[600],
+                    foregroundColor: Colors.white,
+                    padding: EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                  ),
+                ),
+                ElevatedButton.icon(
+                  onPressed: timerData.state == TimerState.running
+                      ? () => _pauseTimer(TimerType.regeneration)
+                      : null,
+                  icon: Icon(Icons.pause),
+                  label: Text('Pause'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.orange[600],
+                    foregroundColor: Colors.white,
+                    padding: EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                  ),
+                ),
+                ElevatedButton.icon(
+                  onPressed: () => _resetTimer(TimerType.regeneration),
+                  icon: Icon(Icons.refresh),
+                  label: Text('Reset'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.grey[600],
+                    foregroundColor: Colors.white,
+                    padding: EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildSimpleTimerTab(TimerData timerData) {
     return Container(
       color: Colors.black,
@@ -590,6 +914,10 @@ class _DeathTimerPageState extends State<DeathTimerPage> with TickerProviderStat
               icon: Icon(Icons.lock, color: Colors.blue[400]),
               text: 'Imprison',
             ),
+            Tab(
+              icon: Icon(Icons.autorenew, color: Colors.cyan[400]),
+              text: 'Regenerations',
+            ),
           ],
           labelColor: Colors.white,
           unselectedLabelColor: Colors.grey[400],
@@ -602,6 +930,7 @@ class _DeathTimerPageState extends State<DeathTimerPage> with TickerProviderStat
           _buildTimerTab(TimerType.death),
           _buildTimerTab(TimerType.exhaustion),
           _buildTimerTab(TimerType.imprison),
+          _buildTimerTab(TimerType.regeneration),
         ],
       ),
     );

@@ -5,6 +5,7 @@ import 'dart:convert';
 import '../config/app_config.dart';
 import '../shared/impersonation_service.dart';
 import '../shared/npc_cache_service.dart';
+import '../shared/timer_preferences_service.dart';
 
 class AdminPage extends StatefulWidget {
   const AdminPage({super.key});
@@ -18,6 +19,8 @@ class _AdminPageState extends State<AdminPage> {
   bool _isLoading = false;
   String _statusMessage = '';
   bool _isImpersonating = false;
+  String _resetCharacterNumber = '';
+  bool _backupConfirmed = false;
 
   @override
   void initState() {
@@ -159,6 +162,53 @@ class _AdminPageState extends State<AdminPage> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  // Status indicator
+                  if (_isLoading || _statusMessage.isNotEmpty)
+                    Container(
+                      width: double.infinity,
+                      margin: const EdgeInsets.only(bottom: 16.0),
+                      padding: const EdgeInsets.all(12.0),
+                      decoration: BoxDecoration(
+                        color: Colors.grey[800],
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: Colors.grey[600]!),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          if (_isLoading)
+                            Row(
+                              children: [
+                                SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    valueColor: AlwaysStoppedAnimation<Color>(Colors.amber),
+                                  ),
+                                ),
+                                SizedBox(width: 8),
+                                Text(
+                                  'Processing...',
+                                  style: TextStyle(
+                                    color: Colors.amber,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          if (_statusMessage.isNotEmpty)
+                            Text(
+                              _statusMessage,
+                              style: TextStyle(
+                                color: Colors.grey[300],
+                                fontFamily: 'monospace',
+                                fontSize: 12,
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
                   _buildSectionHeader('Data Management'),
             _buildDataManagementSection(),
             SizedBox(height: 32),
@@ -167,9 +217,6 @@ class _AdminPageState extends State<AdminPage> {
             SizedBox(height: 32),
             _buildSectionHeader('NPCs'),
             _buildNPCsSection(),
-            SizedBox(height: 32),
-                  _buildSectionHeader('Status'),
-                  _buildStatusSection(),
                 ],
               ),
             ),
@@ -216,6 +263,14 @@ class _AdminPageState extends State<AdminPage> {
               onPressed: _refreshDataCache,
               color: Colors.green,
             ),
+            SizedBox(height: 12),
+            _buildAdminAction(
+              icon: Icons.restore,
+              title: 'Reset Character',
+              description: 'Reset a character by removing advancement data from PC DB',
+              onPressed: _showResetCharacterModal,
+              color: Colors.red,
+            ),
           ],
         ),
       ),
@@ -229,6 +284,14 @@ class _AdminPageState extends State<AdminPage> {
         padding: const EdgeInsets.all(16.0),
         child: Column(
           children: [
+            _buildAdminAction(
+              icon: Icons.volume_up,
+              title: 'Test Beep Sound',
+              description: 'Test the timer beep sound (check if audio works)',
+              onPressed: _testBeep,
+              color: Colors.cyan,
+            ),
+            SizedBox(height: 12),
             _buildAdminAction(
               icon: Icons.verified_user,
               title: 'Manage Permissions',
@@ -278,59 +341,43 @@ class _AdminPageState extends State<AdminPage> {
     );
   }
 
-  Widget _buildStatusSection() {
-    return Card(
-      color: Colors.grey[900],
-      child: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            if (_isLoading)
-              Row(
-                children: [
-                  SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      valueColor: AlwaysStoppedAnimation<Color>(Colors.amber),
-                    ),
-                  ),
-                  SizedBox(width: 12),
-                  Text(
-                    'Processing...',
-                    style: TextStyle(color: Colors.grey[300]),
-                  ),
-                ],
-              ),
-            if (_statusMessage.isNotEmpty)
-              Container(
-                width: double.infinity,
-                padding: EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: Colors.grey[800],
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Text(
-                  _statusMessage,
-                  style: TextStyle(
-                    color: Colors.grey[300],
-                    fontFamily: 'monospace',
-                  ),
-                ),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
 
   void _showManagePermissions() {
     showDialog(
       context: context,
       builder: (context) => _ManagePermissionsDialog(),
     );
+  }
+
+  void _testBeep() async {
+    setState(() {
+      _statusMessage = 'Testing beep sound...';
+    });
+    
+    try {
+      await TimerPreferencesService.playBeep(frequency: 800, durationMs: 500);
+      
+      setState(() {
+        _statusMessage = '✅ Beep played! If you didn\'t hear it, check:\n'
+            '1. Volume is turned up\n'
+            '2. Sound is enabled in Profile settings\n'
+            '3. Browser allows audio (may need user interaction first)\n'
+            '4. Check browser console for errors';
+      });
+      
+      // Clear message after 5 seconds
+      Future.delayed(Duration(seconds: 5), () {
+        if (mounted) {
+          setState(() {
+            _statusMessage = '';
+          });
+        }
+      });
+    } catch (e) {
+      setState(() {
+        _statusMessage = '❌ Error playing beep: $e';
+      });
+    }
   }
 
   void _showImpersonateDialog() {
@@ -461,15 +508,22 @@ class _AdminPageState extends State<AdminPage> {
         throw Exception(errorData['error'] ?? 'HTTP ${response.statusCode}');
       }
     } catch (error) {
+      final errorMessage = 'Error: ${error.toString()}';
       setState(() {
-        _statusMessage = 'Error: ${error.toString()}';
+        _statusMessage = errorMessage;
       });
+      
+      // Print detailed error to terminal for debugging
+      print('❌ SYNC ERROR DETAILS:');
+      print('❌ Error Type: ${error.runtimeType}');
+      print('❌ Error Message: $errorMessage');
+      print('❌ Timestamp: ${DateTime.now()}');
       
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('Sync failed: ${error.toString()}'),
           backgroundColor: Colors.red,
-          duration: Duration(seconds: 5),
+          duration: Duration(seconds: 8),
         ),
       );
     } finally {
@@ -499,6 +553,211 @@ class _AdminPageState extends State<AdminPage> {
         backgroundColor: Colors.green,
       ),
     );
+  }
+
+  void _showResetCharacterModal() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: Colors.grey[900],
+        title: Text(
+          'Reset Character',
+          style: TextStyle(color: Colors.red),
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              '⚠️ WARNING: This action will permanently remove advancement data from the PC DB Google Sheet.',
+              style: TextStyle(
+                color: Colors.orange,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            SizedBox(height: 16),
+            Text(
+              'Before proceeding, please manually backup the PC DB Google Sheet.',
+              style: TextStyle(color: Colors.grey[300]),
+            ),
+            SizedBox(height: 16),
+            Text(
+              'This will remove all rows for the specified character with these Advancement Reasons:',
+              style: TextStyle(color: Colors.grey[300]),
+            ),
+            SizedBox(height: 8),
+            Text(
+              '• Raising Affinity Level\n• Buying Skill\n• Buying Hit Points',
+              style: TextStyle(color: Colors.red[300]),
+            ),
+            SizedBox(height: 16),
+            Row(
+              children: [
+                Icon(Icons.sync, color: Colors.blue, size: 16),
+                SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'Character will be automatically synced after reset to update Firestore data',
+                    style: TextStyle(color: Colors.blue[300]),
+                  ),
+                ),
+              ],
+            ),
+            SizedBox(height: 16),
+            TextField(
+              style: TextStyle(color: Colors.white),
+              decoration: InputDecoration(
+                labelText: 'Character Number',
+                labelStyle: TextStyle(color: Colors.grey[400]),
+                hintText: 'e.g., 89',
+                hintStyle: TextStyle(color: Colors.grey[600]),
+                border: OutlineInputBorder(),
+                focusedBorder: OutlineInputBorder(
+                  borderSide: BorderSide(color: Colors.amber),
+                ),
+              ),
+              onChanged: (value) {
+                // Store the character number for later use
+                _resetCharacterNumber = value;
+              },
+            ),
+            SizedBox(height: 16),
+            Row(
+              children: [
+                Icon(Icons.check_circle, color: Colors.green, size: 16),
+                SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'I have backed up the PC DB Google Sheet',
+                    style: TextStyle(color: Colors.grey[300]),
+                  ),
+                ),
+              ],
+            ),
+            SizedBox(height: 8),
+            CheckboxListTile(
+              title: Text(
+                'Confirm backup completion',
+                style: TextStyle(color: Colors.grey[300]),
+              ),
+              value: _backupConfirmed,
+              onChanged: (value) {
+                setState(() {
+                  _backupConfirmed = value ?? false;
+                });
+              },
+              activeColor: Colors.amber,
+              controlAffinity: ListTileControlAffinity.leading,
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: Text('Cancel', style: TextStyle(color: Colors.grey)),
+          ),
+          ElevatedButton(
+            onPressed: _backupConfirmed && _resetCharacterNumber.isNotEmpty
+                ? () {
+                    Navigator.of(context).pop();
+                    _resetCharacter();
+                  }
+                : null,
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.red,
+              foregroundColor: Colors.white,
+            ),
+            child: Text('Reset Character'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _resetCharacter() async {
+    setState(() {
+      _isLoading = true;
+      _statusMessage = 'Resetting character $_resetCharacterNumber...';
+    });
+
+    try {
+      final user = _auth.currentUser;
+      if (user == null) {
+        throw Exception('User not authenticated');
+      }
+
+      final idToken = await user.getIdToken();
+      
+      setState(() {
+        _statusMessage = 'Connecting to reset service...';
+      });
+
+      final response = await http.post(
+        Uri.parse(AppConfig.resetCharacterUrl),
+        headers: {
+          'Authorization': 'Bearer $idToken',
+          'Content-Type': 'application/json',
+        },
+        body: json.encode({
+          'characterNumber': _resetCharacterNumber,
+        }),
+      );
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        if (data['ok'] == true) {
+          final result = data['result'];
+          setState(() {
+            _statusMessage = '''Character $_resetCharacterNumber Reset & Synced Successfully!
+
+📊 Reset Details:
+• Rows Removed: ${result['rowsRemoved']}
+• Advancement Reasons: ${result['advancementReasons'].join(', ')}
+• Character Synced: ${result['synced'] == true ? 'Yes' : 'No'}
+
+✅ Reset and sync completed at ${DateTime.now().toString()}''';
+          });
+          
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Character $_resetCharacterNumber reset successfully!'),
+              backgroundColor: Colors.green,
+              duration: Duration(seconds: 3),
+            ),
+          );
+        } else {
+          throw Exception(data['error'] ?? 'Reset failed');
+        }
+      } else {
+        final errorData = json.decode(response.body);
+        throw Exception(errorData['error'] ?? 'HTTP ${response.statusCode}');
+      }
+    } catch (error) {
+      final errorMessage = 'Error: ${error.toString()}';
+      setState(() {
+        _statusMessage = errorMessage;
+      });
+      
+      // Print detailed error to terminal for debugging
+      print('❌ RESET CHARACTER ERROR DETAILS:');
+      print('❌ Error Type: ${error.runtimeType}');
+      print('❌ Error Message: $errorMessage');
+      print('❌ Timestamp: ${DateTime.now()}');
+      
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Reset failed: ${error.toString()}'),
+          backgroundColor: Colors.red,
+          duration: Duration(seconds: 8),
+        ),
+      );
+    } finally {
+      setState(() {
+        _isLoading = false;
+        _resetCharacterNumber = '';
+        _backupConfirmed = false;
+      });
+    }
   }
 
   void _showSystemAnalytics() {

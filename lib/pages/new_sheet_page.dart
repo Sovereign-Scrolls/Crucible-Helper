@@ -432,7 +432,9 @@ class _NewSheetPageState extends State<NewSheetPage> {
     final unspentBuild = _asInt(buildTotalDoc['unspent'] ?? 0);
     // Use Total document data for affinity points calculations
     final apTotalDoc = Map<String, dynamic>.from(ap['total'] ?? const {});
-    final totalAP = _asInt(apTotalDoc['amount']);
+    final apAmount = _asInt(apTotalDoc['amount']);
+    final perfectCultivationPoints = _asInt(apTotalDoc['Perfect Cultivation Points'] ?? 0);
+    final totalAP = _asInt(apTotalDoc['Total Affinity Points'] ?? apAmount); // Fallback to amount for old data
     final affinitiesCost = _asInt(apTotalDoc['spent'] ?? 0);
     final unspentAP = _asInt(apTotalDoc['unspent'] ?? 0);
     
@@ -500,8 +502,11 @@ class _NewSheetPageState extends State<NewSheetPage> {
                       bottomValue: '$totalAP ($unspentAP)',
                       onTapBottom: () => _showAffinityPointBreakdown(
                         context,
+                        apAmount: apAmount,
+                        perfectCultivationPoints: perfectCultivationPoints,
                         totalAP: totalAP,
                         totalCost: affinitiesCost,
+                        unspentAP: unspentAP,
                         rows: affinityCostRows,
                       ),
                     ),
@@ -905,8 +910,11 @@ class _NewSheetPageState extends State<NewSheetPage> {
 
   void _showAffinityPointBreakdown(
     BuildContext context, {
+      required int apAmount,
+      required int perfectCultivationPoints,
       required int totalAP,
       required int totalCost,
+      required int unspentAP,
       required List<Map<String, dynamic>> rows,
     }
   ) {
@@ -920,7 +928,13 @@ class _NewSheetPageState extends State<NewSheetPage> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('Total Affinity Points: $totalAP'),
+              Text('Affinity Points: $apAmount'),
+              if (perfectCultivationPoints > 0) ...[
+                const SizedBox(height: 4),
+                Text('Perfect Cultivation Points: $perfectCultivationPoints'),
+              ],
+              const SizedBox(height: 8),
+              Text('Total Affinity Points: $totalAP', style: const TextStyle(fontWeight: FontWeight.bold)),
               const SizedBox(height: 8),
               const Text('Spent by Affinity:', style: TextStyle(fontWeight: FontWeight.bold)),
               const SizedBox(height: 6),
@@ -931,16 +945,14 @@ class _NewSheetPageState extends State<NewSheetPage> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: rows
                         .where((r) => r['cost'] != null)
-                        .map((r) => Text(
-                              '${r['name']}: ${r['cost']}${(r['level'] ?? 0) > 0 ? ' (Level ${r['level']})' : ''}',
-                            ))
+                        .map((r) => Text('${r['name']}: ${r['cost']}'))
                         .toList(),
                   ),
                 ),
               ),
               const Divider(height: 16),
               Text('Total Spent: $totalCost'),
-              Text('Unspent: ${totalAP - totalCost}', style: const TextStyle(fontWeight: FontWeight.bold)),
+              Text('Unspent: $unspentAP', style: const TextStyle(fontWeight: FontWeight.bold)),
             ],
           ),
         ),

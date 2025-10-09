@@ -3904,6 +3904,7 @@ exports.calculateCharacter = onRequest(async (req, res) => {
     // 2.a Process Build/AP adjustments (Import, Attending Event) and Ascend
     let totalBuildAdjustment = 0;
     let totalAffinityPointAdjustment = 0;
+    let totalPerfectCultivationPoints = 0;
     const buildColRef = charDocRef.collection('build');
     const affinityPointsColRef = charDocRef.collection('affinity_points');
     const ascendColRef = charDocRef.collection('ascend');
@@ -3985,14 +3986,24 @@ exports.calculateCharacter = onRequest(async (req, res) => {
         }
         continue;
       }
-      // Slotting Cores: AP only
+      // Slotting Cores: AP and Perfect Cultivation Points
       if (reasonNorm === 'slottingcores') {
         const rawApOnly = getFirstNonEmptyFieldValue(row, affinityPointAdjustmentKeys);
         const apOnly = Number(rawApOnly);
+        
+        // Extract Perfect Cultivation Points from the row (keep raw value, rounding happens on total)
+        const perfectCultivationKeys = ['Perfect Cultivation Points', 'Perfect Cultivation', 'PerfectCultivationPoints', 'PerfectCultivation'];
+        const rawPerfectCultivation = getFirstNonEmptyFieldValue(row, perfectCultivationKeys);
+        const perfectCultivation = Number(rawPerfectCultivation) || 0;
+        
         if (!isNaN(apOnly) && apOnly > 0) {
           totalAffinityPointAdjustment += apOnly;
+          if (perfectCultivation > 0) {
+            totalPerfectCultivationPoints += perfectCultivation;
+          }
           await affinityPointsColRef.doc(data._masterLogId || doc.id).set({
             amount: apOnly,
+            'Perfect Cultivation Points': perfectCultivation,
             source: 'Slotting Cores',
             rowNumber: data._rowNumber || null,
             masterLogId: data._masterLogId || doc.id,
@@ -4076,11 +4087,17 @@ exports.calculateCharacter = onRequest(async (req, res) => {
       affinityCosts[affinityName] = -agg.Total.Cost;
     }
     
-    // Write Affinity Points Total with all affinity costs and spent total
+    // Calculate Total Affinity Points (amount + Perfect Cultivation Points), rounded down
+    const totalAffinityPointsRaw = totalAffinityPointAdjustment + totalPerfectCultivationPoints;
+    const totalAffinityPoints = Math.floor(totalAffinityPointsRaw);
+    
+    // Write Affinity Points Total with all affinity costs, Perfect Cultivation Points, and Total Affinity Points
     await affinityPointsColRef.doc('Total').set({
       amount: totalAffinityPointAdjustment,
+      'Perfect Cultivation Points': totalPerfectCultivationPoints,
+      'Total Affinity Points': totalAffinityPoints,
       spent: -totalAffinityCosts, // Negative since it's spent/cost
-      unspent: totalAffinityPointAdjustment - totalAffinityCosts, // amount - |spent|
+      unspent: totalAffinityPoints - totalAffinityCosts, // Total Affinity Points - |spent|
       ...affinityCosts,
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     }, { merge: true });
@@ -9311,6 +9328,249 @@ async function ensureCharacterStructure(uid, characterNumber = 'main') {
     throw error;
   }
 }
+
+// Function to reset character by removing advancement data from PC DB
+exports.resetCharacter = onRequest(async (req, res) => {
+  // Enable CORS
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+
+  // Handle preflight requests
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return;
+  }
+
+  try {
+    // Auth: super admin only
+    if (!req.headers.authorization) {
+      return res.status(401).json({ ok: false, error: 'Missing authorization header' });
+    }
+    const idToken = req.headers.authorization.split(' ')[1];
+    const decodedToken = await getAuth().verifyIdToken(idToken);
+    const uid = decodedToken.uid;
+    const isAdmin = await isSuperAdmin(uid);
+    if (!isAdmin) {
+      return res.status(403).json({ ok: false, error: 'User must be super admin' });
+    }
+
+    // Get character number from request body
+    const { characterNumber } = req.body;
+    if (!characterNumber) {
+      return res.status(400).json({ ok: false, error: 'Character number is required' });
+    }
+
+    console.log(`🔄 Starting character reset for character ${characterNumber}`);
+
+    // Get PC DB spreadsheet ID from config
+    const pcDbSpreadsheetId = config.google_sheets.pc_db_spreadsheet_id;
+    if (!pcDbSpreadsheetId) {
+      return res.status(400).json({ ok: false, error: 'PC DB spreadsheet ID not configured' });
+    }
+
+    // Sanitize spreadsheet ID
+    const sanitizeSpreadsheetId = (raw) => {
+      if (!raw) return raw;
+      const dIdx = raw.indexOf('/d/');
+      if (dIdx >= 0) {
+        const after = raw.substring(dIdx + 3);
+        const endSlash = after.indexOf('/');
+        return endSlash >= 0 ? after.substring(0, endSlash) : after;
+      }
+      const qIdx = raw.indexOf('?');
+      if (qIdx >= 0) raw = raw.substring(0, qIdx);
+      const slashIdx = raw.indexOf('/');
+      if (slashIdx >= 0) raw = raw.substring(0, slashIdx);
+      return raw;
+    };
+
+    const cleanSpreadsheetId = sanitizeSpreadsheetId(pcDbSpreadsheetId);
+
+    // Initialize Google Sheets API
+    const auth = new googleapis.auth.GoogleAuth({
+      scopes: [
+        'https://www.googleapis.com/auth/spreadsheets'
+      ],
+      keyFile: './service-account-key.json'
+    });
+
+    const sheets = googleapis.sheets({ version: 'v4', auth });
+
+    // Get the spreadsheet metadata to find the Master Log tab
+    const spreadsheet = await sheets.spreadsheets.get({
+      spreadsheetId: cleanSpreadsheetId
+    });
+
+    const masterLogSheet = spreadsheet.data.sheets.find(sheet => 
+      sheet.properties.title.toLowerCase().includes('master log') || 
+      sheet.properties.title.toLowerCase().includes('masterlog')
+    );
+
+    if (!masterLogSheet) {
+      return res.status(404).json({ ok: false, error: 'Master Log tab not found in PC DB spreadsheet' });
+    }
+
+    const sheetName = masterLogSheet.properties.title;
+    console.log(`📋 Found Master Log tab: ${sheetName}`);
+
+    // Read the data from the Master Log tab
+    const range = `${sheetName}!A:Z`;
+    const response = await sheets.spreadsheets.values.get({
+      spreadsheetId: cleanSpreadsheetId,
+      range: range
+    });
+
+    const rows = response.data.values || [];
+    if (rows.length === 0) {
+      return res.status(404).json({ ok: false, error: 'No data found in Master Log tab' });
+    }
+
+    // Find the header row to identify column indices
+    const headers = rows[0];
+    const characterNumberCol = headers.findIndex(h => 
+      h && h.toLowerCase().includes('character') && h.toLowerCase().includes('number')
+    );
+    const advancementReasonCol = headers.findIndex(h => 
+      h && h.toLowerCase().includes('advancement') && h.toLowerCase().includes('reason')
+    );
+
+    if (characterNumberCol === -1 || advancementReasonCol === -1) {
+      return res.status(400).json({ 
+        ok: false, 
+        error: 'Required columns not found. Expected: Character Number, Advancement Reason' 
+      });
+    }
+
+    console.log(`📊 Found columns - Character Number: ${characterNumberCol}, Advancement Reason: ${advancementReasonCol}`);
+
+    // Define the advancement reasons to remove
+    const reasonsToRemove = [
+      'Raising Affinity Level',
+      'Buying Skill', 
+      'Buying Hit Points'
+    ];
+
+    // Find rows to delete (in reverse order to maintain row indices)
+    const rowsToDelete = [];
+    for (let i = rows.length - 1; i >= 1; i--) { // Skip header row
+      const row = rows[i];
+      const rowCharacterNumber = row[characterNumberCol];
+      const advancementReason = row[advancementReasonCol];
+
+      if (rowCharacterNumber === characterNumber && 
+          advancementReason && 
+          reasonsToRemove.includes(advancementReason)) {
+        rowsToDelete.push(i + 1); // Google Sheets uses 1-based indexing
+      }
+    }
+
+    console.log(`🎯 Found ${rowsToDelete.length} rows to delete for character ${characterNumber}`);
+
+    if (rowsToDelete.length === 0) {
+      return res.status(200).json({
+        ok: true,
+        message: 'No matching rows found to delete',
+        result: {
+          characterNumber: characterNumber,
+          rowsRemoved: 0,
+          advancementReasons: reasonsToRemove
+        }
+      });
+    }
+
+    // Delete rows in reverse order (from bottom to top)
+    let deletedCount = 0;
+    for (const rowIndex of rowsToDelete) {
+      try {
+        await sheets.spreadsheets.batchUpdate({
+          spreadsheetId: cleanSpreadsheetId,
+          resource: {
+            requests: [{
+              deleteDimension: {
+                range: {
+                  sheetId: masterLogSheet.properties.sheetId,
+                  dimension: 'ROWS',
+                  startIndex: rowIndex - 1, // Convert to 0-based
+                  endIndex: rowIndex
+                }
+              }
+            }]
+          }
+        });
+        deletedCount++;
+        console.log(`✅ Deleted row ${rowIndex} for character ${characterNumber}`);
+      } catch (deleteError) {
+        console.error(`❌ Error deleting row ${rowIndex}:`, deleteError);
+        // Continue with other deletions even if one fails
+      }
+    }
+
+    console.log(`✅ Successfully deleted ${deletedCount} rows for character ${characterNumber}`);
+
+    // After resetting, sync the character to update Firestore data
+    console.log(`🔄 Syncing character ${characterNumber} after reset...`);
+    try {
+      // Call the syncCharacterToFirestore function for this character
+      const syncResponse = await fetch(`${process.env.FUNCTIONS_URL || 'http://localhost:5001'}/crucible-helper/us-central1/syncCharacterToFirestore`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': req.headers.authorization // Pass through the same auth
+        },
+        body: JSON.stringify({
+          characterNumber: characterNumber
+        })
+      });
+
+      if (syncResponse.ok) {
+        const syncData = await syncResponse.json();
+        console.log(`✅ Character ${characterNumber} synced successfully after reset`);
+      } else {
+        console.warn(`⚠️ Character ${characterNumber} reset completed but sync failed:`, await syncResponse.text());
+      }
+    } catch (syncError) {
+      console.warn(`⚠️ Character ${characterNumber} reset completed but sync failed:`, syncError.message);
+    }
+
+    return res.status(200).json({
+      ok: true,
+      message: `Character ${characterNumber} reset and synced successfully`,
+      result: {
+        characterNumber: characterNumber,
+        rowsRemoved: deletedCount,
+        advancementReasons: reasonsToRemove,
+        sheetName: sheetName,
+        synced: true
+      }
+    });
+
+  } catch (error) {
+    console.error('Error resetting character:', error);
+    
+    // Provide more specific error messages
+    let errorMessage = error.message || 'Unknown error occurred';
+    let statusCode = 500;
+    
+    if (error.message && error.message.includes('spreadsheetId not configured')) {
+      errorMessage = 'PC DB spreadsheet ID not configured in system.';
+      statusCode = 400;
+    } else if (error.message && error.message.includes('Master Log tab not found')) {
+      errorMessage = 'Master Log tab not found in PC DB spreadsheet.';
+      statusCode = 404;
+    } else if (error.message && error.message.includes('Required columns not found')) {
+      errorMessage = 'Required columns (Character Number, Advancement Reason) not found in Master Log tab.';
+      statusCode = 400;
+    }
+    
+    return res.status(statusCode).json({ 
+      ok: false, 
+      error: 'reset_character_failed', 
+      message: errorMessage,
+      details: error.message
+    });
+  }
+});
 
 // Function to sync character from Firebase Storage to Firestore
 exports.syncCharacterToFirestore = onRequest(async (req, res) => {

@@ -27,6 +27,7 @@ import 'shared/character_cache_service.dart';
 import 'config/app_config.dart';
 import 'shared/impersonation_service.dart';
 import 'shared/admin_cache_service.dart';
+import 'shared/timer_preferences_service.dart';
 
 final RouteObserver<ModalRoute<void>> routeObserver = RouteObserver<ModalRoute<void>>();
 
@@ -6266,23 +6267,24 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
     );
   }
 
+
   void _showAffinityPointInfo(BuildContext context) {
     final affinityPoints = widget.character.affinityPoints;
     final buffer = StringBuffer();
     
-    buffer.writeln('Total Affinity Points: ${widget.character.totalAffinityPoints}');
-    buffer.writeln('Unspent Affinity Points: ${widget.character.unspentAffinityPoints}');
-    buffer.writeln('');
+    // Show regular AP amount
+    final apAmount = affinityPoints['amount'] ?? widget.character.totalAffinityPoints;
+    buffer.writeln('Affinity Points: $apAmount');
     
-    if (affinityPoints.containsKey('affinityPointsByTier')) {
-      final byTier = affinityPoints['affinityPointsByTier'] as Map<String, dynamic>?;
-      if (byTier != null) {
-        buffer.writeln('By Tier:');
-        byTier.forEach((tier, points) {
-          buffer.writeln('• $tier: $points');
-        });
-      }
+    // Show Perfect Cultivation Points
+    final perfectCultivation = widget.character.perfectCultivationPoints;
+    if (perfectCultivation > 0) {
+      buffer.writeln('Perfect Cultivation Points: $perfectCultivation');
     }
+    
+    buffer.writeln('');
+    buffer.writeln('Total Affinity Points: ${widget.character.totalAffinityPoints}');
+    buffer.writeln('Unspent: ${widget.character.unspentAffinityPoints}');
 
     showDialog(
       context: context,
@@ -8053,6 +8055,10 @@ class _ProfilePageState extends State<ProfilePage> {
   
   // Impersonation state
   bool _isImpersonating = false;
+  
+  // Timer settings
+  bool _soundEnabled = true;
+  bool _vibrationEnabled = true;
 
   Future<void> _disconnectDiscord() async {
     // Show loading while disconnecting
@@ -8105,6 +8111,31 @@ class _ProfilePageState extends State<ProfilePage> {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error disconnecting')));
     }
   }
+  
+  Future<void> _loadTimerSettings() async {
+    final soundEnabled = await TimerPreferencesService.isSoundEnabled();
+    final vibrationEnabled = await TimerPreferencesService.isVibrationEnabled();
+    if (mounted) {
+      setState(() {
+        _soundEnabled = soundEnabled;
+        _vibrationEnabled = vibrationEnabled;
+      });
+    }
+  }
+  
+  Future<void> _toggleSound(bool value) async {
+    await TimerPreferencesService.setSoundEnabled(value);
+    setState(() {
+      _soundEnabled = value;
+    });
+  }
+  
+  Future<void> _toggleVibration(bool value) async {
+    await TimerPreferencesService.setVibrationEnabled(value);
+    setState(() {
+      _vibrationEnabled = value;
+    });
+  }
 
   @override
   void initState() {
@@ -8112,6 +8143,7 @@ class _ProfilePageState extends State<ProfilePage> {
     _loadCachedDiscordLinkState();
     fetchCharacterFromFirebase();
     _refreshDiscordLinkStatus();
+    _loadTimerSettings();
     
     // Initialize impersonation status
     _isImpersonating = ImpersonationService.isImpersonating;
@@ -8636,6 +8668,71 @@ class _ProfilePageState extends State<ProfilePage> {
                 ]
               ],
             ),
+            
+            SizedBox(height: 20),
+            
+            // Timer Settings
+            Container(
+              padding: EdgeInsets.all(16),
+              margin: EdgeInsets.symmetric(horizontal: 16),
+              decoration: BoxDecoration(
+                color: Colors.grey[900],
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.amber.shade700, width: 1),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(Icons.settings, color: Colors.amber, size: 20),
+                      SizedBox(width: 8),
+                      Text(
+                        'Timer Settings',
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.amber,
+                        ),
+                      ),
+                    ],
+                  ),
+                  SizedBox(height: 12),
+                  SwitchListTile(
+                    title: Text(
+                      'Sound',
+                      style: TextStyle(fontSize: 14, color: Colors.white),
+                    ),
+                    subtitle: Text(
+                      'Beep when timers complete',
+                      style: TextStyle(fontSize: 12, color: Colors.grey[400]),
+                    ),
+                    value: _soundEnabled,
+                    onChanged: _toggleSound,
+                    activeColor: Colors.cyan,
+                    contentPadding: EdgeInsets.zero,
+                    dense: true,
+                  ),
+                  SwitchListTile(
+                    title: Text(
+                      'Vibration',
+                      style: TextStyle(fontSize: 14, color: Colors.white),
+                    ),
+                    subtitle: Text(
+                      'Vibrate on mobile browsers',
+                      style: TextStyle(fontSize: 12, color: Colors.grey[400]),
+                    ),
+                    value: _vibrationEnabled,
+                    onChanged: _toggleVibration,
+                    activeColor: Colors.cyan,
+                    contentPadding: EdgeInsets.zero,
+                    dense: true,
+                  ),
+                ],
+              ),
+            ),
+            
+            SizedBox(height: 20),
             
             ElevatedButton(
               onPressed: () async {

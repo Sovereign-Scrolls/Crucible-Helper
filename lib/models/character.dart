@@ -31,8 +31,9 @@ class Character {
     this.playerUid,
   });
 
-  int get totalAffinityPoints => affinityPoints['affinityPointsTotal'] ?? 0;
-  int get unspentAffinityPoints => affinityPoints['affinityTierPointUnspent'] ?? 0;
+  int get totalAffinityPoints => (affinityPoints['Total Affinity Points'] ?? affinityPoints['affinityPointsTotal'] ?? 0) as int;
+  int get unspentAffinityPoints => (affinityPoints['unspent'] ?? affinityPoints['affinityTierPointUnspent'] ?? 0) as int;
+  int get perfectCultivationPoints => (affinityPoints['Perfect Cultivation Points'] ?? 0) as int;
 
   factory Character.fromJson(Map<String, dynamic> json, {String? id}) {
     final dynamic rawNumber = json['characterNumber'];

@@ -26,6 +26,9 @@ class AppConfig {
   static String get syncMasterLogsUrl => 
     'https://$firebaseRegion-$firebaseProjectId.cloudfunctions.net/syncMasterLogs';
 
+  static String get resetCharacterUrl => 
+    'https://$firebaseRegion-$firebaseProjectId.cloudfunctions.net/resetCharacter';
+
   static String get calculateCharacterUrl => 
     'https://$firebaseRegion-$firebaseProjectId.cloudfunctions.net/calculateCharacter';
 
