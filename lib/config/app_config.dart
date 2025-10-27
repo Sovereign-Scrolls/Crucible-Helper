@@ -90,11 +90,17 @@ class AppConfig {
   static String get initializeUserStructureUrl => 
     'https://$firebaseRegion-$firebaseProjectId.cloudfunctions.net/initializeUserStructure';
 
+  static String get createCharacterUrl => 
+    'https://$firebaseRegion-$firebaseProjectId.cloudfunctions.net/createCharacter';
+
   static String get tradeMonsterCoreUrl => 
     'https://$firebaseRegion-$firebaseProjectId.cloudfunctions.net/tradeMonsterCore';
 
-  static String get testCharacterStructureUrl => 
+  static String get testCharacterStructureUrl =>
     'https://$firebaseRegion-$firebaseProjectId.cloudfunctions.net/testCharacterStructure';
+
+  static String get regenerateCharacterFromMasterLogsUrl =>
+    'https://$firebaseRegion-$firebaseProjectId.cloudfunctions.net/regenerateCharacterFromMasterLogs';
 
   // Discord OAuth endpoints
   static String get getDiscordAuthorizeUrl =>
@@ -152,6 +158,22 @@ class AppConfig {
   // Events
   static String get getEventsUrl =>
     'https://$firebaseRegion-$firebaseProjectId.cloudfunctions.net/getEvents';
+
+  // Rules sync
+  static String get syncRulesDbUrl =>
+    'https://$firebaseRegion-$firebaseProjectId.cloudfunctions.net/syncRulesDb';
+
+  // App configuration
+  static String get getAppConfigUrl =>
+    'https://$firebaseRegion-$firebaseProjectId.cloudfunctions.net/getAppConfig';
+  static String get updateAppConfigUrl =>
+    'https://$firebaseRegion-$firebaseProjectId.cloudfunctions.net/updateAppConfig';
+
+  // Event check-ins
+  static String get getEventCheckInsUrl =>
+    'https://$firebaseRegion-$firebaseProjectId.cloudfunctions.net/getEventCheckIns';
+  static String get massCheckInPlayersUrl =>
+    'https://$firebaseRegion-$firebaseProjectId.cloudfunctions.net/massCheckInPlayers';
 
   // Development/Production flags
   static const bool isDevelopment = bool.fromEnvironment(

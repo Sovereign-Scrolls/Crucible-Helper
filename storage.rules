@@ -1,0 +1,26 @@
+rules_version = '2';
+
+// Craft rules based on data in your Firestore database
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Allow authenticated users to upload race images
+    match /race_images/{raceName} {
+      allow read, write: if request.auth != null;
+    }
+    
+    // Allow authenticated users to upload character QR codes
+    match /users/{userId}/qr_codes/{fileName} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+    
+    // Allow authenticated users to upload character data (legacy)
+    match /users/{userId}/pc.json {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+    
+    // Allow authenticated users to upload other character files
+    match /users/{userId}/{fileName} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+  }
+}

@@ -5,6 +5,7 @@ import 'dart:convert';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'firebase_options.dart';
@@ -23,11 +24,14 @@ import 'pages/rules_page.dart';
 import 'pages/death_timer_page.dart';
 import 'pages/admin_page.dart';
 import 'pages/new_sheet_page.dart';
+import 'pages/new_character_form.dart';
 import 'shared/character_cache_service.dart';
 import 'config/app_config.dart';
 import 'shared/impersonation_service.dart';
 import 'shared/admin_cache_service.dart';
 import 'shared/timer_preferences_service.dart';
+import 'shared/npc_cache_service.dart';
+import 'shared/qr_code_cache_service.dart';
 
 final RouteObserver<ModalRoute<void>> routeObserver = RouteObserver<ModalRoute<void>>();
 
@@ -281,6 +285,7 @@ class _HomePageState extends State<HomePage> {
   Map<String, bool> eventCheckInStatus = {};
   Map<String, bool> isLoadingRegistrationStatus = {};
   bool _isSuperAdmin = false;
+  int _slotableValue = 0; // Store slotable value from Firestore
   
   // Individual loading states for different components
   final Map<String, bool> _loadingStates = {
@@ -293,12 +298,16 @@ class _HomePageState extends State<HomePage> {
   
   // Impersonation state
   bool _isImpersonating = false;
+  
+  // Session tracking for new character dialog
+  bool _hasCompletedNewCharacterDialog = false;
 
   @override
   void initState() {
     super.initState();
     // Initialize impersonation status immediately
     _isImpersonating = ImpersonationService.isImpersonating;
+    _loadSessionState();
     _initializeApp();
   }
 
@@ -315,13 +324,147 @@ class _HomePageState extends State<HomePage> {
   
   /// Get loading state for impersonation
   bool get isImpersonationLoading => _loadingStates['impersonation'] ?? false;
+  
+  /// Get loading state for character
+  bool get isCharacterLoading => _loadingStates['character'] ?? true;
+
+  /// Build character section for HomePage
+  Widget _buildCharacterSection() {
+    
+    // Character Info Section
+    if (isCharacterLoading) {
+      return Center(
+        child: Column(
+          children: [
+            CircularProgressIndicator(),
+            SizedBox(height: 16),
+            Text(
+              'Loading character...',
+              style: TextStyle(color: Colors.grey[400]),
+            ),
+          ],
+        ),
+      );
+    } else if (character != null) {
+      print('✅ Character found, hiding welcome card');
+      return SizedBox.shrink(); // Don't show anything for users with characters
+    } else if (_hasCompletedNewCharacterDialog) {
+      print('✅ User has completed new character dialog this session, hiding welcome card');
+      return SizedBox.shrink(); // Don't show welcome card if user completed dialog this session
+    } else {
+      print('❌ No character found and dialog not completed, showing welcome card');
+      return Center(
+        child: Container(
+          width: double.infinity,
+          margin: EdgeInsets.symmetric(horizontal: 20),
+          padding: EdgeInsets.all(32),
+          decoration: BoxDecoration(
+            color: Colors.blue.shade50,
+            border: Border.all(color: Colors.blue.shade200),
+            borderRadius: BorderRadius.circular(16),
+          ),
+          child: Column(
+            children: [
+              Icon(
+                Icons.person_add,
+                size: 64,
+                color: Colors.blue.shade600,
+              ),
+              SizedBox(height: 24),
+              Text(
+                'Welcome!',
+                style: TextStyle(
+                  fontSize: 28,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.blue.shade800,
+                ),
+              ),
+              SizedBox(height: 12),
+              Text(
+                'Create your first character to get started',
+                style: TextStyle(
+                  fontSize: 16,
+                  color: Colors.grey.shade600,
+                ),
+                textAlign: TextAlign.center,
+              ),
+              SizedBox(height: 32),
+              ElevatedButton.icon(
+                onPressed: () async {
+                  final result = await Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (context) => NewCharacterForm(),
+                    ),
+                  );
+                  // Mark dialog as completed regardless of result (user has seen the dialog)
+                  await _markNewCharacterDialogCompleted();
+                  
+                  if (result == true) {
+                    // Character was created, refresh the page
+                    print('🔄 Character creation completed, refreshing character data...');
+                    await fetchCharacter();
+                    print('🔄 Character refresh completed');
+                  }
+                },
+                icon: Icon(Icons.add),
+                label: Text('Create Character'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.blue.shade600,
+                  foregroundColor: Colors.white,
+                  padding: EdgeInsets.symmetric(horizontal: 32, vertical: 16),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+  }
 
   /// Mark a loading operation as complete
   void _markLoadingComplete(String operation) {
-    setState(() {
-      _loadingStates[operation] = false;
-    });
+    if (mounted) {
+      setState(() {
+        _loadingStates[operation] = false;
+      });
+    }
     print('✅ Completed loading: $operation');
+  }
+
+  /// Load session state from SharedPreferences
+  Future<void> _loadSessionState() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      _hasCompletedNewCharacterDialog = prefs.getBool('hasCompletedNewCharacterDialog') ?? false;
+      print('📱 Session state loaded - hasCompletedNewCharacterDialog: $_hasCompletedNewCharacterDialog');
+    } catch (e) {
+      print('❌ Error loading session state: $e');
+      _hasCompletedNewCharacterDialog = false;
+    }
+  }
+
+  /// Save session state to SharedPreferences
+  Future<void> _saveSessionState() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('hasCompletedNewCharacterDialog', _hasCompletedNewCharacterDialog);
+      print('💾 Session state saved - hasCompletedNewCharacterDialog: $_hasCompletedNewCharacterDialog');
+    } catch (e) {
+      print('❌ Error saving session state: $e');
+    }
+  }
+
+  /// Mark that user has completed new character dialog
+  Future<void> _markNewCharacterDialogCompleted() async {
+    _hasCompletedNewCharacterDialog = true;
+    await _saveSessionState();
+    if (mounted) {
+      setState(() {});
+    }
   }
 
   /// Initialize all app components
@@ -331,11 +474,10 @@ class _HomePageState extends State<HomePage> {
     // Start all initialization tasks
     _fetchCharacterWithLoading();
     _fetchActiveEventsWithLoading();
-    _initializeUserStructureWithLoading();
+    // _initializeUserStructureWithLoading(); // Removed - no longer needed with new character number system
     _checkSuperAdminPermissionsWithLoading();
     
-    // Refresh cache from DB if last_sync is newer (non-blocking)
-    CharacterCacheService.refreshIfStale().catchError((_) => false);
+    // Note: Cache refresh is now handled synchronously in _fetchSlotableValueFromCache()
     
     // Set up impersonation callback to refresh character data
     ImpersonationService.setOnImpersonationChange(() {
@@ -355,9 +497,11 @@ class _HomePageState extends State<HomePage> {
         final wasImpersonating = _isImpersonating;
         final nowImpersonating = ImpersonationService.isImpersonating;
         
-        setState(() {
-          _isImpersonating = nowImpersonating;
-        });
+        if (mounted) {
+          setState(() {
+            _isImpersonating = nowImpersonating;
+          });
+        }
         
         // If we stopped impersonating, refresh the character data
         if (wasImpersonating && !nowImpersonating) {
@@ -411,6 +555,7 @@ class _HomePageState extends State<HomePage> {
       final email = ImpersonationService.getEffectiveEmail() ?? user?.email;
       
       print('🔄 fetchCharacter called - isImpersonating: ${ImpersonationService.isImpersonating}, effectiveUid: $effectiveUid, email: $email');
+      print('🔄 fetchCharacter: User UID: ${user?.uid}');
       
       if (email == null) {
         throw Exception("User email is null");
@@ -420,34 +565,273 @@ class _HomePageState extends State<HomePage> {
       if (ImpersonationService.isImpersonating && effectiveUid != null) {
         print('🎭 Loading character from API for impersonation');
         await _loadCharacterFromAPI(effectiveUid);
+        await _fetchSlotableValueFromCache(); // Also fetch slotable value from cache
         return;
       }
 
-      // Normal flow: load from Firebase Storage
+      // New flow: First check Firestore (database), then fall back to Storage
+      print('🔍 Checking Firestore for character data...');
+      await _checkAndLoadCharacterFromFirestore(user?.uid ?? '', email);
+    } catch (e) {
+      print('Error fetching character JSON: $e');
+    }
+  }
+
+  /// Check Firestore first, then fall back to Storage, then show new character form
+  Future<void> _checkAndLoadCharacterFromFirestore(String uid, String email) async {
+    try {
+      print('🔍 Checking Firestore for character data...');
+      
+      // Check if user has any characters in Firestore
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) {
+        print('❌ User not authenticated');
+        if (mounted) {
+          if (mounted) {
+            if (mounted) {
+              setState(() {
+                character = null;
+              });
+            }
+          }
+        }
+        return;
+      }
+      
+      final idToken = await user.getIdToken();
+      final response = await http.get(
+        Uri.parse(AppConfig.getCharactersUrl),
+        headers: {
+          'Authorization': 'Bearer $idToken',
+          'Content-Type': 'application/json',
+        },
+      );
+      
+      if (response.statusCode == 200) {
+        final responseData = json.decode(response.body);
+        if (responseData['ok'] == true && responseData['characters'] != null) {
+          final characters = responseData['characters'] as List;
+          if (characters.isNotEmpty) {
+            print('📊 Found ${characters.length} character(s) in Firestore');
+            
+            // Get the first character and load it
+            final characterData = characters.first;
+            final characterId = characterData['id'] as String;
+            
+            // Extract character number from characterId (format: uid_characterNumber)
+            final parts = characterId.split('_');
+            if (parts.length >= 2) {
+              final characterNumber = parts[1];
+              print('🎯 Loading character from Firestore: $characterNumber');
+              
+              // Load character from Firestore
+              await _loadCharacterFromFirestore(uid, characterNumber);
+              return;
+            }
+          } else {
+            print('📭 No characters found in Firestore - new user, no fallback needed');
+            // For new users, don't fall back to Storage - they should create a character instead
+            if (mounted) {
+              setState(() {
+                character = null;
+              });
+            }
+            return;
+          }
+        } else {
+          print('⚠️ Failed to get characters from API: ${responseData['error']}');
+          // Don't fall back to Storage for new users - they should create a character
+          if (mounted) {
+            if (mounted) {
+              setState(() {
+                character = null;
+              });
+            }
+          }
+          return;
+        }
+      } else {
+        print('⚠️ Failed to check characters: ${response.statusCode}');
+        // Don't fall back to Storage for new users - they should create a character
+        if (mounted) {
+          if (mounted) {
+            if (mounted) {
+              setState(() {
+                character = null;
+              });
+            }
+          }
+        }
+        return;
+      }
+    } catch (e) {
+      print('❌ Error checking Firestore: $e');
+      // Don't fall back to Storage for new users - they should create a character
+      if (mounted) {
+        setState(() {
+          character = null;
+        });
+      }
+    }
+  }
+
+  /// Fallback to Storage for backward compatibility
+  Future<void> _fallbackToStorage(String email) async {
+    try {
+      print('🔄 Falling back to Storage for character data...');
       final ref = FirebaseStorage.instance.ref().child('users/$email/pc.json');
       final data = await ref.getData();
       if (data != null) {
         final jsonString = utf8.decode(data);
         final jsonMap = json.decode(jsonString);
         final fetchedCharacter = Character.fromJson(jsonMap);
-        setState(() {
-          character = fetchedCharacter;
-        });
+        if (mounted) {
+          if (mounted) {
+            setState(() {
+              character = fetchedCharacter;
+            });
+          }
+        }
         
         // Set the global cachedCharacter so other pages can access it
         cachedCharacter = fetchedCharacter;
-        print('✅ Character cached globally from HomePage');
+        print('✅ Character loaded from Storage (legacy)');
         
-        // Also try to download QR code (don't fail if it doesn't exist)
-        _downloadQRCode(email);
+        // Fetch slotable value from local cache (not live Firestore)
+        await _fetchSlotableValueFromCache();
+        
+        // QR code will be loaded on-demand by the QRCodeDisplay widget
       } else {
-        // No character data found - check if they have data in Firestore and trigger calculation
-        print('📋 No character data found in Storage, checking Firestore...');
-        await _checkAndCalculateCharacterIfNeeded(user?.uid ?? '', email);
+        print('📭 No character data found in Storage either');
+        if (mounted) {
+          if (mounted) {
+            if (mounted) {
+              setState(() {
+                character = null;
+              });
+            }
+          }
+        }
       }
     } catch (e) {
-      print('Error fetching character JSON: $e');
+      print('❌ Error loading from Storage: $e');
+      if (mounted) {
+        if (mounted) {
+          if (mounted) {
+            if (mounted) {
+              setState(() {
+                character = null;
+              });
+            }
+          }
+        }
+      }
     }
+  }
+
+  /// Load character from Firestore
+  Future<void> _loadCharacterFromFirestore(String uid, String characterNumber) async {
+    try {
+      // Load character directly from API instead of triggering calculation
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) {
+        print('❌ User not authenticated');
+        if (mounted) {
+          if (mounted) {
+            if (mounted) {
+              setState(() {
+                character = null;
+              });
+            }
+          }
+        }
+        return;
+      }
+
+      final idToken = await user.getIdToken();
+      final response = await http.get(
+        Uri.parse('${AppConfig.getCharacterByIdUrl}?characterId=${uid}_$characterNumber'),
+        headers: {
+          'Authorization': 'Bearer $idToken',
+          'Content-Type': 'application/json',
+        },
+      );
+
+      if (response.statusCode == 200) {
+        final responseData = json.decode(response.body);
+        if (responseData['ok'] == true && responseData['character'] != null) {
+          final characterData = responseData['character'];
+          final fetchedCharacter = Character.fromJson(characterData);
+          
+          // Check if this is a placeholder/empty character
+          if (_isPlaceholderCharacter(fetchedCharacter)) {
+            print('📭 Character is a placeholder with unknown values, treating as no character');
+            if (mounted) {
+              setState(() {
+                character = null;
+              });
+            }
+          } else {
+            if (mounted) {
+              setState(() {
+                character = fetchedCharacter;
+              });
+            }
+            cachedCharacter = fetchedCharacter;
+            print('✅ Character loaded from Firestore API');
+            
+            // Fetch slotable value from local cache
+            await _fetchSlotableValueFromCache();
+          }
+        } else {
+          print('❌ Failed to load character from API: ${responseData['error']}');
+          if (mounted) {
+            if (mounted) {
+              setState(() {
+                character = null;
+              });
+            }
+          }
+        }
+      } else {
+        print('❌ Failed to load character: ${response.statusCode}');
+        if (mounted) {
+          if (mounted) {
+            if (mounted) {
+              setState(() {
+                character = null;
+              });
+            }
+          }
+        }
+      }
+    } catch (e) {
+      print('❌ Error loading character from Firestore: $e');
+      if (mounted) {
+        if (mounted) {
+          if (mounted) {
+            if (mounted) {
+              setState(() {
+                character = null;
+              });
+            }
+          }
+        }
+      }
+    }
+  }
+
+  /// Check if a character is a placeholder with unknown/empty values
+  bool _isPlaceholderCharacter(Character character) {
+    // Check for placeholder values that indicate an empty/initialized character
+    return character.characterName == 'Unknown' ||
+           character.characterName.isEmpty ||
+           character.playerName == 'Unknown' ||
+           character.playerName.isEmpty ||
+           character.race == 'Unknown' ||
+           character.race.isEmpty ||
+           character.cultivationTier == 'Unknown' ||
+           character.cultivationTier.isEmpty;
   }
 
   /// Check if user has character data in Firestore and trigger calculation if needed
@@ -490,15 +874,45 @@ class _HomePageState extends State<HomePage> {
             }
           } else {
             print('📭 No characters found in Firestore for user');
+            // Ensure character is null for new users
+            if (mounted) {
+              setState(() {
+                character = null;
+              });
+            }
           }
         } else {
           print('⚠️ Failed to get characters from API: ${responseData['error']}');
+          // Ensure character is null if API fails
+          if (mounted) {
+            if (mounted) {
+              setState(() {
+                character = null;
+              });
+            }
+          }
         }
       } else {
         print('⚠️ Failed to check characters: ${response.statusCode}');
+        // Ensure character is null if API call fails
+        if (mounted) {
+          if (mounted) {
+            if (mounted) {
+              setState(() {
+                character = null;
+              });
+            }
+          }
+        }
       }
     } catch (e) {
       print('❌ Error checking character data: $e');
+      // Ensure character is null if there's an error
+      if (mounted) {
+        setState(() {
+          character = null;
+        });
+      }
     }
   }
 
@@ -530,8 +944,8 @@ class _HomePageState extends State<HomePage> {
         final responseData = json.decode(response.body);
         if (responseData['ok'] == true) {
           print('✅ Character calculation completed successfully');
-          // After successful calculation, try to fetch the character again
-          await fetchCharacter();
+          // Don't call fetchCharacter() here to avoid infinite loop
+          // The character will be loaded by the calling method
         } else {
           print('⚠️ Character calculation failed: ${responseData['error']}');
         }
@@ -544,21 +958,101 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  Future<void> _fetchSlotableValueFromCache() async {
+    try {
+      // First ensure cache is populated/refreshed
+      try {
+        await CharacterCacheService.refreshIfStale();
+      } catch (e) {
+        print('⚠️ Cache refresh failed, attempting to load from existing cache: $e');
+      }
+      
+      // Load from local cache instead of making a live Firestore query
+      final cached = await CharacterCacheService.loadCachedSnapshot();
+      
+      if (cached != null) {
+        final apData = cached['affinity_points'];
+        if (apData != null && apData is Map) {
+          final totalDoc = apData['total'];
+          if (totalDoc != null && totalDoc is Map) {
+            final slotable = totalDoc['Slotable'];
+            if (slotable != null) {
+              if (mounted) {
+                setState(() {
+                  _slotableValue = slotable is int ? slotable : int.tryParse(slotable.toString()) ?? 0;
+                });
+              }
+              print('✅ Fetched slotable value from cache: $_slotableValue');
+              return;
+            }
+          }
+        }
+      }
+      
+      // If we get here, cache is empty or missing slotable data
+      // Try to fetch directly from Firestore as fallback
+      print('📋 Cache empty or missing slotable data, fetching directly from Firestore...');
+      await _fetchSlotableValueDirectFromFirestore();
+      
+    } catch (e) {
+      print('⚠️ Error fetching slotable value from cache: $e');
+    }
+  }
+
+  Future<void> _fetchSlotableValueDirectFromFirestore() async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) return;
+      
+      final db = FirebaseFirestore.instance;
+      final charQuery = await db.collection('players').doc(user.uid).collection('characters').limit(1).get();
+      
+      if (charQuery.docs.isEmpty) {
+        print('⚠️ No character found in Firestore for slotable value');
+        return;
+      }
+      
+      final charRef = charQuery.docs.first.reference;
+      final totalDoc = await charRef.collection('affinity_points').doc('Total').get();
+      
+      if (totalDoc.exists) {
+        final data = totalDoc.data();
+        final slotable = data?['Slotable'];
+        if (slotable != null) {
+          if (mounted) {
+            setState(() {
+              _slotableValue = slotable is int ? slotable : int.tryParse(slotable.toString()) ?? 0;
+            });
+          }
+          print('✅ Fetched slotable value directly from Firestore: $_slotableValue');
+        }
+      } else {
+        print('⚠️ No Total document found in affinity_points collection');
+      }
+    } catch (e) {
+      print('⚠️ Error fetching slotable value directly from Firestore: $e');
+    }
+  }
+
   Future<void> _loadCharacterFromAPI(String targetUid) async {
     try {
       print('🎭 _loadCharacterFromAPI called for targetUid: $targetUid');
       
       // Set loading state for impersonation
-      setState(() {
-        _loadingStates['impersonation'] = true;
-      });
+      if (mounted) {
+        setState(() {
+          _loadingStates['impersonation'] = true;
+        });
+      }
       
       final user = FirebaseAuth.instance.currentUser;
       if (user == null) {
         print('🎭 No user found, returning');
-        setState(() {
-          _loadingStates['impersonation'] = false;
-        });
+        if (mounted) {
+          setState(() {
+            _loadingStates['impersonation'] = false;
+          });
+        }
         return;
       }
 
@@ -628,9 +1122,11 @@ class _HomePageState extends State<HomePage> {
         if (responseData['ok'] == true) {
           final characterJson = responseData['character'];
           final fetchedCharacter = Character.fromJson(characterJson);
-          setState(() {
-            character = fetchedCharacter;
-          });
+          if (mounted) {
+            setState(() {
+              character = fetchedCharacter;
+            });
+          }
           
           // Set the global cachedCharacter so other pages can access it
           cachedCharacter = fetchedCharacter;
@@ -639,16 +1135,20 @@ class _HomePageState extends State<HomePage> {
       }
       
       // Mark impersonation loading as complete
-      setState(() {
-        _loadingStates['impersonation'] = false;
-      });
+      if (mounted) {
+        setState(() {
+          _loadingStates['impersonation'] = false;
+        });
+      }
     } catch (e) {
       print('Error loading character details: $e');
       
       // Mark impersonation loading as complete even on error
-      setState(() {
-        _loadingStates['impersonation'] = false;
-      });
+      if (mounted) {
+        setState(() {
+          _loadingStates['impersonation'] = false;
+        });
+      }
     }
   }
 
@@ -688,19 +1188,6 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  Future<String?> _downloadQRCode(String email) async {
-    try {
-      final qrRef = FirebaseStorage.instance.ref().child('users/$email/qr.png');
-      final data = await qrRef.getData();
-      if (data != null) {
-        print('✅ QR code downloaded');
-        return 'https://storage.googleapis.com/crucible-helper-storage/users/$email/qr.png';
-      }
-    } catch (e) {
-      print('⚠️ QR code not available: $e');
-    }
-    return null;
-  }
 
   Future<void> _initializeUserStructure() async {
     try {
@@ -743,9 +1230,11 @@ class _HomePageState extends State<HomePage> {
     try {
       final user = FirebaseAuth.instance.currentUser;
       if (user == null) {
-        setState(() {
-          isLoadingEvents = false;
-        });
+        if (mounted) {
+          setState(() {
+            isLoadingEvents = false;
+          });
+        }
         return;
       }
 
@@ -774,10 +1263,12 @@ class _HomePageState extends State<HomePage> {
                    event.startDateTime.isAfter(now);
           }).toList();
 
-          setState(() {
-            activeEvents = active;
-            isLoadingEvents = false;
-          });
+          if (mounted) {
+            setState(() {
+              activeEvents = active;
+              isLoadingEvents = false;
+            });
+          }
 
           // Check registration status for each active event
           for (final event in active) {
@@ -789,23 +1280,31 @@ class _HomePageState extends State<HomePage> {
           });
         }
       } else {
-        setState(() {
-          isLoadingEvents = false;
-        });
+        if (mounted) {
+          setState(() {
+            isLoadingEvents = false;
+          });
+        }
       }
     } catch (error) {
       print('Error fetching active events: $error');
-      setState(() {
-        isLoadingEvents = false;
-      });
+      if (mounted) {
+        if (mounted) {
+          setState(() {
+            isLoadingEvents = false;
+          });
+        }
+      }
     }
   }
 
   Future<void> checkEventRegistrationStatus(String eventId) async {
     try {
-      setState(() {
-        isLoadingRegistrationStatus[eventId] = true;
-      });
+      if (mounted) {
+        setState(() {
+          isLoadingRegistrationStatus[eventId] = true;
+        });
+      }
 
       final user = FirebaseAuth.instance.currentUser;
       if (user == null) return;
@@ -824,27 +1323,35 @@ class _HomePageState extends State<HomePage> {
         final data = json.decode(response.body);
         final isRegistered = data['ok'] == true && data['registration'] != null;
         
-        setState(() {
-          eventRegistrationStatus[eventId] = isRegistered;
-          isLoadingRegistrationStatus[eventId] = false;
-        });
+        if (mounted) {
+          setState(() {
+            eventRegistrationStatus[eventId] = isRegistered;
+            isLoadingRegistrationStatus[eventId] = false;
+          });
+        }
 
         // If registered, check check-in status
         if (isRegistered) {
           checkEventCheckInStatus(eventId);
         }
       } else {
-        setState(() {
-          eventRegistrationStatus[eventId] = false;
-          isLoadingRegistrationStatus[eventId] = false;
-        });
+        if (mounted) {
+          setState(() {
+            eventRegistrationStatus[eventId] = false;
+            isLoadingRegistrationStatus[eventId] = false;
+          });
+        }
       }
     } catch (error) {
       print('Error checking registration status for event $eventId: $error');
-      setState(() {
-        eventRegistrationStatus[eventId] = false;
-        isLoadingRegistrationStatus[eventId] = false;
-      });
+      if (mounted) {
+        if (mounted) {
+          setState(() {
+            eventRegistrationStatus[eventId] = false;
+            isLoadingRegistrationStatus[eventId] = false;
+          });
+        }
+      }
     }
   }
 
@@ -871,19 +1378,25 @@ class _HomePageState extends State<HomePage> {
         final data = json.decode(response.body);
         final isCheckedIn = data['ok'] == true && data['isCheckedIn'] == true;
         
-        setState(() {
-          eventCheckInStatus[eventId] = isCheckedIn;
-        });
+        if (mounted) {
+          setState(() {
+            eventCheckInStatus[eventId] = isCheckedIn;
+          });
+        }
       } else {
+        if (mounted) {
+          setState(() {
+            eventCheckInStatus[eventId] = false;
+          });
+        }
+      }
+    } catch (error) {
+      print('Error checking check-in status for event $eventId: $error');
+      if (mounted) {
         setState(() {
           eventCheckInStatus[eventId] = false;
         });
       }
-    } catch (error) {
-      print('Error checking check-in status for event $eventId: $error');
-      setState(() {
-        eventCheckInStatus[eventId] = false;
-      });
     }
   }
 
@@ -1021,15 +1534,9 @@ class _HomePageState extends State<HomePage> {
       floatingActionButton: isWide ? null : FloatingActionButton.large(
         tooltip: 'Character',
         onPressed: () {
-          if (character != null) {
-            Navigator.push(context, MaterialPageRoute(
-              builder: (_) => CharacterSheetPage(character: character!),
-            ));
-          } else {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text('Character data not loaded yet')),
-            );
-          }
+          Navigator.push(context, MaterialPageRoute(
+            builder: (_) => NewSheetPage(),
+          ));
         },
         child: Icon(Icons.person),
       ),
@@ -1100,15 +1607,9 @@ class _HomePageState extends State<HomePage> {
                         icon: Icon(Icons.person),
                         label: Text('Character'),
                         onPressed: () {
-                          if (character != null) {
-                            Navigator.push(context, MaterialPageRoute(
-                              builder: (_) => CharacterSheetPage(character: character!),
-                            ));
-                          } else {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(content: Text('Character data not loaded yet')),
-                            );
-                          }
+                          Navigator.push(context, MaterialPageRoute(
+                            builder: (_) => NewSheetPage(),
+                          ));
                         },
                       ),
                     ),
@@ -1183,28 +1684,114 @@ class _HomePageState extends State<HomePage> {
       );
     }
     
-    return Column(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        if (activeEvents.isNotEmpty) _buildActiveEventsSection(),
-        Expanded(
-          child: Center(
-            child: LayoutBuilder(
-              builder: (context, constraints) {
-                double screenHeight = constraints.maxHeight;
-                double logoSize = screenHeight * 0.25;
-                if (logoSize > 200) {
-                  logoSize = 200;
-                }
-                return Image.asset(
-                  'assets/logo.png',
-                  height: logoSize,
-                );
-              },
+    return SingleChildScrollView(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          SizedBox(height: 40),
+          // Centered logo
+          Center(
+            child: Image.asset(
+              'assets/logo.png',
+              height: 150,
             ),
           ),
-        ),
-      ],
+          SizedBox(height: 32),
+          // Character section (below logo)
+          _buildCharacterSection(),
+          SizedBox(height: 24),
+          // Only show Advancement Notes and Active Events if user has a character
+          if (character != null) ...[
+            _buildAdvancementNotesSection(),
+            if (activeEvents.isNotEmpty) _buildActiveEventsSection(),
+          ],
+          SizedBox(height: 40), // Bottom padding
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAdvancementNotesSection() {
+    // Use slotable value fetched from Firestore
+    final slotable = _slotableValue;
+    
+    return Container(
+      margin: EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Advancement Notes',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 18,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          SizedBox(height: 8),
+          Card(
+            color: Colors.grey[900],
+            child: Padding(
+              padding: EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Cores',
+                    style: TextStyle(
+                      color: Colors.amber,
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  SizedBox(height: 8),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        'Can Consume:',
+                        style: TextStyle(
+                          color: Colors.grey[300],
+                          fontSize: 14,
+                        ),
+                      ),
+                      Text(
+                        'Coming soon',
+                        style: TextStyle(
+                          color: Colors.grey[500],
+                          fontSize: 14,
+                          fontStyle: FontStyle.italic,
+                        ),
+                      ),
+                    ],
+                  ),
+                  SizedBox(height: 4),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        'Can Slot:',
+                        style: TextStyle(
+                          color: Colors.grey[300],
+                          fontSize: 14,
+                        ),
+                      ),
+                      Text(
+                        '$slotable',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 14,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -1512,45 +2099,45 @@ class _QRScannerPageState extends State<QRScannerPage> {
       
       // Debug: Print the QR data for troubleshooting
       print('🔍 Monster Core QR data: $data');
-                      print('🔍 Core ID: $coreId');
+      print('🔍 Core ID: $coreId');
       
-                      // Show loading dialog while checking core status
-                showDialog(
-                  context: context,
-                  barrierDismissible: false,
-                  builder: (BuildContext context) {
-                    return AlertDialog(
-                      title: Text('Checking Core Status'),
-                      content: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          CircularProgressIndicator(),
-                          SizedBox(height: 16),
-                          Text('Looking up core status...'),
-                          SizedBox(height: 8),
-                          Text('Tier: $tier', style: TextStyle(fontSize: 14, color: Colors.grey)),
-                        ],
-                      ),
-                    );
-                  },
-                );
-                
-                // Get current status from Firebase database
-                bool coreIsActive = false;
-                Map<String, dynamic>? coreData;
-                
-                try {
-                  final user = _auth.currentUser;
-                  if (user == null) {
-                    if (mounted && Navigator.of(context).canPop()) {
-                      Navigator.of(context).pop();
-                    }
-                    print('🔍 User not authenticated');
-                    _showError('User not authenticated');
-                    return;
-                  }
-                  
-                  final idToken = await user.getIdToken();
+      // Show loading dialog while checking core status
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (BuildContext context) {
+          return AlertDialog(
+            title: Text('Checking Core Status'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(height: 16),
+                Text('Looking up core status...'),
+                SizedBox(height: 8),
+                Text('Tier: $tier', style: TextStyle(fontSize: 14, color: Colors.grey)),
+              ],
+            ),
+          );
+        },
+      );
+      
+      // Get current status from Firebase database
+      bool coreIsActive = false;
+      Map<String, dynamic>? coreData;
+      
+      try {
+        final user = _auth.currentUser;
+        if (user == null) {
+          if (mounted && Navigator.of(context).canPop()) {
+            Navigator.of(context).pop();
+          }
+          print('🔍 User not authenticated');
+          _showError('User not authenticated');
+          return;
+        }
+        
+        final idToken = await user.getIdToken();
         final response = await http.get(
           Uri.parse('${AppConfig.getMonsterCoreUrl}?coreId=$coreId'),
           headers: {
@@ -3203,9 +3790,11 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
         final wasImpersonating = _isImpersonating;
         final nowImpersonating = ImpersonationService.isImpersonating;
         
-        setState(() {
-          _isImpersonating = nowImpersonating;
-        });
+        if (mounted) {
+          setState(() {
+            _isImpersonating = nowImpersonating;
+          });
+        }
         
         // If we stopped impersonating, navigate back to home to refresh
         if (wasImpersonating && !nowImpersonating) {
@@ -5066,6 +5655,53 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
     }
   }
 
+  /// Call Firebase Function to regenerate character JSON from Master Logs
+  Future<void> _regenerateCharacterFromMasterLogs() async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) {
+        print('❌ User not authenticated for regenerate');
+        return;
+      }
+
+      final idToken = await user.getIdToken();
+      final characterNumber = widget.character.characterNumber;
+      
+      print('🔄 Calling Firebase Function to regenerate character $characterNumber from Master Logs');
+      
+      final response = await http.post(
+        Uri.parse(AppConfig.regenerateCharacterFromMasterLogsUrl),
+        headers: {
+          'Authorization': 'Bearer $idToken',
+          'Content-Type': 'application/json',
+        },
+        body: json.encode({
+          'characterNumber': characterNumber.toString(),
+        }),
+      );
+
+      print('📥 Regenerate response status: ${response.statusCode}');
+      print('📥 Regenerate response body: ${response.body}');
+
+      if (response.statusCode == 200) {
+        final responseData = json.decode(response.body);
+        if (responseData['ok'] == true) {
+          print('✅ Character JSON regenerated successfully from Master Logs');
+          print('✅ Generated at: ${responseData['generatedAt']}');
+        } else {
+          print('⚠️ Regenerate failed: ${responseData['message']}');
+          throw Exception('Failed to regenerate: ${responseData['message']}');
+        }
+      } else {
+        print('❌ Regenerate HTTP error: ${response.statusCode}');
+        throw Exception('HTTP ${response.statusCode}: ${response.body}');
+      }
+    } catch (e) {
+      print('❌ Error regenerating character from Master Logs: $e');
+      rethrow;
+    }
+  }
+
   Future<void> _syncCharacterData() async {
     // Show loading indicator
     if (context.mounted) {
@@ -5079,10 +5715,10 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
                 child: CircularProgressIndicator(strokeWidth: 2),
               ),
               SizedBox(width: 12),
-              Text('Checking for updates...'),
+              Text('Regenerating from Master Logs...'),
             ],
           ),
-          duration: Duration(seconds: 2),
+          duration: Duration(seconds: 3),
         ),
       );
     }
@@ -5100,6 +5736,30 @@ class _CharacterSheetPageState extends State<CharacterSheetPage> {
       }
 
       print('🔄 Syncing character data for: $effectiveEmail (impersonating: ${ImpersonationService.isImpersonating})');
+      
+      // Step 1: Call Apps Script to regenerate character JSON from Master Logs
+      // (Only do this for non-impersonated users, as we need direct access to Google Sheets)
+      if (!ImpersonationService.isImpersonating) {
+        try {
+          await _regenerateCharacterFromMasterLogs();
+          print('✅ Character regenerated from Master Logs');
+          
+          // Give the Apps Script a moment to complete the upload
+          await Future.delayed(Duration(seconds: 1));
+        } catch (e) {
+          print('⚠️ Failed to regenerate from Master Logs: $e');
+          // Continue anyway to try fetching existing data
+          if (context.mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('⚠️ Could not regenerate from Master Logs, loading existing data...'),
+                backgroundColor: Colors.orange,
+                duration: Duration(seconds: 2),
+              ),
+            );
+          }
+        }
+      }
       
       Character? newCharacter;
       
@@ -7832,41 +8492,12 @@ class _QRCodeDisplayState extends State<_QRCodeDisplay> {
 
   Future<void> _loadQRCode() async {
     try {
-      print('🔍 Attempting to load QR code for: ${widget.email}');
-      final qrRef = FirebaseStorage.instance.ref().child('users/${widget.email}/qr.png');
-      
-      // First check if the file exists
-      try {
-        final metadata = await qrRef.getMetadata();
-        print('✅ QR code file exists: ${metadata.name}');
-      } catch (e) {
-        print('❌ QR code file does not exist: $e');
-        setState(() {
-          hasError = true;
-          isLoading = false;
-        });
-        return;
-      }
-      
-      final data = await qrRef.getData();
-      if (data != null) {
-        print('✅ QR code data loaded successfully (${data.length} bytes)');
-        
-        // Get the download URL instead of using the direct URL
-        final downloadUrl = await qrRef.getDownloadURL();
-        print('✅ QR code download URL: $downloadUrl');
-        
-        setState(() {
-          qrCodeUrl = downloadUrl;
-          isLoading = false;
-        });
-      } else {
-        print('❌ QR code data is null');
-        setState(() {
-          hasError = true;
-          isLoading = false;
-        });
-      }
+      final url = await QRCodeCacheService.getQRCodeUrl(widget.email);
+      setState(() {
+        qrCodeUrl = url;
+        isLoading = false;
+        hasError = url == null;
+      });
     } catch (e) {
       print('❌ Error loading QR code: $e');
       setState(() {
@@ -8154,9 +8785,11 @@ class _ProfilePageState extends State<ProfilePage> {
         final wasImpersonating = _isImpersonating;
         final nowImpersonating = ImpersonationService.isImpersonating;
         
-        setState(() {
-          _isImpersonating = nowImpersonating;
-        });
+        if (mounted) {
+          setState(() {
+            _isImpersonating = nowImpersonating;
+          });
+        }
         
         // If we stopped impersonating, refresh character data
         if (wasImpersonating && !nowImpersonating) {
@@ -8185,34 +8818,241 @@ class _ProfilePageState extends State<ProfilePage> {
     try {
       final user = _auth.currentUser;
       final effectiveEmail = ImpersonationService.getEffectiveEmail() ?? user?.email;
-      if (effectiveEmail == null) return false;
+      if (effectiveEmail == null) {
+        if (mounted) {
+          setState(() {
+            character = null;
+            isLoading = false;
+          });
+        }
+        return false;
+      }
 
-      final ref = FirebaseStorage.instance.ref().child('users/$effectiveEmail/pc.json');
+      // Check Firestore first, then fall back to Storage
+      await _checkAndLoadCharacterFromFirestoreForProfile(user?.uid ?? '', effectiveEmail);
+      return character != null;
+    } catch (e) {
+      print('❌ Failed to sync character: $e');
+      if (mounted) {
+        setState(() {
+          character = null;
+          isLoading = false;
+        });
+      }
+      return false;
+    }
+  }
+
+  /// Check Firestore first, then fall back to Storage for ProfilePage
+  Future<void> _checkAndLoadCharacterFromFirestoreForProfile(String uid, String email) async {
+    try {
+      print('🔍 ProfilePage: Checking Firestore for character data...');
+      
+      // Check if user has any characters in Firestore
+      final user = _auth.currentUser;
+      if (user == null) {
+        print('❌ User not authenticated');
+        if (mounted) {
+          setState(() {
+            character = null;
+            isLoading = false;
+          });
+        }
+        return;
+      }
+      
+      final idToken = await user.getIdToken();
+      final response = await http.get(
+        Uri.parse(AppConfig.getCharactersUrl),
+        headers: {
+          'Authorization': 'Bearer $idToken',
+          'Content-Type': 'application/json',
+        },
+      );
+      
+      if (response.statusCode == 200) {
+        final responseData = json.decode(response.body);
+        if (responseData['ok'] == true && responseData['characters'] != null) {
+          final characters = responseData['characters'] as List;
+          if (characters.isNotEmpty) {
+            print('📊 ProfilePage: Found ${characters.length} character(s) in Firestore');
+            
+            // Get the first character and load it
+            final characterData = characters.first;
+            final characterId = characterData['id'] as String;
+            
+            // Extract character number from characterId (format: uid_characterNumber)
+            final parts = characterId.split('_');
+            if (parts.length >= 2) {
+              final characterNumber = parts[1];
+              print('🎯 ProfilePage: Loading character from Firestore: $characterNumber');
+              
+              // Load character from Firestore
+              await _loadCharacterFromFirestoreForProfile(uid, characterNumber);
+              return;
+            }
+          } else {
+            print('📭 ProfilePage: No characters found in Firestore - new user, no fallback needed');
+            // For new users, don't fall back to Storage - they should create a character instead
+            if (mounted) {
+              setState(() {
+                character = null;
+                isLoading = false;
+              });
+            }
+            return;
+          }
+        } else {
+          print('⚠️ ProfilePage: Failed to get characters from API: ${responseData['error']}');
+          // Don't fall back to Storage for new users - they should create a character
+          if (mounted) {
+            setState(() {
+              character = null;
+              isLoading = false;
+            });
+          }
+          return;
+        }
+      } else {
+        print('⚠️ ProfilePage: Failed to check characters: ${response.statusCode}');
+        // Don't fall back to Storage for new users - they should create a character
+        if (mounted) {
+          setState(() {
+            character = null;
+            isLoading = false;
+          });
+        }
+        return;
+      }
+    } catch (e) {
+      print('❌ ProfilePage: Error checking Firestore: $e');
+      // Don't fall back to Storage for new users - they should create a character
+      if (mounted) {
+        setState(() {
+          character = null;
+          isLoading = false;
+        });
+      }
+    }
+  }
+
+  /// Fallback to Storage for ProfilePage
+  Future<void> _fallbackToStorageForProfile(String email) async {
+    try {
+      print('🔄 ProfilePage: Falling back to Storage for character data...');
+      final ref = FirebaseStorage.instance.ref().child('users/$email/pc.json');
       final data = await ref.getData();
-
       if (data != null) {
         final jsonString = utf8.decode(data);
         final jsonMap = json.decode(jsonString);
         final fetchedCharacter = Character.fromJson(jsonMap);
-        setState(() {
-          character = fetchedCharacter;
-          isLoading = false;
-        });
+        if (mounted) {
+          setState(() {
+            character = fetchedCharacter;
+            isLoading = false;
+          });
+        }
         cachedCharacter = fetchedCharacter;
-        print('✅ Character updated');
-        
-        // Also try to download QR code (don't fail if it doesn't exist)
-        _downloadQRCode(effectiveEmail);
-        
-        return true;
+        print('✅ ProfilePage: Character loaded from Storage (legacy)');
+      } else {
+        print('📭 ProfilePage: No character data found in Storage either');
+        if (mounted) {
+          setState(() {
+            character = null;
+            isLoading = false;
+          });
+        }
       }
     } catch (e) {
-      print('❌ Failed to sync character: $e');
+      print('❌ ProfilePage: Error loading from Storage: $e');
+      setState(() {
+        character = null;
+        isLoading = false;
+      });
     }
-    setState(() {
-      isLoading = false;
-    });
-    return false;
+  }
+
+  /// Check if a character is a placeholder with unknown/empty values (ProfilePage version)
+  bool _isPlaceholderCharacter(Character character) {
+    // Check for placeholder values that indicate an empty/initialized character
+    return character.characterName == 'Unknown' ||
+           character.characterName.isEmpty ||
+           character.playerName == 'Unknown' ||
+           character.playerName.isEmpty ||
+           character.race == 'Unknown' ||
+           character.race.isEmpty ||
+           character.cultivationTier == 'Unknown' ||
+           character.cultivationTier.isEmpty;
+  }
+
+  /// Load character from Firestore for ProfilePage
+  Future<void> _loadCharacterFromFirestoreForProfile(String uid, String characterNumber) async {
+    try {
+      // Load character data directly from the API
+      final user = _auth.currentUser;
+      if (user == null) {
+        if (mounted) {
+          setState(() {
+            character = null;
+            isLoading = false;
+          });
+        }
+        return;
+      }
+
+      final idToken = await user.getIdToken();
+      final response = await http.get(
+        Uri.parse('${AppConfig.getCharacterByIdUrl}?characterId=${uid}_$characterNumber'),
+        headers: {
+          'Authorization': 'Bearer $idToken',
+          'Content-Type': 'application/json',
+        },
+      );
+
+      if (response.statusCode == 200) {
+        final responseData = json.decode(response.body);
+        if (responseData['ok'] == true && responseData['character'] != null) {
+          final characterData = responseData['character'];
+          final fetchedCharacter = Character.fromJson(characterData);
+          
+          // Check if this is a placeholder/empty character
+          if (_isPlaceholderCharacter(fetchedCharacter)) {
+            print('📭 ProfilePage: Character is a placeholder with unknown values, treating as no character');
+            setState(() {
+              character = null;
+              isLoading = false;
+            });
+          } else {
+            setState(() {
+              character = fetchedCharacter;
+              isLoading = false;
+            });
+            cachedCharacter = fetchedCharacter;
+            print('✅ ProfilePage: Character loaded from Firestore API');
+          }
+        } else {
+          print('❌ ProfilePage: Failed to load character from API: ${responseData['error']}');
+          setState(() {
+            character = null;
+            isLoading = false;
+          });
+        }
+      } else {
+        print('❌ ProfilePage: Failed to load character: ${response.statusCode}');
+        if (mounted) {
+          setState(() {
+            character = null;
+            isLoading = false;
+          });
+        }
+      }
+    } catch (e) {
+      print('❌ ProfilePage: Error loading character from Firestore: $e');
+      setState(() {
+        character = null;
+        isLoading = false;
+      });
+    }
   }
 
   Future<void> _refreshDiscordLinkStatus() async {
@@ -8447,26 +9287,84 @@ class _ProfilePageState extends State<ProfilePage> {
     );
   }
 
-  Future<String?> _downloadQRCode(String email) async {
-    try {
-      final qrRef = FirebaseStorage.instance.ref().child('users/$email/qr.png');
-      final data = await qrRef.getData();
-      if (data != null) {
-        print('✅ QR code downloaded');
-        return 'https://storage.googleapis.com/crucible-helper-storage/users/$email/qr.png';
-      }
-    } catch (e) {
-      print('⚠️ QR code not available: $e');
-    }
-    return null;
-  }
 
   Future<void> signOut(BuildContext context) async {
-    await _auth.signOut();
-    Navigator.pushReplacement(
-      context,
-      MaterialPageRoute(builder: (_) => LoginPage()),
-    );
+    try {
+      print('🚪 Starting logout process from main app...');
+      
+      // Set logout flag to prevent auto-login after logout
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('user_explicitly_logged_out', true);
+      print('🔒 Logout flag set and persisted from main app');
+      
+      // Verify the flag was actually saved
+      final savedFlag = prefs.getBool('user_explicitly_logged_out');
+      print('🔍 Verification - saved flag value: $savedFlag');
+      print('🔍 All SharedPreferences keys after logout: ${prefs.getKeys()}');
+      
+      // Stop any active impersonation first
+      ImpersonationService.stop();
+      
+      // Clear all user-specific caches
+      await Future.wait([
+        AdminCacheService.clearCache(),
+        NPCCacheService.clearCache(),
+        CharacterCacheService.clearCache(),
+        RulesService.clearCache(),
+      ]);
+      
+      // Clear session flags
+      await prefs.remove('hasCompletedNewCharacterDialog');
+      print('🧹 Cleared new character dialog session flag');
+      
+      // Sign out from Firebase Auth
+      await _auth.signOut();
+      
+      // Force a small delay to ensure auth state is properly cleared
+      await Future.delayed(Duration(milliseconds: 100));
+      
+      // Verify user is actually signed out
+      if (_auth.currentUser != null) {
+        print('⚠️ User still authenticated after signOut, forcing signOut again');
+        await _auth.signOut();
+      }
+      
+      // Clear Firebase Auth persistence on web
+      if (kIsWeb) {
+        try {
+          // Clear all auth state from browser storage
+          await _auth.setPersistence(Persistence.NONE);
+          await _auth.signOut();
+          await _auth.setPersistence(Persistence.LOCAL);
+          print('🧹 Cleared Firebase Auth persistence');
+          
+          // Also clear browser storage directly
+          html.window.localStorage.clear();
+          print('🧹 Cleared browser localStorage');
+          
+          // Clear session storage as well
+          html.window.sessionStorage.clear();
+          print('🧹 Cleared browser sessionStorage');
+        } catch (e) {
+          print('⚠️ Error clearing Firebase Auth persistence: $e');
+        }
+      }
+      
+      print('✅ User successfully signed out');
+      
+      // Navigate to login page
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => LoginPage()),
+      );
+    } catch (e) {
+      print('❌ Error during signOut: $e');
+      // Still navigate to login page even if there's an error
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => LoginPage()),
+      );
+    }
   }
 
   void checkForAppUpdate(BuildContext context) {
@@ -8635,7 +9533,38 @@ class _ProfilePageState extends State<ProfilePage> {
               _QRCodeDisplay(email: effectiveEmail ?? ''),
               SizedBox(height: 20),
             ] else ...[
-              Text('No character data available', style: TextStyle(color: Colors.grey)),
+              // No character data - show message to go to main page
+              Container(
+                padding: EdgeInsets.all(20),
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade800,
+                  border: Border.all(color: Colors.grey.shade600),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Column(
+                  children: [
+                    Icon(Icons.info_outline, size: 48, color: Colors.grey.shade400),
+                    SizedBox(height: 16),
+                    Text(
+                      'No Character Found',
+                      style: TextStyle(
+                        fontSize: 24,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.grey.shade300,
+                      ),
+                    ),
+                    SizedBox(height: 8),
+                    Text(
+                      'Go to the main page to create your character',
+                      style: TextStyle(
+                        fontSize: 16,
+                        color: Colors.grey.shade400,
+                      ),
+                      textAlign: TextAlign.center,
+                    ),
+                  ],
+                ),
+              ),
               SizedBox(height: 20),
             ],
             SizedBox(height: 12),
@@ -8709,7 +9638,7 @@ class _ProfilePageState extends State<ProfilePage> {
                     ),
                     value: _soundEnabled,
                     onChanged: _toggleSound,
-                    activeColor: Colors.cyan,
+                    activeThumbColor: Colors.cyan,
                     contentPadding: EdgeInsets.zero,
                     dense: true,
                   ),
@@ -8724,7 +9653,7 @@ class _ProfilePageState extends State<ProfilePage> {
                     ),
                     value: _vibrationEnabled,
                     onChanged: _toggleVibration,
-                    activeColor: Colors.cyan,
+                    activeThumbColor: Colors.cyan,
                     contentPadding: EdgeInsets.zero,
                     dense: true,
                   ),
@@ -8751,7 +9680,9 @@ class _ProfilePageState extends State<ProfilePage> {
                 // 2. Sync QR code
                 if (email != null) {
                   try {
-                    await _downloadQRCode(email);
+                    // Clear cache and reload QR code
+                    QRCodeCacheService.clearCache(email);
+                    await QRCodeCacheService.getQRCodeUrl(email);
                     scaffold.showSnackBar(SnackBar(
                       content: Text('✅ QR code synced'),
                     ));
@@ -9020,6 +9951,7 @@ class _TradeQRScannerPageState extends State<TradeQRScannerPage> {
     );
   }
 }
+
 
 
 

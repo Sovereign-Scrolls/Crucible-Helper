@@ -9,8 +9,8 @@ class AdminCacheService {
   static const String _adminStatusUserKey = 'admin_status_user_uid';
   static const String _adminStatusTimestampKey = 'admin_status_timestamp';
   
-  // Cache validity duration (e.g., 5 minutes)
-  static const Duration _cacheValidityDuration = Duration(minutes: 5);
+  // No time limit - cache persists until manually invalidated
+  // static const Duration _cacheValidityDuration = Duration(minutes: 5);
 
   /// Get cached admin status immediately, then verify in background
   /// Returns a Future that completes with the verified status
@@ -35,8 +35,7 @@ class AdminCacheService {
     final cacheAge = Duration(milliseconds: now - cachedTimestamp);
     
     bool shouldUseCache = !forceRefresh && 
-                         cachedUserUid == user.uid && 
-                         cacheAge < _cacheValidityDuration;
+                         cachedUserUid == user.uid;
     
     // If we have valid cached data, return it immediately
     if (shouldUseCache) {
@@ -129,5 +128,24 @@ class AdminCacheService {
   /// Force refresh admin status (ignores cache)
   static Future<bool> forceRefresh({required Function(bool) onStatusUpdate}) async {
     return await getAdminStatus(onStatusUpdate: onStatusUpdate, forceRefresh: true);
+  }
+
+  /// Recheck admin status when an admin task fails
+  /// This should be called when an admin operation returns 403 or similar
+  static Future<bool> recheckOnFailure({required Function(bool) onStatusUpdate}) async {
+    print('🔄 Rechecking admin status due to failed admin task');
+    return await getAdminStatus(onStatusUpdate: onStatusUpdate, forceRefresh: true);
+  }
+
+  /// Check if current user has valid cached admin status
+  static Future<bool> hasValidCache() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return false;
+    
+    final prefs = await SharedPreferences.getInstance();
+    final cachedUserUid = prefs.getString(_adminStatusUserKey);
+    final cachedStatus = prefs.getBool(_adminStatusKey);
+    
+    return cachedUserUid == user.uid && cachedStatus != null;
   }
 }

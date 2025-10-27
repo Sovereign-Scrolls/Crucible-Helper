@@ -36,10 +36,19 @@ class CharacterCacheService {
 
   /// Resolve the player's primary character document reference
   static Future<DocumentReference<Map<String, dynamic>>?> _resolveCharacterRef(FirebaseFirestore db, String uid) async {
-    // Try to pick first character doc
+    // Look for character in the player's characters collection
+    print('🔍 CharacterCacheService: Looking for characters for user $uid');
     final query = await db.collection('players').doc(uid).collection('characters').limit(1).get();
-    if (query.docs.isEmpty) return null;
-    return query.docs.first.reference;
+    
+    print('🔍 CharacterCacheService: Found ${query.docs.length} characters');
+    if (query.docs.isEmpty) {
+      print('❌ CharacterCacheService: No characters found for user $uid');
+      return null;
+    }
+    
+    final characterRef = query.docs.first.reference;
+    print('✅ CharacterCacheService: Found character at ${characterRef.path}');
+    return characterRef;
   }
 
   /// Pull a complete snapshot of character-derived data from Firestore
@@ -241,6 +250,17 @@ class CharacterCacheService {
     if (fresh == null) return false;
     await cacheSnapshot(fresh);
     return true;
+  }
+
+  /// Clear character cache (e.g., on logout)
+  static Future<void> clearCache() async {
+    try {
+      final box = await _openBox();
+      await box.clear();
+      print('🗑️ Character cache cleared');
+    } catch (e) {
+      print('Error clearing character cache: $e');
+    }
   }
 }
 

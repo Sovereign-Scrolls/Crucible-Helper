@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <style>
+      .spinner {
+        border: 4px solid #f3f3f3;
+        border-top: 4px solid #3498db;
+        border-radius: 50%;
+        width: 24px;
+        height: 24px;
+        animation: spin 1s linear infinite;
+        display: inline-block;
+        vertical-align: middle;
+        margin-right: 8px;
+      }
+      @keyframes spin {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="statusWrapper">
+      <span id="spinner" class="spinner" style="display:none;"></span>
+      <span id="statusMessage">🛠️ Preparing to create your character sheet...</span>
+    </div>
+    <br>
+
+    <label for="character">Select Character:</label><br>
+    <select id="character"></select><br><br>
+
+    <label><input type="checkbox" id="shareSheet" checked> Share sheet with player?</label><br><br>
+
+    <button id="submitBtn" onclick="submitSelection()">Create Sheet</button>
+
+    <script>
+      function submitSelection() {
+        const submitBtn = document.getElementById('submitBtn');
+        const spinner = document.getElementById('spinner');
+        const statusMessage = document.getElementById('statusMessage');
+        const character = document.getElementById('character').value;
+        const shouldShare = document.getElementById('shareSheet').checked;
+
+        submitBtn.disabled = true;
+        spinner.style.display = "inline-block";
+        statusMessage.textContent = "🛠️ Creating Character Sheet, please wait...";
+
+        google.script.run.withSuccessHandler(() => {
+          statusMessage.textContent = "📄 Character Sheet created! Now generating JSON file...";
+
+          setTimeout(() => {
+            statusMessage.textContent = "✅ All done! You may close this window.";
+            spinner.style.display = "none";
+          }, 3000);
+
+        }).withFailureHandler((error) => {
+          statusMessage.textContent = "❌ Error: " + error.message;
+          spinner.style.display = "none";
+          submitBtn.disabled = false;
+        }).processCharacterSheet(character, shouldShare);
+      }
+
+      // Populate dropdown
+      google.script.run.withSuccessHandler(characters => {
+        const dropdown = document.getElementById('character');
+        characters.forEach(item => {
+          const option = document.createElement('option');
+          option.value = item.value;
+          option.text = item.label;
+          dropdown.appendChild(option);
+        });
+      }).getAvailableCharacters();
+    </script>
+  </body>
+</html>

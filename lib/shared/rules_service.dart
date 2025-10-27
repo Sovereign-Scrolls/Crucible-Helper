@@ -127,4 +127,15 @@ class RulesService {
     final box = Hive.box(_boxName);
     return box.get(_rulesKey) as String?;
   }
+
+  /// Clear rules cache (e.g., on logout)
+  static Future<void> clearCache() async {
+    if (!Hive.isBoxOpen(_boxName)) {
+      await Hive.openBox(_boxName);
+    }
+    final box = Hive.box(_boxName);
+    await box.delete(_rulesKey);
+    await box.delete(_lastUpdatedKey);
+    print('🗑️ Rules cache cleared');
+  }
 }

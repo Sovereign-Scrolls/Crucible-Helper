@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+</head>
+<body>
+  <div>
+    <label for="character">Select Character:</label><br><br>
+    <select id="character"></select><br><br>
+    <button id="uploadButton" onclick="submitSelection()">Upload JSON</button>
+    <div id="status" style="margin-top:10px;"></div>
+  </div>
+
+  <script>
+    function submitSelection() {
+      const btn = document.getElementById("uploadButton");
+      btn.disabled = true;
+      btn.innerText = "Uploading...";
+      
+      const character = document.getElementById('character').value;
+      
+      document.getElementById('status').innerText = "🛫 Sending to Apps Script...";
+
+      google.script.run.withSuccessHandler(() => {
+        document.getElementById('status').innerText = "✅ JSON uploaded to Firebase!";
+        setTimeout(() => google.script.host.close(), 1500);
+      }).withFailureHandler((error) => {
+        document.getElementById('status').innerText = "❌ Upload failed: " + error.message;
+      }).uploadSelectedCharacter(character);
+    }
+
+    google.script.run.withSuccessHandler(characters => {
+      const dropdown = document.getElementById('character');
+
+      // Sort by character number (assumes value is "44|PlayerName")
+      characters.sort((a, b) => {
+        const numA = parseInt(a.value.split("|")[0]);
+        const numB = parseInt(b.value.split("|")[0]);
+        return numA - numB;
+      });
+
+      characters.forEach(item => {
+        const option = document.createElement('option');
+        option.value = item.value;
+        option.text = item.label;
+        dropdown.appendChild(option);
+      });
+    }).getAllCharacters();
+
+  </script>
+</body>
+</html>

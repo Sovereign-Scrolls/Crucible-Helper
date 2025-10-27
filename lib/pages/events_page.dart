@@ -39,6 +39,7 @@ class Event {
   String get dateRange => '$startDate - $endDate';
   String get location => locationName;
   String get type => typeName;
+  bool get hasStarted => DateTime.now().isAfter(startDateTime);
 
   factory Event.fromFirestore(Map<String, dynamic> data, String id) {
     return Event(
@@ -9232,6 +9233,8 @@ class _RegistrationDetailsModalState extends State<_RegistrationDetailsModal> wi
   Map<String, dynamic>? _registrationData;
   Map<String, int> _npcCounts = {};
   Map<String, int> _cleanupCounts = {};
+  Map<String, dynamic>? _checkInData;
+  bool _isLoadingCheckIns = true;
 
   @override
   void initState() {
@@ -9239,6 +9242,7 @@ class _RegistrationDetailsModalState extends State<_RegistrationDetailsModal> wi
     _tabController = TabController(length: 3, vsync: this);
     _loadRegistrationData();
     _loadShiftCounts();
+    _loadCheckInData();
   }
   Future<void> _loadShiftCounts() async {
     try {
@@ -9263,6 +9267,52 @@ class _RegistrationDetailsModalState extends State<_RegistrationDetailsModal> wi
         }
       }
     } catch (_) {}
+  }
+
+  Future<void> _loadCheckInData() async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) return;
+      final idToken = await user.getIdToken();
+      print('🔍 Loading check-in data for event: ${widget.event.id}');
+      print('🔍 API URL: ${AppConfig.getEventCheckInsUrl}?eventId=${widget.event.id}');
+      print('🔍 Firebase region: ${AppConfig.firebaseRegion}');
+      print('🔍 Firebase project ID: ${AppConfig.firebaseProjectId}');
+      
+      final resp = await http.get(
+        Uri.parse('${AppConfig.getEventCheckInsUrl}?eventId=${widget.event.id}'),
+        headers: {
+          'Authorization': 'Bearer $idToken',
+          'Content-Type': 'application/json',
+        },
+      );
+      
+      print('🔍 Check-in API response status: ${resp.statusCode}');
+      print('🔍 Check-in API response body: ${resp.body}');
+      
+      if (resp.statusCode == 200) {
+        final body = json.decode(resp.body);
+        if (body['ok'] == true) {
+          if (!mounted) return;
+          print('✅ Check-in data loaded successfully');
+          print('🔍 Not checked in count: ${body['notCheckedIn']?['total'] ?? 0}');
+          setState(() {
+            _checkInData = body;
+            _isLoadingCheckIns = false;
+          });
+        } else {
+          print('❌ Check-in API returned ok: false');
+        }
+      } else {
+        print('❌ Check-in API returned status: ${resp.statusCode}');
+      }
+    } catch (error) {
+      print('❌ Error loading check-in data: $error');
+      if (!mounted) return;
+      setState(() {
+        _isLoadingCheckIns = false;
+      });
+    }
   }
 
   @override
@@ -9406,6 +9456,19 @@ class _RegistrationDetailsModalState extends State<_RegistrationDetailsModal> wi
     final sliceOfLife = registrations['sliceOfLife'] as int? ?? 0;
     final staff = registrations['staff'] as int? ?? 0;
 
+    // Get check-in data
+    int notCheckedInCount = 0;
+    if (_checkInData != null && !_isLoadingCheckIns) {
+      final notCheckedIn = _checkInData!['notCheckedIn'] as Map<String, dynamic>? ?? {};
+      notCheckedInCount = notCheckedIn['total'] as int? ?? 0;
+    }
+    
+    print('🔍 Event hasStarted: ${widget.event.hasStarted}');
+    print('🔍 Event startDateTime: ${widget.event.startDateTime}');
+    print('🔍 Current time: ${DateTime.now()}');
+    print('🔍 Check-in data: $_checkInData');
+    print('🔍 Not checked in count: $notCheckedInCount');
+
     return Padding(
       padding: EdgeInsets.all(16),
       child: Column(
@@ -9439,12 +9502,25 @@ class _RegistrationDetailsModalState extends State<_RegistrationDetailsModal> wi
             onTap: () => _showAllRegistrations('All Registrations', _registrationData!['registrations']['registrations'] as List),
             child: _buildSummaryCard('Total Registrations', totalRegistrations.toString(), Icons.people),
           ),
+          // Add Not Checked-in stat if event has started (temporarily always show for testing)
+          if (true) ...[
+            SizedBox(height: 24),
+            InkWell(
+              onTap: _isLoadingCheckIns ? null : () => _showNotCheckedInDialog(),
+              child: _buildSummaryCard(
+                'Not Checked-in', 
+                _isLoadingCheckIns ? '...' : notCheckedInCount.toString(), 
+                Icons.person_off,
+                isLoading: _isLoadingCheckIns,
+              ),
+            ),
+          ],
         ],
       ),
     );
   }
 
-  Widget _buildSummaryCard(String title, String count, IconData icon) {
+  Widget _buildSummaryCard(String title, String count, IconData icon, {bool isLoading = false}) {
     return Container(
       padding: EdgeInsets.all(16),
       decoration: BoxDecoration(
@@ -9454,13 +9530,13 @@ class _RegistrationDetailsModalState extends State<_RegistrationDetailsModal> wi
       ),
       child: Row(
         children: [
-          Icon(icon, color: Colors.purple, size: 24),
+          Icon(icon, color: isLoading ? Colors.grey : Colors.purple, size: 24),
           SizedBox(width: 12),
           Expanded(
             child: Text(
               title,
               style: TextStyle(
-                color: Colors.white,
+                color: isLoading ? Colors.grey : Colors.white,
                 fontSize: 16,
                 fontWeight: FontWeight.w500,
               ),
@@ -9469,19 +9545,48 @@ class _RegistrationDetailsModalState extends State<_RegistrationDetailsModal> wi
           Container(
             padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
             decoration: BoxDecoration(
-              color: Colors.purple.withOpacity(0.2),
+              color: isLoading ? Colors.grey.withOpacity(0.2) : Colors.purple.withOpacity(0.2),
               borderRadius: BorderRadius.circular(16),
             ),
             child: Text(
               count,
               style: TextStyle(
-                color: Colors.purple,
+                color: isLoading ? Colors.grey : Colors.purple,
                 fontSize: 18,
                 fontWeight: FontWeight.bold,
               ),
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  void _showNotCheckedInDialog() {
+    if (_checkInData == null) return;
+    
+    final notCheckedIn = _checkInData!['notCheckedIn'] as Map<String, dynamic>? ?? {};
+    final players = notCheckedIn['players'] as List<dynamic>? ?? [];
+    
+    if (players.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('All registered players have checked in!'),
+          backgroundColor: Colors.green,
+        ),
+      );
+      return;
+    }
+
+    showDialog(
+      context: context,
+      builder: (context) => _NotCheckedInDialog(
+        event: widget.event,
+        players: players,
+        onPlayersCheckedIn: () {
+          // Reload check-in data
+          _loadCheckInData();
+        },
       ),
     );
   }
@@ -10155,5 +10260,342 @@ class _EventCameraScannerPageState extends State<_EventCameraScannerPage> {
         ],
       ),
     );
+  }
+}
+
+class _NotCheckedInDialog extends StatefulWidget {
+  final Event event;
+  final List<dynamic> players;
+  final VoidCallback onPlayersCheckedIn;
+
+  const _NotCheckedInDialog({
+    required this.event,
+    required this.players,
+    required this.onPlayersCheckedIn,
+  });
+
+  @override
+  _NotCheckedInDialogState createState() => _NotCheckedInDialogState();
+}
+
+class _NotCheckedInDialogState extends State<_NotCheckedInDialog> {
+  Set<String> _selectedPlayers = {};
+  bool _isProcessing = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      backgroundColor: Colors.grey[900],
+      child: SizedBox(
+        width: MediaQuery.of(context).size.width * 0.9,
+        height: MediaQuery.of(context).size.height * 0.8,
+        child: Column(
+          children: [
+            // Header
+            Container(
+              padding: EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: Colors.purple,
+                borderRadius: BorderRadius.only(
+                  topLeft: Radius.circular(8),
+                  topRight: Radius.circular(8),
+                ),
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.person_off, color: Colors.white, size: 24),
+                  SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      'Players Not Checked In',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                  IconButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    icon: Icon(Icons.close, color: Colors.white),
+                  ),
+                ],
+              ),
+            ),
+            
+            // Content
+            Expanded(
+              child: Padding(
+                padding: EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Select players to check in:',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    SizedBox(height: 16),
+                    
+                    // Player list
+                    Expanded(
+                      child: ListView.builder(
+                        itemCount: widget.players.length,
+                        itemBuilder: (context, index) {
+                          final player = widget.players[index];
+                          final playerUid = player['uid'] as String;
+                          final playerName = player['playerName'] as String? ?? 'Unknown Player';
+                          final characterName = player['characterName'] as String? ?? '';
+                          final characterNumber = player['characterNumber'] as String? ?? '';
+                          final attendeeType = player['attendeeTypeName'] as String? ?? 'Unknown';
+                          
+                          final isSelected = _selectedPlayers.contains(playerUid);
+                          
+                          return Container(
+                            margin: EdgeInsets.only(bottom: 8),
+                            child: Material(
+                              color: Colors.transparent,
+                              child: InkWell(
+                                onTap: () {
+                                  setState(() {
+                                    if (isSelected) {
+                                      _selectedPlayers.remove(playerUid);
+                                    } else {
+                                      _selectedPlayers.add(playerUid);
+                                    }
+                                  });
+                                },
+                                borderRadius: BorderRadius.circular(8),
+                                child: Container(
+                                  padding: EdgeInsets.all(12),
+                                  decoration: BoxDecoration(
+                                    color: isSelected ? Colors.purple.withOpacity(0.2) : Colors.grey[800],
+                                    borderRadius: BorderRadius.circular(8),
+                                    border: Border.all(
+                                      color: isSelected ? Colors.purple : Colors.grey[700]!,
+                                      width: isSelected ? 2 : 1,
+                                    ),
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      // Checkbox
+                                      Container(
+                                        width: 24,
+                                        height: 24,
+                                        decoration: BoxDecoration(
+                                          color: isSelected ? Colors.purple : Colors.transparent,
+                                          border: Border.all(
+                                            color: isSelected ? Colors.purple : Colors.grey[400]!,
+                                            width: 2,
+                                          ),
+                                          borderRadius: BorderRadius.circular(4),
+                                        ),
+                                        child: isSelected
+                                            ? Icon(
+                                                Icons.check,
+                                                color: Colors.white,
+                                                size: 16,
+                                              )
+                                            : null,
+                                      ),
+                                      SizedBox(width: 12),
+                                      
+                                      // Player info
+                                      Expanded(
+                                        child: Column(
+                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                          children: [
+                                            Text(
+                                              playerName,
+                                              style: TextStyle(
+                                                color: Colors.white,
+                                                fontSize: 16,
+                                                fontWeight: FontWeight.w500,
+                                              ),
+                                            ),
+                                            if (characterName.isNotEmpty) ...[
+                                              SizedBox(height: 2),
+                                              Text(
+                                                'Character: $characterName',
+                                                style: TextStyle(
+                                                  color: Colors.grey[400],
+                                                  fontSize: 14,
+                                                ),
+                                              ),
+                                            ],
+                                            if (characterNumber.isNotEmpty) ...[
+                                              SizedBox(height: 2),
+                                              Text(
+                                                'Character #$characterNumber',
+                                                style: TextStyle(
+                                                  color: Colors.grey[400],
+                                                  fontSize: 14,
+                                                ),
+                                              ),
+                                            ],
+                                            SizedBox(height: 2),
+                                            Text(
+                                              'Type: $attendeeType',
+                                              style: TextStyle(
+                                                color: Colors.grey[400],
+                                                fontSize: 12,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                    
+                    SizedBox(height: 16),
+                    
+                    // Action buttons
+                    Row(
+                      children: [
+                        Expanded(
+                          child: ElevatedButton.icon(
+                            onPressed: _selectedPlayers.isEmpty || _isProcessing
+                                ? null
+                                : () => _checkInSelectedPlayers(),
+                            icon: _isProcessing
+                                ? SizedBox(
+                                    width: 16,
+                                    height: 16,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                      valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                                    ),
+                                  )
+                                : Icon(Icons.check_circle),
+                            label: Text(
+                              _isProcessing
+                                  ? 'Processing...'
+                                  : 'Check In Selected (${_selectedPlayers.length})',
+                            ),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.purple,
+                              foregroundColor: Colors.white,
+                              padding: EdgeInsets.symmetric(vertical: 16),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                            ),
+                          ),
+                        ),
+                        SizedBox(width: 12),
+                        Expanded(
+                          child: ElevatedButton.icon(
+                            onPressed: _isProcessing
+                                ? null
+                                : () {
+                                    setState(() {
+                                      _selectedPlayers = Set.from(widget.players.map((p) => p['uid'] as String));
+                                    });
+                                  },
+                            icon: Icon(Icons.select_all),
+                            label: Text('Select All'),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.grey[700],
+                              foregroundColor: Colors.white,
+                              padding: EdgeInsets.symmetric(vertical: 16),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _checkInSelectedPlayers() async {
+    if (_selectedPlayers.isEmpty) return;
+
+    setState(() {
+      _isProcessing = true;
+    });
+
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) throw Exception('User not authenticated');
+
+      final idToken = await user.getIdToken();
+      final response = await http.post(
+        Uri.parse(AppConfig.massCheckInPlayersUrl),
+        headers: {
+          'Authorization': 'Bearer $idToken',
+          'Content-Type': 'application/json',
+        },
+        body: json.encode({
+          'eventId': widget.event.id,
+          'playerUids': _selectedPlayers.toList(),
+        }),
+      );
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        if (data['ok'] == true) {
+          final summary = data['summary'];
+          final successful = summary['successful'] as int;
+          final failed = summary['failed'] as int;
+
+          if (mounted) {
+            Navigator.of(context).pop();
+            
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  'Successfully checked in $successful players${failed > 0 ? ' ($failed failed)' : ''}',
+                ),
+                backgroundColor: failed > 0 ? Colors.orange : Colors.green,
+                duration: Duration(seconds: 3),
+              ),
+            );
+
+            // Notify parent to reload data
+            widget.onPlayersCheckedIn();
+          }
+        } else {
+          throw Exception(data['error'] ?? 'Failed to check in players');
+        }
+      } else {
+        throw Exception('HTTP ${response.statusCode}: ${response.body}');
+      }
+    } catch (error) {
+      print('❌ Error checking in players: $error');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to check in players: $error'),
+            backgroundColor: Colors.red,
+            duration: Duration(seconds: 3),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isProcessing = false;
+        });
+      }
+    }
   }
 }

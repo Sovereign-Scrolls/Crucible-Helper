@@ -1,0 +1,149 @@
+/**
+ * UPDATED: Add to your existing Apps Script doPost function
+ * 
+ * IMPORTANT: This must go BEFORE the idToken check!
+ * 
+ * Your current doPost checks for idToken on line 55:
+ *   const idToken = payload.idToken || _extractBearerToken(e);
+ *   if (!idToken) return _unauthorized('Missing idToken');
+ * 
+ * Add the regenerateCharacter handler BEFORE that check.
+ */
+
+// ========================================
+// COMPLETE UPDATED doPost FUNCTION
+// ========================================
+function doPost(e) {
+  // Handle CORS preflight requests
+  if (e.parameter.callback) {
+    const response = { ok: true, message: 'CORS handled via JSONP' };
+    return ContentService.createTextOutput(
+      e.parameter.callback + '(' + JSON.stringify(response) + ')'
+    ).setMimeType(ContentService.MimeType.JAVASCRIPT);
+  }
+  
+  try {
+    const bodyText = (e && e.postData && e.postData.contents) ? e.postData.contents : '';
+    if (!bodyText) return _badRequest('Empty body');
+
+    let payload;
+    try {
+      payload = JSON.parse(bodyText);
+    } catch (err) {
+      return _badRequest('Invalid JSON: ' + err);
+    }
+
+    // ===== NEW CODE: Check for regenerateCharacter action FIRST =====
+    const { action, characterNumber } = payload;
+    
+    if (action === 'regenerateCharacter') {
+      // This request came from Firebase Function (already authenticated)
+      // No idToken needed - we'll use the Apps Script's own OAuth
+      
+      if (!characterNumber) {
+        return ContentService.createTextOutput(JSON.stringify({
+          ok: false,
+          error: 'missing_character_number',
+          message: 'Character number is required'
+        }))
+        .setMimeType(ContentService.MimeType.JSON);
+      }
+      
+      Logger.log(`🔄 Regenerating character JSON for character ${characterNumber}`);
+      
+      try {
+        // Generate the character JSON from Master Logs (your existing function)
+        const jsonData = generateCharacterJsonFromLogs(characterNumber);
+        const playerEmail = jsonData.playerEmail;
+        const bucket = getStorageBucket_();
+        const path = `users/${playerEmail}/pc.json`;
+        
+        // Upload to Firebase Storage (your existing function)
+        uploadJsonToGCS(bucket, path, jsonData);
+        
+        Logger.log(`✅ Successfully regenerated and uploaded pc.json for character ${characterNumber}`);
+        
+        // Return success response
+        return ContentService.createTextOutput(JSON.stringify({
+          ok: true,
+          message: 'Character JSON regenerated and uploaded successfully',
+          characterNumber: characterNumber,
+          playerEmail: playerEmail,
+          generatedAt: jsonData.generatedAt
+        }))
+        .setMimeType(ContentService.MimeType.JSON);
+        
+      } catch (error) {
+        Logger.log(`❌ Error regenerating character ${characterNumber}: ${error.message}`);
+        return ContentService.createTextOutput(JSON.stringify({
+          ok: false,
+          error: 'regeneration_error',
+          message: error.message
+        }))
+        .setMimeType(ContentService.MimeType.JSON);
+      }
+    }
+    // ===== END NEW CODE =====
+
+    // Original advancement intake code continues here...
+    // ID token can be in JSON body or as a query param: ?authorization=Bearer+XYZ
+    const idToken = payload.idToken || _extractBearerToken(e);
+    if (!idToken) return _unauthorized('Missing idToken');
+
+    // Verify token (supports either Google Sign-In Web or Firebase Auth Web)
+    const verified = _verifyIdTokenFlexible(idToken);
+    if (verified.error) return _unauthorized(verified.error);
+    if (!verified.email || !verified.emailVerified) return _unauthorized('Email not verified');
+    const email = verified.email;
+
+    // ... rest of your existing advancement intake code ...
+    
+  } catch (err) {
+    const errorResponse = {
+      ok: false,
+      error: 'server_error',
+      message: String(err && err.stack ? err.stack : err)
+    };
+    
+    return ContentService.createTextOutput(JSON.stringify(errorResponse))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
+
+// ========================================
+// OR, SIMPLER: Just add this snippet
+// ========================================
+// If you prefer to just add the snippet to your existing doPost, 
+// add these lines right after parsing the payload (around line 52):
+
+/*
+    // Check for regenerateCharacter action BEFORE idToken check
+    const { action, characterNumber } = payload;
+    
+    if (action === 'regenerateCharacter') {
+      if (!characterNumber) {
+        return _json({ ok: false, error: 'missing_character_number', message: 'Character number is required' });
+      }
+      
+      try {
+        const jsonData = generateCharacterJsonFromLogs(characterNumber);
+        const playerEmail = jsonData.playerEmail;
+        const bucket = getStorageBucket_();
+        const path = `users/${playerEmail}/pc.json`;
+        uploadJsonToGCS(bucket, path, jsonData);
+        
+        return _json({
+          ok: true,
+          message: 'Character JSON regenerated and uploaded successfully',
+          characterNumber: characterNumber,
+          playerEmail: playerEmail,
+          generatedAt: jsonData.generatedAt
+        });
+      } catch (error) {
+        return _json({ ok: false, error: 'regeneration_error', message: error.message });
+      }
+    }
+    
+    // Continue with existing code (idToken check, etc.)
+*/

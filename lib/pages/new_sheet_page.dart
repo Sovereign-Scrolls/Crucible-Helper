@@ -7,6 +7,10 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:http/http.dart' as http;
 import '../shared/character_cache_service.dart';
 import '../shared/impersonation_service.dart';
+import '../shared/admin_cache_service.dart';
+import '../config/app_config.dart';
+import '../models/character.dart';
+import '../main.dart' show CharacterSheetPage;
 
 class NewSheetPage extends StatefulWidget {
   const NewSheetPage({super.key});
@@ -22,6 +26,11 @@ class _NewSheetPageState extends State<NewSheetPage> {
   
   // Impersonation state
   bool _isImpersonating = false;
+  
+  // Menu functionality state
+  bool _isSuperAdmin = false;
+  final bool _hasUnsubmittedChanges = false;
+  final List<String> _skillSortOptions = ['Alphabetical', 'Type', 'Frequency'];
 
   // Quick weapon stats
   int _hth1 = 1; // totals including base and penalties
@@ -34,10 +43,267 @@ class _NewSheetPageState extends State<NewSheetPage> {
   List<String> _tierOrder = const [];
   int _currentTierBodyDr = 0;
 
+  // Convert snapshot data to Character object for old sheet
+  Character? _getCharacterFromSnapshot() {
+    if (_snapshot == null) return null;
+    
+    try {
+      final characterData = _snapshot!['character'] as Map<String, dynamic>?;
+      if (characterData == null) return null;
+      
+      return Character.fromJson(characterData);
+    } catch (e) {
+      print('❌ NewSheetPage: Error converting snapshot to Character: $e');
+      return null;
+    }
+  }
+
+  // Check super admin permissions
+  Future<void> _checkSuperAdminPermissions() async {
+    try {
+      final isAdmin = await AdminCacheService.getAdminStatus(
+        onStatusUpdate: (status) {
+          if (mounted) {
+            setState(() {
+              _isSuperAdmin = status;
+            });
+          }
+        },
+        forceRefresh: false,
+      );
+      setState(() {
+        _isSuperAdmin = isAdmin;
+      });
+    } catch (e) {
+      print('❌ NewSheetPage: Error checking admin permissions: $e');
+    }
+  }
+
+  // Load skill sort preference
+  Future<void> _loadSkillSortPreference() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final savedSort = prefs.getString('skill_sort_preference');
+      if (savedSort != null && _skillSortOptions.contains(savedSort)) {
+        setState(() {
+          _selectedSkillSort = savedSort;
+        });
+      }
+    } catch (e) {
+      print('❌ NewSheetPage: Error loading skill sort preference: $e');
+    }
+  }
+
+  // Show stored cores dialog
+  void _showStoredCores() async {
+    try {
+      // Show loading dialog
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (BuildContext context) {
+          return AlertDialog(
+            title: Text('Loading Stored Cores...'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(height: 16),
+                Text('Getting stored cores...'),
+              ],
+            ),
+          );
+        },
+      );
+
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) {
+        if (mounted && Navigator.of(context).canPop()) {
+          Navigator.of(context).pop();
+        }
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('User not authenticated')),
+        );
+        return;
+      }
+
+      final idToken = await user.getIdToken();
+      final characterData = _snapshot!['character'] as Map<String, dynamic>?;
+      final characterNumber = characterData?['characterNumber']?.toString() ?? 'main';
+      
+      // Use the Firebase Function to get stored cores
+      final response = await http.get(
+        Uri.parse('${AppConfig.getStoredCoresUrl}?characterId=${user.uid}_$characterNumber'),
+        headers: {
+          'Authorization': 'Bearer $idToken',
+          'Content-Type': 'application/json',
+        },
+      );
+
+      if (response.statusCode == 200) {
+        final responseData = json.decode(response.body);
+        if (responseData['ok'] == true) {
+          final coresByTier = responseData['coresByTier'] as Map<String, dynamic>;
+          
+          // Close loading dialog
+          if (mounted && Navigator.of(context).canPop()) {
+            Navigator.of(context).pop();
+          }
+          
+          _showStoredCoresDialog(coresByTier);
+        } else {
+          // Close loading dialog
+          if (mounted && Navigator.of(context).canPop()) {
+            Navigator.of(context).pop();
+          }
+          
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Error: ${responseData['error']}')),
+          );
+        }
+      } else {
+        // Close loading dialog
+        if (mounted && Navigator.of(context).canPop()) {
+          Navigator.of(context).pop();
+        }
+        
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error loading stored cores: HTTP ${response.statusCode}')),
+        );
+      }
+
+    } catch (error) {
+      // Close loading dialog if still open
+      if (mounted && Navigator.of(context).canPop()) {
+        Navigator.of(context).pop();
+      }
+      print('Error loading stored cores: $error');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error loading stored cores: $error')),
+      );
+    }
+  }
+
+  // Show stored cores dialog
+  void _showStoredCoresDialog(Map<String, dynamic> coresByTier) {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Row(
+            children: [
+              Icon(Icons.inventory, color: Colors.orange),
+              SizedBox(width: 8),
+              Text('Stored Cores'),
+            ],
+          ),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: coresByTier.entries.map((entry) {
+                final tier = entry.key;
+                final cores = entry.value as Map<String, dynamic>;
+                return Padding(
+                  padding: EdgeInsets.only(bottom: 8),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        tier,
+                        style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                      ),
+                      ...cores.entries.map((coreEntry) {
+                        return Padding(
+                          padding: EdgeInsets.only(left: 16),
+                          child: Text('${coreEntry.key}: ${coreEntry.value}'),
+                        );
+                      }),
+                    ],
+                  ),
+                );
+              }).toList(),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: Text('Close'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  // Sync character data
+  Future<void> _syncCharacterData() async {
+    // Show loading indicator
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Row(
+            children: [
+              SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+              SizedBox(width: 12),
+              Text('Regenerating from Master Logs...'),
+            ],
+          ),
+          duration: Duration(seconds: 3),
+        ),
+      );
+    }
+
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      final effectiveEmail = ImpersonationService.getEffectiveEmail() ?? user?.email;
+      if (effectiveEmail == null) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('❌ User not authenticated')),
+          );
+        }
+        return;
+      }
+
+      print('🔄 Syncing character data for: $effectiveEmail (impersonating: ${ImpersonationService.isImpersonating})');
+      
+      // Refresh character cache
+      await CharacterCacheService.refreshIfStale();
+      
+      // Reload the page data
+      await _load();
+      
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('✅ Character data synced successfully'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } catch (e) {
+      print('❌ Error syncing character data: $e');
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('❌ Failed to sync character data: ${e.toString()}'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
   @override
   void initState() {
     super.initState();
     _load();
+    _checkSuperAdminPermissions();
     _loadSkillSortPreference();
     
     // Initialize impersonation status
@@ -304,8 +570,84 @@ class _NewSheetPageState extends State<NewSheetPage> {
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
-        title: const Text('New Sheet'),
+        title: const Text('Character Sheet'),
         backgroundColor: Colors.black,
+        actions: [
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.more_vert),
+            onSelected: (String value) async {
+              switch (value) {
+                case 'old_sheet':
+                  final character = _getCharacterFromSnapshot();
+                  if (character != null) {
+                    Navigator.push(context, MaterialPageRoute(
+                      builder: (_) => CharacterSheetPage(character: character),
+                    ));
+                  } else {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Character data not available')),
+                    );
+                  }
+                  break;
+                case 'cores':
+                  _showStoredCores();
+                  break;
+                case 'sync':
+                  _syncCharacterData();
+                  break;
+                case 'edit':
+                  // Edit mode functionality - for now just show a message
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Edit mode not yet implemented in new sheet')),
+                  );
+                  break;
+              }
+            },
+            itemBuilder: (BuildContext context) => [
+              const PopupMenuItem<String>(
+                value: 'cores',
+                child: Row(
+                  children: [
+                    Icon(Icons.inventory, size: 20),
+                    SizedBox(width: 12),
+                    Text('Stored Cores'),
+                  ],
+                ),
+              ),
+              if (_isSuperAdmin)
+                const PopupMenuItem<String>(
+                  value: 'edit',
+                  child: Row(
+                    children: [
+                      Icon(Icons.edit, size: 20),
+                      SizedBox(width: 12),
+                      Text('Edit Mode'),
+                    ],
+                  ),
+                ),
+              const PopupMenuItem<String>(
+                value: 'sync',
+                child: Row(
+                  children: [
+                    Icon(Icons.sync, size: 20),
+                    SizedBox(width: 12),
+                    Text('Sync Character Data'),
+                  ],
+                ),
+              ),
+              const PopupMenuItem<String>(
+                value: 'old_sheet',
+                child: Row(
+                  children: [
+                    Icon(Icons.history, color: Colors.white),
+                    SizedBox(width: 8),
+                    Text('View Old Sheet'),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ],
       ),
       body: Column(
         children: [
@@ -437,6 +779,8 @@ class _NewSheetPageState extends State<NewSheetPage> {
     final totalAP = _asInt(apTotalDoc['Total Affinity Points'] ?? apAmount); // Fallback to amount for old data
     final affinitiesCost = _asInt(apTotalDoc['spent'] ?? 0);
     final unspentAP = _asInt(apTotalDoc['unspent'] ?? 0);
+    final maxSlot = _asInt(apTotalDoc['Max Slot'] ?? 0);
+    final slotable = _asInt(apTotalDoc['Slotable'] ?? 0);
     
     // Build affinity cost rows from Total document
     final List<Map<String, dynamic>> affinityCostRows = [];
@@ -507,6 +851,8 @@ class _NewSheetPageState extends State<NewSheetPage> {
                         totalAP: totalAP,
                         totalCost: affinitiesCost,
                         unspentAP: unspentAP,
+                        maxSlot: maxSlot,
+                        slotable: slotable,
                         rows: affinityCostRows,
                       ),
                     ),
@@ -915,6 +1261,8 @@ class _NewSheetPageState extends State<NewSheetPage> {
       required int totalAP,
       required int totalCost,
       required int unspentAP,
+      required int maxSlot,
+      required int slotable,
       required List<Map<String, dynamic>> rows,
     }
   ) {
@@ -936,6 +1284,9 @@ class _NewSheetPageState extends State<NewSheetPage> {
               const SizedBox(height: 8),
               Text('Total Affinity Points: $totalAP', style: const TextStyle(fontWeight: FontWeight.bold)),
               const SizedBox(height: 8),
+              Text('Max Slot: $maxSlot'),
+              Text('Slotable: $slotable', style: const TextStyle(fontWeight: FontWeight.bold)),
+              const Divider(height: 16),
               const Text('Spent by Affinity:', style: TextStyle(fontWeight: FontWeight.bold)),
               const SizedBox(height: 6),
               ConstrainedBox(
@@ -1665,16 +2016,6 @@ class _NewSheetPageState extends State<NewSheetPage> {
     return 0;
   }
 
-  Future<void> _loadSkillSortPreference() async {
-    final prefs = await SharedPreferences.getInstance();
-    // Prefer the same key as old sheet if present for continuity
-    final legacy = prefs.getString('skill_sort_preference');
-    final current = prefs.getString('skill_sorting');
-    final value = legacy ?? current;
-    if (value != null && ['Alphabetical', 'Type', 'Frequency'].contains(value)) {
-      setState(() { _selectedSkillSort = value; });
-    }
-  }
 
   Future<void> _saveSkillSortPreference(String value) async {
     final prefs = await SharedPreferences.getInstance();

@@ -918,6 +918,27 @@ exports.syncRulesDb = onRequest(async (req, res) => {
     spreadsheetId = sanitizeSpreadsheetId(spreadsheetId);
     const clearExisting = ((req.query.clear ?? req.body?.clear ?? 'true').toString().toLowerCase() !== 'false');
 
+    // Selective sync parameters
+    const syncAffinities = req.body?.syncAffinities === true;
+    const syncRaces = req.body?.syncRaces === true;
+    const syncCommonSkills = req.body?.syncCommonSkills === true;
+    const syncRaceSkills = req.body?.syncRaceSkills === true;
+    const syncAffinitySkills = req.body?.syncAffinitySkills === true;
+    const syncBodyEssence = req.body?.syncBodyEssence === true;
+    const syncCultivationTiers = req.body?.syncCultivationTiers === true;
+    const syncStatusEffects = req.body?.syncStatusEffects === true;
+    const syncEnumerations = req.body?.syncEnumerations === true;
+
+    // If no specific sync options are provided, sync everything (backward compatibility)
+    const syncAll = !syncAffinities && !syncRaces && !syncCommonSkills && !syncRaceSkills && 
+                   !syncAffinitySkills && !syncBodyEssence && !syncCultivationTiers && 
+                   !syncStatusEffects && !syncEnumerations;
+
+    console.log('🔄 Sync Rules DB - Parameters:', {
+      syncAffinities, syncRaces, syncCommonSkills, syncRaceSkills, syncAffinitySkills,
+      syncBodyEssence, syncCultivationTiers, syncStatusEffects, syncEnumerations, syncAll
+    });
+
     // Google Sheets API
     const auth = new googleapis.auth.GoogleAuth({
       scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
@@ -980,6 +1001,16 @@ exports.syncRulesDb = onRequest(async (req, res) => {
       return id;
     };
 
+    const sanitizeText = (value) => {
+      if (!value) return '';
+      let text = String(value).trim();
+      // Remove non-printable characters except newlines and tabs
+      text = text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
+      // Normalize whitespace
+      text = text.replace(/\s+/g, ' ').trim();
+      return text;
+    };
+
     const sanitizeCollectionId = (value, fallback) => {
       // Same restrictions as doc IDs for safety
       return sanitizeDocId(value, fallback);
@@ -1006,106 +1037,159 @@ exports.syncRulesDb = onRequest(async (req, res) => {
     // If clearing is requested, remove subcollections first
     let cleared = 0;
     if (clearExisting) {
-      cleared += await clearAllDocs(rulesRoot.doc('Affinities').collection('All'));
-      cleared += await clearAllDocs(rulesRoot.doc('Races').collection('All'));
-      cleared += await clearAllDocs(rulesRoot.doc('Skills').collection('Common'));
-      cleared += await clearAllDocs(rulesRoot.doc('Skills').collection('Races'));
-      // Clear dynamic Skills subcollections: Common, Races, and any affinity-named collections
-      const skillsDocRef = rulesRoot.doc('Skills');
-      cleared += await clearAllDocs(skillsDocRef.collection('Common'));
-      cleared += await clearAllDocs(skillsDocRef.collection('Races'));
-      // Legacy subcollection name used previously
-      cleared += await clearAllDocs(skillsDocRef.collection('Affinities'));
-      // Delete any other subcollections under Skills (affinity-named)
-      if (typeof skillsDocRef.listCollections === 'function') {
-        const subcols = await skillsDocRef.listCollections();
-        for (const col of subcols) {
-          if (col.id === 'Common' || col.id === 'Races' || col.id === 'Affinities') continue;
-          cleared += await clearAllDocs(col);
+      if (syncAll || syncAffinities) {
+        cleared += await clearAllDocs(rulesRoot.doc('Affinities').collection('All'));
+      }
+      if (syncAll || syncRaces) {
+        cleared += await clearAllDocs(rulesRoot.doc('Races').collection('All'));
+      }
+      if (syncAll || syncCommonSkills || syncRaceSkills || syncAffinitySkills) {
+        cleared += await clearAllDocs(rulesRoot.doc('Skills').collection('Common'));
+        cleared += await clearAllDocs(rulesRoot.doc('Skills').collection('Races'));
+        // Clear dynamic Skills subcollections: Common, Races, and any affinity-named collections
+        const skillsDocRef = rulesRoot.doc('Skills');
+        cleared += await clearAllDocs(skillsDocRef.collection('Common'));
+        cleared += await clearAllDocs(skillsDocRef.collection('Races'));
+        // Legacy subcollection name used previously
+        cleared += await clearAllDocs(skillsDocRef.collection('Affinities'));
+        // Delete any other subcollections under Skills (affinity-named)
+        if (typeof skillsDocRef.listCollections === 'function') {
+          const subcols = await skillsDocRef.listCollections();
+          for (const col of subcols) {
+            if (col.id === 'Common' || col.id === 'Races' || col.id === 'Affinities') continue;
+            cleared += await clearAllDocs(col);
+          }
         }
       }
-      cleared += await clearAllDocs(rulesRoot.doc('Body Essence - DR').collection('All'));
-      cleared += await clearAllDocs(rulesRoot.doc('Cultivation Tiers').collection('All'));
-      cleared += await clearAllDocs(rulesRoot.doc('Status Effects').collection('All'));
-      cleared += await clearAllDocs(rulesRoot.doc('Frequency').collection('All'));
-      cleared += await clearAllDocs(rulesRoot.doc('Duration').collection('All'));
-      cleared += await clearAllDocs(rulesRoot.doc('Delivery').collection('All'));
+      if (syncAll || syncBodyEssence) {
+        cleared += await clearAllDocs(rulesRoot.doc('Body Essence - DR').collection('All'));
+      }
+      if (syncAll || syncCultivationTiers) {
+        cleared += await clearAllDocs(rulesRoot.doc('Cultivation Tiers').collection('All'));
+      }
+      if (syncAll || syncStatusEffects) {
+        cleared += await clearAllDocs(rulesRoot.doc('Status Effects').collection('All'));
+      }
+      if (syncAll || syncEnumerations) {
+        cleared += await clearAllDocs(rulesRoot.doc('Frequency').collection('All'));
+        cleared += await clearAllDocs(rulesRoot.doc('Duration').collection('All'));
+        cleared += await clearAllDocs(rulesRoot.doc('Delivery').collection('All'));
+      }
     }
 
     // 1) Affinities
-    const affinityTitle = resolveSheetTitle('Affinity', ['Affinities']);
     let affHeaders = [], affRows = [];
-    if (affinityTitle) {
-      const sheet = await readSheet(affinityTitle);
-      affHeaders = sheet.headers; affRows = sheet.rows;
-    } else {
-      warnings.push("Missing sheet: Affinity");
-    }
-    if (affRows.length) {
-      const batch = db.batch();
-      for (let i = 0; i < affRows.length; i++) {
-        const obj = toObject(affHeaders, affRows[i]);
-        const name = obj.Name || obj.Affinity || obj.name || `Affinity_${i+1}`;
-        const docId = sanitizeDocId(name, `Affinity_${i+1}`);
-        const docRef = rulesRoot.doc('Affinities').collection('All').doc(docId);
-        batch.set(docRef, {
-          Multiplier: Number(obj.Multiplier ?? obj.multiplier ?? 0) || 0,
-          Unique: parseBool(obj.Unique ?? obj.unique ?? 'false'),
-          _sheetRow: i + 2,
-        });
+    if (syncAll || syncAffinities) {
+      const affinityTitle = resolveSheetTitle('Affinity', ['Affinities']);
+      if (affinityTitle) {
+        const sheet = await readSheet(affinityTitle);
+        affHeaders = sheet.headers; affRows = sheet.rows;
+      } else {
+        warnings.push("Missing sheet: Affinity");
       }
-      await batch.commit();
+      if (affRows.length) {
+        const batch = db.batch();
+        for (let i = 0; i < affRows.length; i++) {
+          const obj = toObject(affHeaders, affRows[i]);
+          const name = obj.Name || obj.Affinity || obj.name || `Affinity_${i+1}`;
+          const docId = sanitizeDocId(name, `Affinity_${i+1}`);
+          const docRef = rulesRoot.doc('Affinities').collection('All').doc(docId);
+          batch.set(docRef, {
+            Multiplier: Number(obj.Multiplier ?? obj.multiplier ?? 0) || 0,
+            Unique: parseBool(obj.Unique ?? obj.unique ?? 'false'),
+            _sheetRow: i + 2,
+          });
+        }
+        await batch.commit();
+      }
     }
 
     // 2) Races and Race-Affinity options
-    const raceTitle = resolveSheetTitle('Race', ['Races']);
-    const raceAffinityTitle = resolveSheetTitle('Race- Affinity', ['Race - Affinity', 'Race Affinity', 'Race Affinities']);
-    const raceSheet = raceTitle ? await readSheet(raceTitle) : { headers: [], rows: [] };
-    const raceAffinitySheet = raceAffinityTitle ? await readSheet(raceAffinityTitle) : { headers: [], rows: [] };
-    if (!raceTitle) warnings.push("Missing sheet: Race");
-    if (!raceAffinityTitle) warnings.push("Missing sheet: Race- Affinity");
-    // Build map of race -> array of allowed affinities
-    const raceToAffinities = new Map();
-    if (raceAffinitySheet.rows.length) {
-      for (let i = 0; i < raceAffinitySheet.rows.length; i++) {
-        const obj = toObject(raceAffinitySheet.headers, raceAffinitySheet.rows[i]);
-        const raceName = obj.Race || obj.race || obj.Name;
-        const affinityOption = obj['Affinity Option'] || obj['Affinity'] || obj.affinity || '';
-        if (!raceName) continue;
-        const curr = raceToAffinities.get(raceName) || [];
-        if (affinityOption) curr.push(affinityOption);
-        raceToAffinities.set(raceName, curr);
+    let raceSheet = { headers: [], rows: [] };
+    if (syncAll || syncRaces) {
+      const raceTitle = resolveSheetTitle('Race', ['Races']);
+      const raceAffinityTitle = resolveSheetTitle('Race- Affinity', ['Race - Affinity', 'Race Affinity', 'Race Affinities']);
+      raceSheet = raceTitle ? await readSheet(raceTitle) : { headers: [], rows: [] };
+      const raceAffinitySheet = raceAffinityTitle ? await readSheet(raceAffinityTitle) : { headers: [], rows: [] };
+      if (!raceTitle) warnings.push("Missing sheet: Race");
+      if (!raceAffinityTitle) warnings.push("Missing sheet: Race- Affinity");
+      // Build map of race -> array of allowed affinities
+      const raceToAffinities = new Map();
+      if (raceAffinitySheet.rows.length) {
+        for (let i = 0; i < raceAffinitySheet.rows.length; i++) {
+          const obj = toObject(raceAffinitySheet.headers, raceAffinitySheet.rows[i]);
+          const raceName = obj.Race || obj.race || obj.Name;
+          const affinityOption = obj['Affinity Option'] || obj['Affinity'] || obj.affinity || '';
+          if (!raceName) continue;
+          const curr = raceToAffinities.get(raceName) || [];
+          if (affinityOption) curr.push(affinityOption);
+          raceToAffinities.set(raceName, curr);
+        }
       }
-    }
-    if (raceSheet.rows.length) {
-      const batch = db.batch();
-      for (let i = 0; i < raceSheet.rows.length; i++) {
-        const obj = toObject(raceSheet.headers, raceSheet.rows[i]);
-        const name = obj.Name || obj.Race || obj.name || `Race_${i+1}`;
-        const docId = sanitizeDocId(name, `Race_${i+1}`);
-        const docRef = rulesRoot.doc('Races').collection('All').doc(docId);
-        batch.set(docRef, {
-          Unique: parseBool(obj.Unique ?? obj.unique ?? 'false'),
-          Description: obj.Description ?? obj.description ?? '',
-          'Costume Requirements': obj['Costume Requirements'] ?? obj.costumeRequirements ?? '',
-          Notes: obj.Notes ?? obj.notes ?? '',
-          AffinityOptions: raceToAffinities.get(name) || [],
-          _sheetRow: i + 2,
-        });
+      if (raceSheet.rows.length) {
+        // Debug: Show what columns are available in the Race sheet
+        console.log(`📋 Race sheet headers:`, raceSheet.headers);
+        console.log(`📊 Race sheet has ${raceSheet.rows.length} rows`);
+        
+        const batch = db.batch();
+        for (let i = 0; i < raceSheet.rows.length; i++) {
+          const obj = toObject(raceSheet.headers, raceSheet.rows[i]);
+          const name = obj.Name || obj.Race || obj.name || `Race_${i+1}`;
+          const docId = sanitizeDocId(name, `Race_${i+1}`);
+          
+          // Debug: Show all available fields for this race
+          console.log(`🏃 Race "${name}" - Available fields:`, Object.keys(obj));
+          console.log(`🏃 Race "${name}" - Field name analysis:`);
+          Object.keys(obj).forEach(key => {
+            console.log(`  "${key}" (length: ${key.length}, codes: ${Array.from(key).map(c => c.charCodeAt(0)).join(', ')})`);
+          });
+          console.log(`🏃 Race "${name}" - All field values:`, obj);
+          
+          // Debug and sanitize Description field
+          // Handle potential invisible characters in column names
+          const rawDescription = obj.Description ?? obj['Description‭'] ?? obj.description ?? obj['description‭'] ?? '';
+          const sanitizedDescription = sanitizeText(rawDescription);
+          
+          console.log(`🏃 Processing race "${name}":`);
+          console.log(`  Raw Description: "${rawDescription}" (length: ${rawDescription.length})`);
+          console.log(`  Sanitized Description: "${sanitizedDescription}" (length: ${sanitizedDescription.length})`);
+          
+          // Check for non-printable characters
+          const hasNonPrintable = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/.test(rawDescription);
+          if (hasNonPrintable) {
+            console.log(`  ⚠️  Non-printable characters detected in description!`);
+            console.log(`  Character codes: ${Array.from(rawDescription).map(c => c.charCodeAt(0)).join(', ')}`);
+          }
+          
+          const docRef = rulesRoot.doc('Races').collection('All').doc(docId);
+          batch.set(docRef, {
+            Unique: parseBool(obj.Unique ?? obj.unique ?? 'false'),
+            Description: sanitizedDescription,
+            'Costume Requirements': sanitizeText(obj['Costume Requirements'] ?? obj.costumeRequirements ?? ''),
+            Notes: sanitizeText(obj.Notes ?? obj.notes ?? ''),
+            AffinityOptions: raceToAffinities.get(name) || [],
+            _sheetRow: i + 2,
+          });
+        }
+        await batch.commit();
       }
-      await batch.commit();
     }
 
     // 3) Skills: Common, Race Skills, Affinity Skills
-    const commonSkillsTitle = resolveSheetTitle('Common Skills', ['Common']);
-    const raceSkillsTitle = resolveSheetTitle('Race Skill', ['Race Skills']);
-    const affinitySkillsTitle = resolveSheetTitle('Affinity Skills', ['Affinity Skill']);
-    const commonSkills = commonSkillsTitle ? await readSheet(commonSkillsTitle) : { headers: [], rows: [] };
-    const raceSkills = raceSkillsTitle ? await readSheet(raceSkillsTitle) : { headers: [], rows: [] };
-    const affinitySkills = affinitySkillsTitle ? await readSheet(affinitySkillsTitle) : { headers: [], rows: [] };
-    if (!commonSkillsTitle) warnings.push("Missing sheet: Common Skills");
-    if (!raceSkillsTitle) warnings.push("Missing sheet: Race Skill");
-    if (!affinitySkillsTitle) warnings.push("Missing sheet: Affinity Skills");
+    let commonSkills = { headers: [], rows: [] };
+    let raceSkills = { headers: [], rows: [] };
+    let affinitySkills = { headers: [], rows: [] };
+    if (syncAll || syncCommonSkills || syncRaceSkills || syncAffinitySkills) {
+      const commonSkillsTitle = resolveSheetTitle('Common Skills', ['Common']);
+      const raceSkillsTitle = resolveSheetTitle('Race Skill', ['Race Skills']);
+      const affinitySkillsTitle = resolveSheetTitle('Affinity Skills', ['Affinity Skill']);
+      commonSkills = commonSkillsTitle ? await readSheet(commonSkillsTitle) : { headers: [], rows: [] };
+      raceSkills = raceSkillsTitle ? await readSheet(raceSkillsTitle) : { headers: [], rows: [] };
+      affinitySkills = affinitySkillsTitle ? await readSheet(affinitySkillsTitle) : { headers: [], rows: [] };
+      if (!commonSkillsTitle) warnings.push("Missing sheet: Common Skills");
+      if (!raceSkillsTitle) warnings.push("Missing sheet: Race Skill");
+      if (!affinitySkillsTitle) warnings.push("Missing sheet: Affinity Skills");
+    }
 
     const writeSkills = async (categoryName, sheet) => {
       if (!sheet.rows.length) return 0;
@@ -1160,128 +1244,149 @@ exports.syncRulesDb = onRequest(async (req, res) => {
       return written;
     };
 
-    // Write Common and Race skills as before
-    const commonWritten = await writeSkills('Common', commonSkills);
-    const raceWritten = await writeSkills('Races', raceSkills);
 
-    // Route Affinity skills into subcollections named after each Affinity
-    let affinityWritten = 0;
-    if (affinitySkills.rows.length) {
-      const skillsDocRef = rulesRoot.doc('Skills');
-      for (let start = 0; start < affinitySkills.rows.length; start += 400) {
+    let skillsWritten = 0;
+    if (syncAll || syncCommonSkills || syncRaceSkills || syncAffinitySkills) {
+      let commonWritten = 0, raceWritten = 0, affinityWritten = 0;
+      
+      if (syncAll || syncCommonSkills) {
+        commonWritten = await writeSkills('Common', commonSkills);
+      }
+      if (syncAll || syncRaceSkills) {
+        raceWritten = await writeSkills('Races', raceSkills);
+      }
+      if (syncAll || syncAffinitySkills) {
+        // Route Affinity skills into subcollections named after each Affinity
+        if (affinitySkills.rows.length) {
+          const skillsDocRef = rulesRoot.doc('Skills');
+          for (let start = 0; start < affinitySkills.rows.length; start += 400) {
+            const batch = db.batch();
+            const slice = affinitySkills.rows.slice(start, start + 400);
+            for (let i = 0; i < slice.length; i++) {
+              const rowIndex = start + i;
+              const obj = toObject(affinitySkills.headers, slice[i]);
+              const name = obj.Name || obj.name || `Skill_Affinity_${rowIndex+1}`;
+              const docId = sanitizeDocId(name, `Skill_Affinity_${rowIndex+1}`);
+              const prereqName = obj['Skill Prerequisite'] || obj.skillPrerequisite || '';
+              const prereqCategory = obj['Prerequisite Category'] || obj['Skill Prerequisite Category'] || obj.prerequisiteCategory || '';
+              // Determine target affinity subcollection
+              const affinityNameRaw = obj.Affinity || obj['Affinity'] || obj['Affinity Name'] || 'Unknown';
+              const subcollectionId = sanitizeCollectionId(affinityNameRaw, 'Unknown');
+              // Get Build from Column D for Affinity Skills
+              const rawBuild = slice[i][3] || ''; // Column D (index 3)
+              console.log(`🔍 Affinity skill "${name}" - raw Build from column D: "${rawBuild}" (type: ${typeof rawBuild})`);
+              const numericBuild = Number(rawBuild);
+              console.log(`🔢 Converted to number: ${numericBuild}`);
+              const attributes = { ...obj };
+              delete attributes.build;
+              delete attributes['Base Build'];
+              delete attributes['base build'];
+              delete attributes.Build;
+              const docRef = skillsDocRef.collection(subcollectionId).doc(docId);
+              batch.set(docRef, {
+                ...attributes,
+                ...(Number.isFinite(numericBuild) && numericBuild >= 0 ? { Build: numericBuild } : {}),
+                SkillPrerequisite: prereqName,
+                SkillPrerequisiteCategory: prereqCategory,
+                _sheetRow: rowIndex + 2,
+              }, { merge: true });
+              affinityWritten++;
+            }
+            await batch.commit();
+          }
+        }
+      }
+      
+      skillsWritten = commonWritten + raceWritten + affinityWritten;
+    }
+
+    // 4) Body Essence - DR
+    let bodySheet = { headers: [], rows: [] };
+    if (syncAll || syncBodyEssence) {
+      const bodyTitle = resolveSheetTitle('Body Essence-DR Chart', ['Body Essence - DR Chart', 'Body Essence DR Chart']);
+      bodySheet = bodyTitle ? await readSheet(bodyTitle) : { headers: [], rows: [] };
+      if (!bodyTitle) warnings.push("Missing sheet: Body Essence-DR Chart");
+      if (bodySheet.rows.length) {
         const batch = db.batch();
-        const slice = affinitySkills.rows.slice(start, start + 400);
-        for (let i = 0; i < slice.length; i++) {
-          const rowIndex = start + i;
-          const obj = toObject(affinitySkills.headers, slice[i]);
-          const name = obj.Name || obj.name || `Skill_Affinity_${rowIndex+1}`;
-          const docId = sanitizeDocId(name, `Skill_Affinity_${rowIndex+1}`);
-          const prereqName = obj['Skill Prerequisite'] || obj.skillPrerequisite || '';
-          const prereqCategory = obj['Prerequisite Category'] || obj['Skill Prerequisite Category'] || obj.prerequisiteCategory || '';
-          // Determine target affinity subcollection
-          const affinityNameRaw = obj.Affinity || obj['Affinity'] || obj['Affinity Name'] || 'Unknown';
-          const subcollectionId = sanitizeCollectionId(affinityNameRaw, 'Unknown');
-          // Get Build from Column D for Affinity Skills
-          const rawBuild = slice[i][3] || ''; // Column D (index 3)
-          console.log(`🔍 Affinity skill "${name}" - raw Build from column D: "${rawBuild}" (type: ${typeof rawBuild})`);
-          const numericBuild = Number(rawBuild);
-          console.log(`🔢 Converted to number: ${numericBuild}`);
-          const attributes = { ...obj };
-          delete attributes.build;
-          delete attributes['Base Build'];
-          delete attributes['base build'];
-          delete attributes.Build;
-          const docRef = skillsDocRef.collection(subcollectionId).doc(docId);
-          batch.set(docRef, {
-            ...attributes,
-            ...(Number.isFinite(numericBuild) && numericBuild >= 0 ? { Build: numericBuild } : {}),
-            SkillPrerequisite: prereqName,
-            SkillPrerequisiteCategory: prereqCategory,
-            _sheetRow: rowIndex + 2,
-          }, { merge: true });
-          affinityWritten++;
+        for (let i = 0; i < bodySheet.rows.length; i++) {
+          const obj = toObject(bodySheet.headers, bodySheet.rows[i]);
+          const docRef = rulesRoot.doc('Body Essence - DR').collection('All').doc(`Body ${i + 1}`);
+          batch.set(docRef, { ...obj, _sheetRow: i + 2 }, { merge: true });
         }
         await batch.commit();
       }
     }
 
-    const skillsWritten = commonWritten + raceWritten + affinityWritten;
-
-    // 4) Body Essence - DR
-    const bodyTitle = resolveSheetTitle('Body Essence-DR Chart', ['Body Essence - DR Chart', 'Body Essence DR Chart']);
-    const bodySheet = bodyTitle ? await readSheet(bodyTitle) : { headers: [], rows: [] };
-    if (!bodyTitle) warnings.push("Missing sheet: Body Essence-DR Chart");
-    if (bodySheet.rows.length) {
-      const batch = db.batch();
-      for (let i = 0; i < bodySheet.rows.length; i++) {
-        const obj = toObject(bodySheet.headers, bodySheet.rows[i]);
-        const docRef = rulesRoot.doc('Body Essence - DR').collection('All').doc(`Body ${i + 1}`);
-        batch.set(docRef, { ...obj, _sheetRow: i + 2 }, { merge: true });
-      }
-      await batch.commit();
-    }
-
     // 5) Cultivation Tiers
-    const tierTitle = resolveSheetTitle('Cultivation Tier', ['Cultivation Tiers']);
-    const tierSheet = tierTitle ? await readSheet(tierTitle) : { headers: [], rows: [] };
-    if (!tierTitle) warnings.push("Missing sheet: Cultivation Tier");
-    if (tierSheet.rows.length) {
-      const batch = db.batch();
-      for (let i = 0; i < tierSheet.rows.length; i++) {
-        const obj = toObject(tierSheet.headers, tierSheet.rows[i]);
-        const name = obj.Name || obj.Tier || obj.name || `Tier_${i + 1}`;
-        const docId = sanitizeDocId(name, `Tier_${i + 1}`);
-        const docRef = rulesRoot.doc('Cultivation Tiers').collection('All').doc(docId);
-        batch.set(docRef, { ...obj, _sheetRow: i + 2 }, { merge: true });
+    let tierSheet = { headers: [], rows: [] };
+    if (syncAll || syncCultivationTiers) {
+      const tierTitle = resolveSheetTitle('Cultivation Tier', ['Cultivation Tiers']);
+      tierSheet = tierTitle ? await readSheet(tierTitle) : { headers: [], rows: [] };
+      if (!tierTitle) warnings.push("Missing sheet: Cultivation Tier");
+      if (tierSheet.rows.length) {
+        const batch = db.batch();
+        for (let i = 0; i < tierSheet.rows.length; i++) {
+          const obj = toObject(tierSheet.headers, tierSheet.rows[i]);
+          const name = obj.Name || obj.Tier || obj.name || `Tier_${i + 1}`;
+          const docId = sanitizeDocId(name, `Tier_${i + 1}`);
+          const docRef = rulesRoot.doc('Cultivation Tiers').collection('All').doc(docId);
+          batch.set(docRef, { ...obj, _sheetRow: i + 2 }, { merge: true });
+        }
+        await batch.commit();
       }
-      await batch.commit();
     }
 
     // 6) Status Effects
-    const statusTitle = resolveSheetTitle('Status Effects', ['Status Effect']);
-    const statusSheet = statusTitle ? await readSheet(statusTitle) : { headers: [], rows: [] };
-    if (!statusTitle) warnings.push("Missing sheet: Status Effects");
-    if (statusSheet.rows.length) {
-      const batch = db.batch();
-      for (let i = 0; i < statusSheet.rows.length; i++) {
-        const obj = toObject(statusSheet.headers, statusSheet.rows[i]);
-        const name = obj.Name || obj.name || `Status_${i + 1}`;
-        const docId = sanitizeDocId(name, `Status_${i + 1}`);
-        const docRef = rulesRoot.doc('Status Effects').collection('All').doc(docId);
-        batch.set(docRef, { ...obj, _sheetRow: i + 2 }, { merge: true });
+    let statusSheet = { headers: [], rows: [] };
+    if (syncAll || syncStatusEffects) {
+      const statusTitle = resolveSheetTitle('Status Effects', ['Status Effect']);
+      statusSheet = statusTitle ? await readSheet(statusTitle) : { headers: [], rows: [] };
+      if (!statusTitle) warnings.push("Missing sheet: Status Effects");
+      if (statusSheet.rows.length) {
+        const batch = db.batch();
+        for (let i = 0; i < statusSheet.rows.length; i++) {
+          const obj = toObject(statusSheet.headers, statusSheet.rows[i]);
+          const name = obj.Name || obj.name || `Status_${i + 1}`;
+          const docId = sanitizeDocId(name, `Status_${i + 1}`);
+          const docRef = rulesRoot.doc('Status Effects').collection('All').doc(docId);
+          batch.set(docRef, { ...obj, _sheetRow: i + 2 }, { merge: true });
+        }
+        await batch.commit();
       }
-      await batch.commit();
     }
 
     // 7) Frequency, Duration, Delivery enumerations
-    const freqTitle = resolveSheetTitle('Frequency');
-    const durTitle = resolveSheetTitle('Duration');
-    const delTitle = resolveSheetTitle('Delivery');
-    const freqSheet = freqTitle ? await readSheet(freqTitle) : { headers: [], rows: [] };
-    const durSheet = durTitle ? await readSheet(durTitle) : { headers: [], rows: [] };
-    const delSheet = delTitle ? await readSheet(delTitle) : { headers: [], rows: [] };
-    if (!freqTitle) warnings.push("Missing sheet: Frequency");
-    if (!durTitle) warnings.push("Missing sheet: Duration");
-    if (!delTitle) warnings.push("Missing sheet: Delivery");
-    const writeEnum = async (collectionName, sheet) => {
-      if (!sheet.rows.length) return 0;
-      const batch = db.batch();
-      let count = 0;
-      for (let i = 0; i < sheet.rows.length; i++) {
-        const obj = toObject(sheet.headers, sheet.rows[i]);
-        const name = obj.Name || obj.name || obj.Value || obj.value || `Item_${i + 1}`;
-        const docId = sanitizeDocId(name, `Item_${i + 1}`);
-        const docRef = rulesRoot.doc(collectionName).collection('All').doc(docId);
-        batch.set(docRef, { ...obj, _sheetRow: i + 2 }, { merge: true });
-        count++;
-      }
-      await batch.commit();
-      return count;
-    };
-    const enumsWritten =
-      (await writeEnum('Frequency', freqSheet)) +
-      (await writeEnum('Duration', durSheet)) +
-      (await writeEnum('Delivery', delSheet));
+    let enumsWritten = 0;
+    if (syncAll || syncEnumerations) {
+      const freqTitle = resolveSheetTitle('Frequency');
+      const durTitle = resolveSheetTitle('Duration');
+      const delTitle = resolveSheetTitle('Delivery');
+      const freqSheet = freqTitle ? await readSheet(freqTitle) : { headers: [], rows: [] };
+      const durSheet = durTitle ? await readSheet(durTitle) : { headers: [], rows: [] };
+      const delSheet = delTitle ? await readSheet(delTitle) : { headers: [], rows: [] };
+      if (!freqTitle) warnings.push("Missing sheet: Frequency");
+      if (!durTitle) warnings.push("Missing sheet: Duration");
+      if (!delTitle) warnings.push("Missing sheet: Delivery");
+      const writeEnum = async (collectionName, sheet) => {
+        if (!sheet.rows.length) return 0;
+        const batch = db.batch();
+        let count = 0;
+        for (let i = 0; i < sheet.rows.length; i++) {
+          const obj = toObject(sheet.headers, sheet.rows[i]);
+          const name = obj.Name || obj.name || obj.Value || obj.value || `Item_${i + 1}`;
+          const docId = sanitizeDocId(name, `Item_${i + 1}`);
+          const docRef = rulesRoot.doc(collectionName).collection('All').doc(docId);
+          batch.set(docRef, { ...obj, _sheetRow: i + 2 }, { merge: true });
+          count++;
+        }
+        await batch.commit();
+        return count;
+      };
+      enumsWritten =
+        (await writeEnum('Frequency', freqSheet)) +
+        (await writeEnum('Duration', durSheet)) +
+        (await writeEnum('Delivery', delSheet));
+    }
 
     // 8) README last updated (cell B1)
     const readmeTitle = resolveSheetTitle('README', ['Readme', 'ReadMe']);
@@ -2351,7 +2456,7 @@ async function ensureDiscordCategoryForEvent(event) {
   }
 }
 // Sync Master Logs from Google Sheets to Firestore
-exports.syncMasterLogs = onRequest(async (req, res) => {
+exports.syncMasterLogs = onRequest({ timeoutSeconds: 540 }, async (req, res) => {
   // CORS for manual invocation from browser if needed
   res.set('Access-Control-Allow-Origin', '*');
   res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -2376,6 +2481,7 @@ exports.syncMasterLogs = onRequest(async (req, res) => {
     const containerDocId = (req.query.containerDocId || req.body?.containerDocId || 'root').toString();
     const sheetName = (req.query.sheetName || req.body?.sheetName || config.google_sheets.pc_db_master_logs_sheet_name || 'Master Logs').toString();
     let spreadsheetId = (req.query.spreadsheetId || req.body?.spreadsheetId || config.google_sheets.pc_db_spreadsheet_id || config.google_sheets.checkin_spreadsheet_id).toString();
+    const incrementalSync = (req.query.incremental || req.body?.incremental || 'false').toString().toLowerCase() === 'true';
     // Sanitize spreadsheetId in case a full URL or "/edit?..." suffix was provided
     const sanitizeSpreadsheetId = (raw) => {
       if (!raw) return raw;
@@ -2403,8 +2509,8 @@ exports.syncMasterLogs = onRequest(async (req, res) => {
     });
     const sheets = googleapis.sheets({ version: 'v4', auth });
 
-    // Read all rows (21 columns A:U based on provided header)
-    const range = `${sheetName}!A:U`;
+    // Read all rows (extend to V column to include Index field)
+    const range = `${sheetName}!A:V`;
     const valuesResp = await sheets.spreadsheets.values.get({
       spreadsheetId,
       range
@@ -2417,6 +2523,17 @@ exports.syncMasterLogs = onRequest(async (req, res) => {
 
     const headers = values[0];
     const rows = values.slice(1);
+
+    // Check if Index column exists, if not we'll add it
+    let indexColumnIndex = headers.findIndex(h => 
+      h && h.toLowerCase().includes('index')
+    );
+
+    // If Index column doesn't exist, add it to the headers
+    if (indexColumnIndex === -1) {
+      console.log('Index column not found, will be added during sync');
+      // We'll handle adding the column when we update the sheet
+    }
 
     const targetCollection = db.collection('Master Logs').doc(containerDocId).collection('All');
 
@@ -2447,21 +2564,127 @@ exports.syncMasterLogs = onRequest(async (req, res) => {
 
     // Write rows in batches
     let written = 0;
-    for (let start = 0; start < rows.length; start += 400) {
+    let updatedRows = []; // Track rows that need Index field updates
+    const crypto = require('crypto');
+    const totalRows = rows.length;
+    
+    console.log(`Starting sync of ${totalRows} rows...`);
+
+    // If incremental sync, only process rows without Index fields
+    let rowsToProcess = rows;
+    let rowsToProcessWithIndex = []; // Track original row indices for incremental sync
+    if (incrementalSync) {
+      rowsToProcessWithIndex = rows.map((row, index) => ({
+        row: row,
+        originalIndex: index + 2 // +2 to account for header row and 1-based indexing
+      })).filter(item => {
+        const rowObj = toObject(headers, item.row);
+        const hasIndex = rowObj['Index'] && rowObj['Index'].trim() !== '';
+        if (!hasIndex) {
+          console.log(`Row ${item.originalIndex} needs Index field`);
+        }
+        return !hasIndex;
+      });
+      rowsToProcess = rowsToProcessWithIndex.map(item => item.row);
+      console.log(`Incremental sync: Processing ${rowsToProcess.length} rows without Index fields out of ${totalRows} total rows`);
+    }
+
+    for (let start = 0; start < rowsToProcess.length; start += 400) {
+      const batchNum = Math.floor(start / 400) + 1;
+      const totalBatches = Math.ceil(rowsToProcess.length / 400);
+      console.log(`Processing batch ${batchNum}/${totalBatches} (rows ${start + 1}-${Math.min(start + 400, rowsToProcess.length)})`);
       const batch = db.batch();
-      const slice = rows.slice(start, start + 400);
+      const slice = rowsToProcess.slice(start, start + 400);
       for (let idx = 0; idx < slice.length; idx++) {
-        const globalRowIndex = start + idx + 2; // +2 to account for header row and 1-based indexing
-        const data = toObject(headers, slice[idx]);
+        const globalRowIndex = incrementalSync ? 
+          rowsToProcessWithIndex[start + idx].originalIndex : 
+          start + idx + 2; // +2 to account for header row and 1-based indexing
+        const rowData = slice[idx];
+        const data = toObject(headers, rowData);
+        
+        // Check if Index field exists and has a value
+        let indexId = data['Index'] || '';
+        
+        // If no Index, generate one
+        if (!indexId) {
+          indexId = crypto.randomUUID();
+          console.log(`Generated new Index for row ${globalRowIndex}: ${indexId}`);
+          
+          // Track this row for updating in Google Sheets
+          updatedRows.push({
+            rowIndex: globalRowIndex,
+            indexId: indexId,
+            rowData: rowData
+          });
+          
+          // Add Index to the data object
+          data['Index'] = indexId;
+        }
+
         data._rowNumber = globalRowIndex;
         data._sheet = sheetName;
         data._syncedAt = new Date().toISOString();
-        // Use deterministic doc id by row number for idempotency
-        const docRef = targetCollection.doc(`r${globalRowIndex}`);
+        
+        // Use Index as document ID instead of row number
+        const docRef = targetCollection.doc(indexId);
         batch.set(docRef, data, { merge: true });
         written++;
       }
       await batch.commit();
+    }
+
+    // Update Google Sheets with new Index values using batch updates
+    if (updatedRows.length > 0) {
+      console.log(`Updating ${updatedRows.length} rows in Google Sheets with new Index values`);
+      
+      // First, ensure the Index column exists
+      if (indexColumnIndex === -1) {
+        // Add Index column header
+        const headerUpdate = await sheets.spreadsheets.values.update({
+          spreadsheetId,
+          range: `${sheetName}!V1`,
+          valueInputOption: 'RAW',
+          resource: { values: [['Index']] }
+        });
+        console.log('Added Index column header');
+        indexColumnIndex = 21; // V column is index 21 (0-based)
+      }
+
+      // Batch update rows in groups to avoid quota limits
+      const batchSize = 50; // Update 50 rows at a time
+      for (let i = 0; i < updatedRows.length; i += batchSize) {
+        const batch = updatedRows.slice(i, i + batchSize);
+        console.log(`Updating batch ${Math.floor(i/batchSize) + 1}/${Math.ceil(updatedRows.length/batchSize)} (${batch.length} rows)`);
+        
+        try {
+          // Prepare batch update data
+          const batchData = batch.map(row => [row.indexId]);
+          
+          // Update the batch in one request
+          await sheets.spreadsheets.values.batchUpdate({
+            spreadsheetId,
+            resource: {
+              valueInputOption: 'RAW',
+              data: [{
+                range: `${sheetName}!V${batch[0].rowIndex}:V${batch[batch.length - 1].rowIndex}`,
+                values: batchData
+              }]
+            }
+          });
+          
+          console.log(`✅ Updated batch ${Math.floor(i/batchSize) + 1} successfully`);
+          
+          // Add delay between batches to respect rate limits
+          if (i + batchSize < updatedRows.length) {
+            await new Promise(resolve => setTimeout(resolve, 2000)); // 2 second delay
+          }
+          
+        } catch (error) {
+          console.error(`Failed to update batch ${Math.floor(i/batchSize) + 1}:`, error);
+          // Continue with next batch even if one fails
+        }
+      }
+      console.log(`Updated ${updatedRows.length} rows with Index values`);
     }
 
     // Load PC DB 'PCs' sheet to map characterNumber -> email
@@ -2609,7 +2832,11 @@ exports.syncMasterLogs = onRequest(async (req, res) => {
           characterMirrorMap.set(characterKey, { uid, characterNumber: characterNumberRaw, docs: new Map() });
         }
         const entry = characterMirrorMap.get(characterKey);
-        const docId = `r${globalRowIndex}`;
+        
+        // Use Index as document ID instead of row number
+        const indexId = String(getFieldValue(rowObj, ['Index']) || '').trim();
+        const docId = indexId || `r${globalRowIndex}`; // Fallback to row number if no Index
+        
         // Keep mirrored data simple: store selected normalized fields plus the raw row for reference
         const email = String(getFieldValue(rowObj, emailKeys) || '').trim();
         const reason = String(getFieldValue(rowObj, ['Advancement Reason', 'AdvancementReason']) || '').trim();
@@ -4091,11 +4318,17 @@ exports.calculateCharacter = onRequest(async (req, res) => {
     const totalAffinityPointsRaw = totalAffinityPointAdjustment + totalPerfectCultivationPoints;
     const totalAffinityPoints = Math.floor(totalAffinityPointsRaw);
     
+    // Calculate Max Slot and Slotable
+    const maxSlot = totalBuildAdjustment - 40;
+    const slotable = maxSlot - totalAffinityPointAdjustment;
+    
     // Write Affinity Points Total with all affinity costs, Perfect Cultivation Points, and Total Affinity Points
     await affinityPointsColRef.doc('Total').set({
       amount: totalAffinityPointAdjustment,
       'Perfect Cultivation Points': totalPerfectCultivationPoints,
       'Total Affinity Points': totalAffinityPoints,
+      'Max Slot': maxSlot,
+      'Slotable': slotable,
       spent: -totalAffinityCosts, // Negative since it's spent/cost
       unspent: totalAffinityPoints - totalAffinityCosts, // Total Affinity Points - |spent|
       ...affinityCosts,
@@ -6555,7 +6788,7 @@ exports.checkInPlayer = onRequest(async (req, res) => {
       .doc(playerUid)
       .set(checkInData);
 
-    // Write to Google Sheets
+    // Write to Master Logs Google Sheet
     try {
       // Initialize Google Sheets API
       const auth = new googleapis.auth.GoogleAuth({
@@ -6565,21 +6798,57 @@ exports.checkInPlayer = onRequest(async (req, res) => {
 
       const sheets = googleapis.sheets({ version: 'v4', auth });
 
-      // Prepare the row data for Google Sheets
+      // Get current date/time for the entry
+      const now = new Date();
+      const dateStr = now.toLocaleDateString('en-US', { 
+        timeZone: 'America/Chicago',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false
+      }).replace(/(\d+)\/(\d+)\/(\d+),?\s*(\d+):(\d+):(\d+)/, '$1/$2/$3 $4:$5:$6');
+
+      // Generate UUID for this entry
+      const crypto = require('crypto');
+      const indexId = crypto.randomUUID();
+
+      // Prepare the row data for Master Logs sheet
+      // Columns: Character Number, Date, Date Override, Character Cultivation Tier, Build Adjustment, 
+      // Affinity Point Adjustment, Advancement Reason, Skill Type, Skill, Skill Level Adj, 
+      // Adjust Hit Points, Slotted Cores, Tier of cores slotted, Perfect Cultivation Points, 
+      // Affinity, Affinity Level, Adjust Cutlication Tier, Editor, Note, Event, Tier Consumed, Index
       const rowData = [
-        decodedToken.email,                                              // checkInUserEmail (scanner/admin email)
-        new Date().toISOString(),                                        // Timestamp
-        playerEmail,                                                     // characterNumber (player being scanned email)
-        eventName,                                                       // Event Name
-        attendingAs,                                                     // attendingAs
-        buildAdjustment,                                                 // Build Adj
-        apAdjustment                                                     // AP Adj
+        characterNumber,                    // Character Number
+        dateStr,                           // Date
+        '',                               // Date Override (empty)
+        '',                               // Character Cultivation Tier (empty)
+        buildAdjustment || '',            // Build Adjustment
+        apAdjustment || '',               // Affinity Point Adjustment
+        'Attending Event',                // Advancement Reason
+        '',                               // Skill Type (empty)
+        '',                               // Skill (empty)
+        '',                               // Skill Level Adj (empty)
+        '',                               // Adjust Hit Points (empty)
+        '',                               // Slotted Cores (empty)
+        '',                               // Tier of cores slotted (empty)
+        '',                               // Perfect Cultivation Points (empty)
+        '',                               // Affinity (empty)
+        '',                               // Affinity Level (empty)
+        '',                               // Adjust Cutlication Tier (empty)
+        decodedToken.email,               // Editor (admin email)
+        '',                               // Note (empty)
+        eventName,                        // Event
+        '',                               // Tier Consumed (empty)
+        indexId                           // Index (UUID)
       ];
 
-      // Append the row to the Google Sheet
+      // Append the row to the Master Logs sheet (extend to V column for Index)
       const sheetsResponse = await sheets.spreadsheets.values.append({
-        spreadsheetId: config.google_sheets.checkin_spreadsheet_id,
-        range: `${config.google_sheets.checkin_sheet_name}!A:G`,
+        spreadsheetId: config.google_sheets.pc_db_spreadsheet_id,
+        range: `${config.google_sheets.pc_db_master_logs_sheet_name}!A:V`,
         valueInputOption: 'RAW',
         insertDataOption: 'INSERT_ROWS',
         resource: {
@@ -6587,10 +6856,36 @@ exports.checkInPlayer = onRequest(async (req, res) => {
         }
       });
 
-      console.log('Check-in data written to Google Sheets:', sheetsResponse.data);
+      console.log('Check-in data written to Master Logs:', sheetsResponse.data);
+
+      // Trigger incremental sync to update Index and sync to Firebase
+      try {
+        console.log('Triggering incremental sync for new check-in entry...');
+        const syncResponse = await fetch('https://us-central1-crucible-helper.cloudfunctions.net/syncMasterLogs', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            incremental: true,
+            spreadsheetId: config.google_sheets.pc_db_spreadsheet_id,
+            sheetName: config.google_sheets.pc_db_master_logs_sheet_name
+          })
+        });
+
+        if (syncResponse.ok) {
+          const syncResult = await syncResponse.json();
+          console.log('Incremental sync completed:', syncResult);
+        } else {
+          console.error('Incremental sync failed:', await syncResponse.text());
+        }
+      } catch (syncError) {
+        console.error('Error triggering incremental sync:', syncError);
+        // Don't fail the check-in if sync fails, but log the error
+      }
 
     } catch (sheetsError) {
-      console.error('Error writing to Google Sheets:', sheetsError);
+      console.error('Error writing to Master Logs:', sheetsError);
       // Don't fail the check-in if Google Sheets fails, but log the error
     }
 
@@ -9043,7 +9338,7 @@ exports.getCharacterById = onRequest(async (req, res) => {
     const decodedToken = await getAuth().verifyIdToken(idToken);
     const uid = decodedToken.uid;
 
-    // Verify super admin
+    // Check if user is super admin OR accessing their own character
     const superAdminDoc = await db
       .collection('roles')
       .doc('superadmin')
@@ -9051,9 +9346,7 @@ exports.getCharacterById = onRequest(async (req, res) => {
       .doc(uid)
       .get();
 
-    if (!superAdminDoc.exists) {
-      return res.status(403).json({ ok: false, error: 'forbidden' });
-    }
+    const isSuperAdmin = superAdminDoc.exists;
 
     const { characterId } = req.query;
     if (!characterId || typeof characterId !== 'string') {
@@ -9063,6 +9356,12 @@ exports.getCharacterById = onRequest(async (req, res) => {
     const [playerUid, charNum] = characterId.split('_');
     if (!playerUid || !charNum) {
       return res.status(400).json({ ok: false, error: 'invalid_character_id' });
+    }
+
+    // Check authorization: super admin can access any character, regular users can only access their own
+    const isAccessingOwnCharacter = (uid === playerUid);
+    if (!isSuperAdmin && !isAccessingOwnCharacter) {
+      return res.status(403).json({ ok: false, error: 'forbidden' });
     }
 
     let character = null;
@@ -9361,7 +9660,7 @@ exports.resetCharacter = onRequest(async (req, res) => {
       return res.status(400).json({ ok: false, error: 'Character number is required' });
     }
 
-    console.log(`🔄 Starting character reset for character ${characterNumber}`);
+    console.log(`🔄 Starting enhanced character reset for character ${characterNumber}`);
 
     // Get PC DB spreadsheet ID from config
     const pcDbSpreadsheetId = config.google_sheets.pc_db_spreadsheet_id;
@@ -9390,12 +9689,14 @@ exports.resetCharacter = onRequest(async (req, res) => {
     // Initialize Google Sheets API
     const auth = new googleapis.auth.GoogleAuth({
       scopes: [
-        'https://www.googleapis.com/auth/spreadsheets'
+        'https://www.googleapis.com/auth/spreadsheets',
+        'https://www.googleapis.com/auth/drive'
       ],
       keyFile: './service-account-key.json'
     });
 
     const sheets = googleapis.sheets({ version: 'v4', auth });
+    const drive = googleapis.drive({ version: 'v3', auth });
 
     // Get the spreadsheet metadata to find the Master Log tab
     const spreadsheet = await sheets.spreadsheets.get({
@@ -9414,8 +9715,8 @@ exports.resetCharacter = onRequest(async (req, res) => {
     const sheetName = masterLogSheet.properties.title;
     console.log(`📋 Found Master Log tab: ${sheetName}`);
 
-    // Read the data from the Master Log tab
-    const range = `${sheetName}!A:Z`;
+    // Read the data from the Master Log tab (include Index column)
+    const range = `${sheetName}!A:V`;
     const response = await sheets.spreadsheets.values.get({
       spreadsheetId: cleanSpreadsheetId,
       range: range
@@ -9434,6 +9735,9 @@ exports.resetCharacter = onRequest(async (req, res) => {
     const advancementReasonCol = headers.findIndex(h => 
       h && h.toLowerCase().includes('advancement') && h.toLowerCase().includes('reason')
     );
+    const indexCol = headers.findIndex(h => 
+      h && h.toLowerCase().includes('index')
+    );
 
     if (characterNumberCol === -1 || advancementReasonCol === -1) {
       return res.status(400).json({ 
@@ -9442,7 +9746,7 @@ exports.resetCharacter = onRequest(async (req, res) => {
       });
     }
 
-    console.log(`📊 Found columns - Character Number: ${characterNumberCol}, Advancement Reason: ${advancementReasonCol}`);
+    console.log(`📊 Found columns - Character Number: ${characterNumberCol}, Advancement Reason: ${advancementReasonCol}, Index: ${indexCol}`);
 
     // Define the advancement reasons to remove
     const reasonsToRemove = [
@@ -9457,11 +9761,15 @@ exports.resetCharacter = onRequest(async (req, res) => {
       const row = rows[i];
       const rowCharacterNumber = row[characterNumberCol];
       const advancementReason = row[advancementReasonCol];
+      const indexValue = indexCol >= 0 ? row[indexCol] : null;
 
       if (rowCharacterNumber === characterNumber && 
           advancementReason && 
           reasonsToRemove.includes(advancementReason)) {
-        rowsToDelete.push(i + 1); // Google Sheets uses 1-based indexing
+        rowsToDelete.push({
+          rowIndex: i + 1, // Google Sheets uses 1-based indexing
+          indexId: indexValue
+        });
       }
     }
 
@@ -9481,7 +9789,7 @@ exports.resetCharacter = onRequest(async (req, res) => {
 
     // Delete rows in reverse order (from bottom to top)
     let deletedCount = 0;
-    for (const rowIndex of rowsToDelete) {
+    for (const rowInfo of rowsToDelete) {
       try {
         await sheets.spreadsheets.batchUpdate({
           spreadsheetId: cleanSpreadsheetId,
@@ -9491,22 +9799,175 @@ exports.resetCharacter = onRequest(async (req, res) => {
                 range: {
                   sheetId: masterLogSheet.properties.sheetId,
                   dimension: 'ROWS',
-                  startIndex: rowIndex - 1, // Convert to 0-based
-                  endIndex: rowIndex
+                  startIndex: rowInfo.rowIndex - 1, // Convert to 0-based
+                  endIndex: rowInfo.rowIndex
                 }
               }
             }]
           }
         });
         deletedCount++;
-        console.log(`✅ Deleted row ${rowIndex} for character ${characterNumber}`);
+        const indexInfo = rowInfo.indexId ? ` (Index: ${rowInfo.indexId})` : '';
+        console.log(`✅ Deleted row ${rowInfo.rowIndex} for character ${characterNumber}${indexInfo}`);
       } catch (deleteError) {
-        console.error(`❌ Error deleting row ${rowIndex}:`, deleteError);
+        console.error(`❌ Error deleting row ${rowInfo.rowIndex}:`, deleteError);
         // Continue with other deletions even if one fails
       }
     }
 
     console.log(`✅ Successfully deleted ${deletedCount} rows for character ${characterNumber}`);
+
+    // Now handle the character document renaming and creation
+    console.log(`🔄 Starting character document management for character ${characterNumber}`);
+    
+    // Find the player who owns this character
+    const pcsSheet = spreadsheet.data.sheets.find(sheet => 
+      sheet.properties.title.toLowerCase().includes('pc') && 
+      !sheet.properties.title.toLowerCase().includes('log')
+    );
+    
+    if (!pcsSheet) {
+      console.warn(`⚠️ PCs sheet not found, skipping character document management`);
+    } else {
+      try {
+        // Read PCs sheet to find the player
+        const pcsRange = `${pcsSheet.properties.title}!A:K`;
+        const pcsResponse = await sheets.spreadsheets.values.get({
+          spreadsheetId: cleanSpreadsheetId,
+          range: pcsRange
+        });
+        
+        const pcsRows = pcsResponse.data.values || [];
+        const pcsHeaders = pcsRows[0] || [];
+        const characterNumberColPcs = pcsHeaders.findIndex(h => 
+          h && h.toLowerCase().includes('character') && h.toLowerCase().includes('number')
+        );
+        const playerEmailCol = pcsHeaders.findIndex(h => 
+          h && h.toLowerCase().includes('email')
+        );
+        const characterNameCol = pcsHeaders.findIndex(h => 
+          h && h.toLowerCase().includes('character') && h.toLowerCase().includes('name')
+        );
+        
+        if (characterNumberColPcs !== -1 && playerEmailCol !== -1) {
+          // Find the player for this character
+          const playerRow = pcsRows.find(row => 
+            row[characterNumberColPcs] == characterNumber
+          );
+          
+          if (playerRow) {
+            const playerEmail = playerRow[playerEmailCol];
+            const characterName = characterNameCol !== -1 ? playerRow[characterNameCol] : 'Unknown';
+            
+            console.log(`👤 Found player: ${playerEmail} for character ${characterNumber}`);
+            
+            // Get current date for the reset date
+            const resetDate = new Date().toISOString().split('T')[0]; // YYYY-MM-DD format
+            const newDocumentName = `${characterNumber}-${resetDate}`;
+            
+            // Find the character document in Firebase Storage
+            const bucket = getStorage().bucket();
+            const originalFile = bucket.file(`users/${playerEmail}/pc.json`);
+            
+            try {
+              const [exists] = await originalFile.exists();
+              if (exists) {
+                console.log(`📄 Found character document for ${playerEmail}, renaming to ${newDocumentName}`);
+                
+                // Download the original file
+                const [fileContent] = await originalFile.download();
+                const characterData = JSON.parse(fileContent.toString());
+                
+                // Create the renamed file
+                const renamedFile = bucket.file(`users/${playerEmail}/${newDocumentName}.json`);
+                await renamedFile.save(JSON.stringify(characterData, null, 2), {
+                  metadata: {
+                    contentType: 'application/json',
+                    metadata: {
+                      originalCharacterNumber: characterNumber,
+                      resetDate: resetDate,
+                      resetBy: uid
+                    }
+                  }
+                });
+                
+                console.log(`✅ Renamed character document to ${newDocumentName}.json`);
+                
+                // Create a new character document with basic data
+                const newCharacterData = {
+                  playerName: characterData.playerName || 'Unknown',
+                  characterName: characterName,
+                  characterNumber: Number(characterNumber),
+                  race: characterData.race || 'Unknown',
+                  freeAffinity: characterData.freeAffinity || 'Unknown',
+                  cultivationTier: 'Iron', // Reset to basic tier
+                  buildTotal: 0, // Reset build total
+                  extraHitPoints: 0, // Reset extra hit points
+                  skills: [], // Reset skills
+                  tiers: {
+                    Iron: { affinityPointsTotal: 0, affinities: [] },
+                    Silver: { affinityPointsTotal: 0, affinities: [] },
+                    Gold: { affinityPointsTotal: 0, affinities: [] },
+                    Jade: { affinityPointsTotal: 0, affinities: [] },
+                    Saint: { affinityPointsTotal: 0, affinities: [] },
+                    Sovereign: { affinityPointsTotal: 0, affinities: [] }
+                  },
+                  version: `v${new Date().toISOString().slice(0, 10).replace(/-/g, '')}`,
+                  resetDate: resetDate,
+                  resetBy: uid,
+                  createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                  lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+                };
+                
+                // Save the new character document
+                await originalFile.save(JSON.stringify(newCharacterData, null, 2), {
+                  metadata: {
+                    contentType: 'application/json',
+                    metadata: {
+                      characterNumber: characterNumber,
+                      resetDate: resetDate,
+                      resetBy: uid,
+                      isReset: true
+                    }
+                  }
+                });
+                
+                console.log(`✅ Created new character document for ${playerEmail}`);
+                
+                // Update Firestore character document
+                const playerQuery = await db.collection('players').where('email', '==', playerEmail).limit(1).get();
+                if (!playerQuery.empty) {
+                  const playerDoc = playerQuery.docs[0];
+                  const playerUid = playerDoc.id;
+                  
+                  const characterRef = db.collection('players').doc(playerUid).collection('characters').doc(String(characterNumber));
+                  
+                  // Update the character document in Firestore
+                  await characterRef.set({
+                    ...newCharacterData,
+                    playerUid: playerUid,
+                    syncedAt: admin.firestore.FieldValue.serverTimestamp()
+                  }, { merge: true });
+                  
+                  console.log(`✅ Updated Firestore character document for ${playerUid}`);
+                }
+                
+              } else {
+                console.warn(`⚠️ Character document not found for ${playerEmail}, skipping document management`);
+              }
+            } catch (storageError) {
+              console.error(`❌ Error managing character document for ${playerEmail}:`, storageError);
+            }
+          } else {
+            console.warn(`⚠️ Player not found for character ${characterNumber} in PCs sheet`);
+          }
+        } else {
+          console.warn(`⚠️ Required columns not found in PCs sheet`);
+        }
+      } catch (pcsError) {
+        console.error(`❌ Error reading PCs sheet:`, pcsError);
+      }
+    }
 
     // After resetting, sync the character to update Firestore data
     console.log(`🔄 Syncing character ${characterNumber} after reset...`);
@@ -9535,13 +9996,15 @@ exports.resetCharacter = onRequest(async (req, res) => {
 
     return res.status(200).json({
       ok: true,
-      message: `Character ${characterNumber} reset and synced successfully`,
+      message: `Character ${characterNumber} reset, renamed, and synced successfully`,
       result: {
         characterNumber: characterNumber,
         rowsRemoved: deletedCount,
         advancementReasons: reasonsToRemove,
         sheetName: sheetName,
-        synced: true
+        synced: true,
+        documentRenamed: true,
+        newDocumentCreated: true
       }
     });
 
@@ -9942,6 +10405,474 @@ exports.initializeUserStructure = onRequest(async (req, res) => {
     return res.status(500).json({ ok: false, error: 'Internal server error' });
   }
 });
+
+// Function to create a new character
+exports.createCharacter = onRequest(async (req, res) => {
+  // Enable CORS
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+
+  // Handle preflight requests
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return;
+  }
+
+  // Check if user is authenticated
+  if (!req.headers.authorization) {
+    return res.status(401).json({ ok: false, error: 'Missing authorization header' });
+  }
+
+  const idToken = req.headers.authorization.split(' ')[1];
+  try {
+    const decodedToken = await getAuth().verifyIdToken(idToken);
+    const uid = decodedToken.uid;
+    const userEmail = decodedToken.email;
+
+    console.log(`🚀 Creating character for user ${uid} (${userEmail})`);
+
+    const { characterName, playerName, race, freeAffinity } = req.body;
+
+    // Validate required fields
+    if (!characterName || !playerName || !race) {
+      return res.status(400).json({ 
+        ok: false, 
+        error: 'Missing required fields: characterName, playerName, race' 
+      });
+    }
+
+    // Validate character name
+    if (characterName.trim().length < 2 || characterName.trim().length > 50) {
+      return res.status(400).json({ 
+        ok: false, 
+        error: 'Character name must be between 2 and 50 characters' 
+      });
+    }
+
+    // Validate player name
+    if (playerName.trim().length < 2 || playerName.trim().length > 50) {
+      return res.status(400).json({ 
+        ok: false, 
+        error: 'Player name must be between 2 and 50 characters' 
+      });
+    }
+
+    // Get and assign next character number from _config document
+    const configRef = db.collection('players').doc('_config');
+    const configDoc = await configRef.get();
+    
+    let currentNumber;
+    let startingBuild = 100;
+    let startingAffinityPoints = 60;
+    let startingCultivationTier = 'Iron';
+    
+    if (!configDoc.exists) {
+      // Initialize with starting number 152 and default starting stats
+      currentNumber = 152;
+      await configRef.set({
+        nextNumber: 152, // Current number to use
+        startingBuild: 100, // Default starting build
+        startingAffinityPoints: 60, // Default starting affinity points (build - 40)
+        startingCultivationTier: 'Iron', // Default starting cultivation tier
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+      });
+    } else {
+      const configData = configDoc.data();
+      currentNumber = configData.nextNumber;
+      // Get starting stats from config
+      startingBuild = configData.startingBuild || 100;
+      startingAffinityPoints = configData.startingAffinityPoints || 60;
+      startingCultivationTier = configData.startingCultivationTier || 'Iron';
+    }
+    
+    // Increment the next character number for future use
+    await configRef.update({
+      nextNumber: admin.firestore.FieldValue.increment(1),
+      lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+    });
+    
+    const characterNumber = currentNumber.toString();
+    
+    // Create character document with character number as ID
+    const characterData = {
+      characterName: characterName.trim(),
+      playerName: playerName.trim(),
+      race: race,
+      free_affinity: freeAffinity || null,
+      playerUid: uid,
+      cultivationTier: startingCultivationTier, // Use starting cultivation tier from config
+      startingBuild: startingBuild, // Add starting build to character
+      startingAffinityPoints: startingAffinityPoints, // Add starting affinity points to character
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+    };
+
+    // Save character to Firestore in the player's characters collection
+    const characterRef = db.collection('players').doc(uid).collection('characters').doc(characterNumber);
+    await characterRef.set(characterData);
+
+    // Initialize Google Sheets API
+    const auth = new googleapis.auth.GoogleAuth({
+      scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+      keyFile: './service-account-key.json'
+    });
+    const sheets = googleapis.sheets({ version: 'v4', auth });
+
+    // Extract just the spreadsheet ID from the full URL
+    const rawId = config.google_sheets.pc_db_spreadsheet_id;
+    let spreadsheetId;
+    if (rawId.includes('/d/')) {
+      // Format: https://docs.google.com/spreadsheets/d/ID/edit?gid=...
+      spreadsheetId = rawId.split('/d/')[1].split('/')[0];
+    } else if (rawId.includes('/')) {
+      // Format: ID/edit?gid=...
+      spreadsheetId = rawId.split('/')[0].split('?')[0];
+    } else {
+      // Already just the ID
+      spreadsheetId = rawId.split('?')[0];
+    }
+
+    // Format timestamp to match Google Form format: M/D/YYYY H:MM:SS
+    const now = new Date();
+    const timestamp = `${now.getMonth() + 1}/${now.getDate()}/${now.getFullYear()} ${now.getHours()}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
+
+    // Format race name: replace " - " with "/" for display
+    const formattedRace = race.replace(/ - /g, '/');
+
+    const rowData = [
+      timestamp,                                   // Timestamp (formatted like Google Form)
+      userEmail,                                   // Email Address
+      characterName.trim(),                        // Character Name
+      playerName.trim(),                           // Player Name
+      formattedRace,                               // Race (formatted with "/" instead of " - ")
+      freeAffinity || 'N/A'                       // Pick an Affinity to start with
+    ];
+
+    // Create Master Log row data (outside try-catch for error logging)
+    const masterLogRowData = [
+      characterNumber,                    // A: Character Number
+      timestamp,                          // B: Date - Timestamp (same format as Form Response)
+      '',                                 // C: Empty
+      startingCultivationTier,           // D: Cultivation Tier
+      startingBuild,                      // E: Starting Build
+      startingAffinityPoints,            // F: Starting Affinity Points
+      'Character Initialization',         // G: Description
+      '',                                 // H: Empty
+      '',                                 // I: Empty
+      '',                                 // J: Empty
+      '',                                 // K: Empty
+      '',                                 // L: Empty
+      '',                                 // M: Empty
+      '',                                 // N: Empty
+      freeAffinity || 'N/A',             // O: Free Affinity
+      1,                                  // P: Value (1)
+      '',                                 // Q: Empty
+      userEmail                           // R: User's Email
+    ];
+
+    // Write to Google Sheets "Form Responses" sheet
+    try {
+      
+      const sheetsResponse = await sheets.spreadsheets.values.append({
+        spreadsheetId: spreadsheetId,
+        range: 'Form Responses!A:F',
+        valueInputOption: 'RAW',
+        insertDataOption: 'INSERT_ROWS',
+        resource: {
+          values: [rowData]
+        }
+      });
+      console.log('✅ Character data written to Google Sheets Form Responses:', sheetsResponse.data);
+    } catch (sheetsError) {
+      console.error('❌ Error writing to Google Sheets Form Responses:', sheetsError);
+      console.error('❌ Form Responses error details:', {
+        message: sheetsError.message,
+        code: sheetsError.code,
+        status: sheetsError.status,
+        response: sheetsError.response?.data,
+        spreadsheetId: spreadsheetId,
+        range: 'Form Responses!A:F',
+        rowData: rowData
+      });
+      // Don't fail the character creation if Google Sheets write fails
+    }
+
+    // Write to PCs tab with additional columns
+    try {
+      // First, try to find existing row with matching email
+      console.log('🔍 Searching for existing PC row with email:', userEmail);
+      
+      // Read the PCs sheet to find matching email
+      const pcSheetResponse = await sheets.spreadsheets.values.get({
+        spreadsheetId: spreadsheetId,
+        range: 'PCs!A:Z' // Read a wide range to find email column
+      });
+      
+      const pcRows = pcSheetResponse.data.values || [];
+      let existingRowIndex = -1;
+      
+      // Find the row with matching email (assuming email is in column B)
+      for (let i = 0; i < pcRows.length; i++) {
+        if (pcRows[i] && pcRows[i][1] === userEmail) { // Column B (index 1) should be email
+          existingRowIndex = i;
+          console.log(`✅ Found existing PC row at index ${i} for email: ${userEmail}`);
+          break;
+        }
+      }
+      
+      const pcRowData = [
+        '',                                 // A: From Form Responses (don't touch)
+        '',                                 // B: From Form Responses (don't touch) 
+        '',                                 // C: From Form Responses (don't touch)
+        '',                                 // D: From Form Responses (don't touch)
+        '',                                 // E: From Form Responses (don't touch)
+        characterNumber,                    // F: Character Number
+        '',                                 // G: Skip (empty)
+        startingBuild,                      // H: Starting Build
+        startingCultivationTier            // I: Starting Tier
+      ];
+      
+      let pcSheetsResponse;
+      
+      if (existingRowIndex >= 0) {
+        // Update existing row
+        const rowNumber = existingRowIndex + 1; // Google Sheets is 1-indexed
+        console.log(`📝 Updating existing PC row ${rowNumber} for email: ${userEmail}`);
+        
+        pcSheetsResponse = await sheets.spreadsheets.values.update({
+          spreadsheetId: spreadsheetId,
+          range: `PCs!F${rowNumber}:I${rowNumber}`,
+          valueInputOption: 'RAW',
+          resource: {
+            values: [pcRowData.slice(5, 9)] // Only columns F-I (indices 5-8)
+          }
+        });
+        console.log('✅ Character data updated in Google Sheets PCs tab:', pcSheetsResponse.data);
+      } else {
+        // Append new row
+        console.log(`➕ No existing PC row found, appending new row for email: ${userEmail}`);
+        
+        pcSheetsResponse = await sheets.spreadsheets.values.append({
+          spreadsheetId: spreadsheetId,
+          range: 'PCs!A:I',
+          valueInputOption: 'RAW',
+          insertDataOption: 'INSERT_ROWS',
+          resource: {
+            values: [pcRowData]
+          }
+        });
+        console.log('✅ Character data appended to Google Sheets PCs tab:', pcSheetsResponse.data);
+      }
+    } catch (pcSheetsError) {
+      console.error('❌ Error writing to Google Sheets PCs tab:', pcSheetsError);
+      console.error('❌ PCs tab error details:', {
+        message: pcSheetsError.message,
+        code: pcSheetsError.code,
+        status: pcSheetsError.status,
+        response: pcSheetsError.response?.data,
+        spreadsheetId: spreadsheetId,
+        range: 'PCs!A:I',
+        rowData: pcRowData
+      });
+      // Don't fail the character creation if PCs tab write fails
+    }
+
+    // Write to Master Log for character initialization
+    try {
+      console.log('📝 Initializing character in Master Log...');
+
+      const masterLogResponse = await sheets.spreadsheets.values.append({
+        spreadsheetId: spreadsheetId,
+        range: 'Master Logs!A:R',
+        valueInputOption: 'RAW',
+        insertDataOption: 'INSERT_ROWS',
+        resource: {
+          values: [masterLogRowData]
+        }
+      });
+      console.log('✅ Character initialized in Master Log:', masterLogResponse.data);
+    } catch (masterLogError) {
+      console.error('❌ Error writing to Master Log:', masterLogError);
+      console.error('❌ Master Log error details:', {
+        message: masterLogError.message,
+        code: masterLogError.code,
+        status: masterLogError.status,
+        response: masterLogError.response?.data,
+        spreadsheetId: spreadsheetId,
+        range: 'Master Logs!A:R',
+        rowData: masterLogRowData
+      });
+      // Don't fail the character creation if Master Log write fails
+    }
+
+    console.log(`✅ Character created: ${characterName} (${race}) - Character #${characterNumber}`);
+    console.log(`📊 Starting stats applied: Build=${startingBuild}, Affinity Points=${startingAffinityPoints}, Tier=${startingCultivationTier}`);
+
+    return res.status(200).json({
+      ok: true,
+      characterId: characterNumber, // Use character number as the ID
+      characterNumber: characterNumber,
+      message: 'Character created successfully'
+    });
+
+  } catch (error) {
+    console.error('Error creating character:', error);
+    return res.status(500).json({ ok: false, error: 'Internal server error' });
+  }
+});
+
+// Function to get app configuration (starting character stats)
+exports.getAppConfig = onRequest(async (req, res) => {
+  // Enable CORS
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+
+  // Handle preflight requests
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return;
+  }
+
+  // Check if user is authenticated
+  if (!req.headers.authorization) {
+    return res.status(401).json({ ok: false, error: 'Missing authorization header' });
+  }
+
+  try {
+    const idToken = req.headers.authorization.split(' ')[1];
+    const decodedToken = await getAuth().verifyIdToken(idToken);
+    const uid = decodedToken.uid;
+
+    // Check if user is admin
+    const isAdmin = await isSuperAdmin(uid);
+    if (!isAdmin) {
+      return res.status(403).json({ ok: false, error: 'Admin access required' });
+    }
+
+    console.log(`🔧 Getting app config for admin ${uid}`);
+
+    // Get config document
+    const configRef = db.collection('players').doc('_config');
+    const configDoc = await configRef.get();
+    
+    if (!configDoc.exists) {
+      // Return default values if config doesn't exist
+      return res.status(200).json({
+        ok: true,
+        config: {
+          nextNumber: 152,
+          startingBuild: 100,
+          startingAffinityPoints: 60,
+          startingCultivationTier: 'Iron'
+        }
+      });
+    }
+
+    const configData = configDoc.data();
+    return res.status(200).json({
+      ok: true,
+      config: {
+        nextNumber: configData.nextNumber || 152,
+        startingBuild: configData.startingBuild || 100,
+        startingAffinityPoints: configData.startingAffinityPoints || 60,
+        startingCultivationTier: configData.startingCultivationTier || 'Iron'
+      }
+    });
+
+  } catch (error) {
+    console.error('Error getting app config:', error);
+    return res.status(500).json({ ok: false, error: 'Internal server error' });
+  }
+});
+
+// Function to update app configuration (starting character stats)
+exports.updateAppConfig = onRequest(async (req, res) => {
+  // Enable CORS
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+
+  // Handle preflight requests
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return;
+  }
+
+  // Check if user is authenticated
+  if (!req.headers.authorization) {
+    return res.status(401).json({ ok: false, error: 'Missing authorization header' });
+  }
+
+  try {
+    const idToken = req.headers.authorization.split(' ')[1];
+    const decodedToken = await getAuth().verifyIdToken(idToken);
+    const uid = decodedToken.uid;
+
+    // Check if user is admin
+    const isAdmin = await isSuperAdmin(uid);
+    if (!isAdmin) {
+      return res.status(403).json({ ok: false, error: 'Admin access required' });
+    }
+
+    const { startingBuild, startingAffinityPoints, startingCultivationTier } = req.body;
+
+    // Validate required fields
+    if (startingBuild === undefined || startingAffinityPoints === undefined || !startingCultivationTier) {
+      return res.status(400).json({ 
+        ok: false, 
+        error: 'Missing required fields: startingBuild, startingAffinityPoints, startingCultivationTier' 
+      });
+    }
+
+    // Validate values
+    if (startingBuild < 1 || startingBuild > 1000) {
+      return res.status(400).json({ 
+        ok: false, 
+        error: 'Starting build must be between 1 and 1000' 
+      });
+    }
+
+    if (startingAffinityPoints < 0 || startingAffinityPoints > 1000) {
+      return res.status(400).json({ 
+        ok: false, 
+        error: 'Starting affinity points must be between 0 and 1000' 
+      });
+    }
+
+    const validTiers = ['Iron', 'Silver', 'Gold', 'Jade', 'Saint', 'Sovereign'];
+    if (!validTiers.includes(startingCultivationTier)) {
+      return res.status(400).json({ 
+        ok: false, 
+        error: 'Invalid cultivation tier. Must be one of: ' + validTiers.join(', ') 
+      });
+    }
+
+    console.log(`🔧 Updating app config for admin ${uid}: build=${startingBuild}, affinity=${startingAffinityPoints}, tier=${startingCultivationTier}`);
+
+    // Update config document
+    const configRef = db.collection('players').doc('_config');
+    await configRef.set({
+      startingBuild: startingBuild,
+      startingAffinityPoints: startingAffinityPoints,
+      startingCultivationTier: startingCultivationTier,
+      lastUpdated: admin.firestore.FieldValue.serverTimestamp(),
+      updatedBy: uid
+    }, { merge: true });
+
+    return res.status(200).json({
+      ok: true,
+      message: 'App configuration updated successfully'
+    });
+
+  } catch (error) {
+    console.error('Error updating app config:', error);
+    return res.status(500).json({ ok: false, error: 'Internal server error' });
+  }
+});
+
 // Temporary function to fix character playerUid field
 exports.fixCharacterPlayerUid = onRequest(async (req, res) => {
   // Enable CORS
@@ -11029,6 +11960,425 @@ exports.getEventRegistrations = onRequest(async (req, res) => {
   }
 });
 
+// Get check-in data for an event
+exports.getEventCheckIns = onRequest(async (req, res) => {
+  // Enable CORS
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+
+  // Handle preflight requests
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return;
+  }
+
+  // Check if user is authenticated
+  if (!req.headers.authorization) {
+    return res.status(401).json({ ok: false, error: 'Missing authorization header' });
+  }
+
+  const idToken = req.headers.authorization.split(' ')[1];
+  try {
+    const decodedToken = await getAuth().verifyIdToken(idToken);
+    const uid = decodedToken.uid;
+
+    const { eventId } = req.query;
+
+    if (!eventId) {
+      return res.status(400).json({ ok: false, error: 'Event ID is required' });
+    }
+
+    // Check if user is super admin
+    const isAdmin = await isSuperAdmin(uid);
+    if (!isAdmin) {
+      return res.status(403).json({ ok: false, error: 'User must be super admin' });
+    }
+
+    // Get all check-ins for this event
+    const checkInsSnapshot = await db.collection('events')
+      .doc(eventId)
+      .collection('checkins')
+      .get();
+
+    // Get all registrations for this event to compare
+    const registrationsSnapshot = await db.collection('events')
+      .doc(eventId)
+      .collection('registrations')
+      .get();
+
+    const checkedInPlayers = [];
+    const registeredPlayers = [];
+
+    // Process checked-in players
+    for (const doc of checkInsSnapshot.docs) {
+      const checkInData = doc.data();
+      let playerName = 'Unknown Player';
+      let characterName = '';
+      let characterNumber = '';
+      
+      try {
+        const userRecord = await getAuth().getUser(doc.id);
+        playerName = userRecord.displayName || userRecord.email || 'Unknown Player';
+        
+        // Try to get character data from user's document
+        try {
+          const userDoc = await db.collection('users').doc(doc.id).get();
+          if (userDoc.exists) {
+            const userData = userDoc.data();
+            if (userData.characterName) {
+              characterName = userData.characterName;
+            }
+            if (userData.characterNumber) {
+              characterNumber = userData.characterNumber.toString();
+            }
+          }
+        } catch (charError) {
+          console.log(`Could not get character data for ${doc.id}:`, charError.message);
+        }
+      } catch (error) {
+        console.log(`Could not get user details for ${doc.id}:`, error.message);
+      }
+      
+      checkedInPlayers.push({
+        uid: doc.id,
+        playerName: playerName,
+        characterName: characterName,
+        characterNumber: characterNumber,
+        checkedInAt: checkInData.checkedInAt,
+        checkedInBy: checkInData.checkedInBy
+      });
+    }
+
+    // Process registered players
+    for (const doc of registrationsSnapshot.docs) {
+      const registrationData = doc.data();
+      let playerName = 'Unknown Player';
+      let characterName = '';
+      let characterNumber = '';
+      
+      try {
+        const userRecord = await getAuth().getUser(doc.id);
+        playerName = userRecord.displayName || userRecord.email || 'Unknown Player';
+        
+        // Try to get character data from user's document
+        try {
+          const userDoc = await db.collection('users').doc(doc.id).get();
+          if (userDoc.exists) {
+            const userData = userDoc.data();
+            if (userData.characterName) {
+              characterName = userData.characterName;
+            }
+            if (userData.characterNumber) {
+              characterNumber = userData.characterNumber.toString();
+            }
+          }
+        } catch (charError) {
+          console.log(`Could not get character data for ${doc.id}:`, charError.message);
+        }
+      } catch (error) {
+        console.log(`Could not get user details for ${doc.id}:`, error.message);
+      }
+      
+      registeredPlayers.push({
+        uid: doc.id,
+        playerName: playerName,
+        characterName: characterName,
+        characterNumber: characterNumber,
+        attendeeTypeName: registrationData.attendeeTypeName || 'Unknown'
+      });
+    }
+
+    // Find players who are registered but not checked in
+    const checkedInUids = new Set(checkedInPlayers.map(p => p.uid));
+    const notCheckedIn = registeredPlayers.filter(p => !checkedInUids.has(p.uid));
+
+    return res.status(200).json({
+      ok: true,
+      checkedIn: {
+        total: checkedInPlayers.length,
+        players: checkedInPlayers
+      },
+      notCheckedIn: {
+        total: notCheckedIn.length,
+        players: notCheckedIn
+      },
+      registered: {
+        total: registeredPlayers.length,
+        players: registeredPlayers
+      }
+    });
+
+  } catch (error) {
+    console.error('Error getting event check-ins:', error);
+    res.status(500).json({
+      ok: false,
+      error: 'server_error',
+      message: error.message
+    });
+  }
+});
+
+// Mass check-in players for an event
+exports.massCheckInPlayers = onRequest(async (req, res) => {
+  // Enable CORS
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+
+  // Handle preflight requests
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return;
+  }
+
+  // Check if user is authenticated
+  if (!req.headers.authorization) {
+    return res.status(401).json({ ok: false, error: 'Missing authorization header' });
+  }
+
+  const idToken = req.headers.authorization.split(' ')[1];
+  try {
+    const decodedToken = await getAuth().verifyIdToken(idToken);
+    const uid = decodedToken.uid;
+
+    // Check if user is super admin
+    const isAdmin = await isSuperAdmin(uid);
+    if (!isAdmin) {
+      return res.status(403).json({ ok: false, error: 'User must be super admin' });
+    }
+
+    const { eventId, playerUids } = req.body;
+
+    if (!eventId || !playerUids || !Array.isArray(playerUids)) {
+      return res.status(400).json({ ok: false, error: 'Event ID and player UIDs array are required' });
+    }
+
+    // Check if event exists
+    const eventDoc = await db.collection('events').doc(eventId).get();
+    if (!eventDoc.exists) {
+      return res.status(404).json({ ok: false, error: 'Event not found' });
+    }
+
+    const results = [];
+    const errors = [];
+
+    // Process each player
+    for (const playerUid of playerUids) {
+      try {
+        // Check if player is already checked in
+        const existingCheckIn = await db.collection('events')
+          .doc(eventId)
+          .collection('checkins')
+          .doc(playerUid)
+          .get();
+
+        if (existingCheckIn.exists) {
+          errors.push({
+            playerUid: playerUid,
+            error: 'Player is already checked in'
+          });
+          continue;
+        }
+
+        // Get player registration details
+        const registrationDoc = await db.collection('events')
+          .doc(eventId)
+          .collection('registrations')
+          .doc(playerUid)
+          .get();
+
+        let attendingAs = 'Unknown';
+        let buildAdjustment = 0;
+        let apAdjustment = 0;
+
+        if (registrationDoc.exists) {
+          const registrationData = registrationDoc.data();
+          attendingAs = registrationData.attendeeTypeName || 'Unknown';
+          buildAdjustment = registrationData.buildForEvent || 0;
+          apAdjustment = registrationData.affinityPointsForEvent || 0;
+        }
+
+        // Get player email and character number
+        let playerEmail = 'Unknown';
+        let characterNumber = 'Unknown';
+        
+        try {
+          const userRecord = await getAuth().getUser(playerUid);
+          playerEmail = userRecord.email || 'Unknown';
+        } catch (error) {
+          console.log(`⚠️ Could not get email for user ${playerUid}: ${error.message}`);
+          // Fallback to Firestore user document
+          const playerUserDoc = await db.collection('users').doc(playerUid).get();
+          if (playerUserDoc.exists) {
+            const userData = playerUserDoc.data();
+            playerEmail = userData.email || 'Unknown';
+            if (userData.characterNumber) {
+              characterNumber = userData.characterNumber.toString();
+            }
+          }
+        }
+
+        // Create check-in record in Firebase
+        const checkInData = {
+          playerUid: playerUid,
+          checkedInAt: admin.firestore.FieldValue.serverTimestamp(),
+          checkedInBy: uid,
+          attendingAs: attendingAs,
+          buildAdjustment: buildAdjustment,
+          apAdjustment: apAdjustment,
+          playerEmail: playerEmail,
+          characterNumber: characterNumber
+        };
+
+        await db.collection('events')
+          .doc(eventId)
+          .collection('checkins')
+          .doc(playerUid)
+          .set(checkInData);
+
+        // Write to Master Logs Google Sheet
+        try {
+          // Initialize Google Sheets API
+          const auth = new googleapis.auth.GoogleAuth({
+            scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+            keyFile: './service-account-key.json'
+          });
+
+          const sheets = googleapis.sheets({ version: 'v4', auth });
+
+          // Get current date/time for the entry
+          const now = new Date();
+          const dateStr = now.toLocaleDateString('en-US', { 
+            timeZone: 'America/Chicago',
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: false
+          }).replace(/(\d+)\/(\d+)\/(\d+),?\s*(\d+):(\d+):(\d+)/, '$1/$2/$3 $4:$5:$6');
+
+          // Get event name
+          let eventName = 'Unknown Event';
+          if (eventDoc.exists) {
+            const eventData = eventDoc.data();
+            eventName = eventData.typeName || eventData.type || 'Unknown Event';
+            if (eventData.registrationActivated && eventData.registrationDetails && eventData.registrationDetails.eventName) {
+              eventName = eventData.registrationDetails.eventName;
+            }
+          }
+
+          // Generate UUID for this entry
+          const crypto = require('crypto');
+          const indexId = crypto.randomUUID();
+
+          // Prepare the row data for Master Logs sheet
+          const rowData = [
+            characterNumber,                    // Character Number
+            dateStr,                           // Date
+            '',                               // Date Override (empty)
+            '',                               // Character Cultivation Tier (empty)
+            buildAdjustment || '',            // Build Adjustment
+            apAdjustment || '',               // Affinity Point Adjustment
+            'Attending Event',                // Advancement Reason
+            '',                               // Skill Type (empty)
+            '',                               // Skill (empty)
+            '',                               // Skill Level Adj (empty)
+            '',                               // Adjust Hit Points (empty)
+            '',                               // Slotted Cores (empty)
+            '',                               // Tier of cores slotted (empty)
+            '',                               // Perfect Cultivation Points (empty)
+            '',                               // Affinity (empty)
+            '',                               // Affinity Level (empty)
+            '',                               // Adjust Cutlication Tier (empty)
+            decodedToken.email,               // Editor (admin email)
+            '',                               // Note (empty)
+            eventName,                        // Event
+            '',                               // Tier Consumed (empty)
+            indexId                           // Index (UUID)
+          ];
+
+          // Append the row to the Master Logs sheet (extend to V column for Index)
+          await sheets.spreadsheets.values.append({
+            spreadsheetId: config.google_sheets.pc_db_spreadsheet_id,
+            range: `${config.google_sheets.pc_db_master_logs_sheet_name}!A:V`,
+            valueInputOption: 'RAW',
+            insertDataOption: 'INSERT_ROWS',
+            resource: {
+              values: [rowData]
+            }
+          });
+
+          console.log(`Master Logs entry written for player ${playerUid}`);
+
+          // Trigger incremental sync to update Index and sync to Firebase
+          try {
+            console.log(`Triggering incremental sync for player ${playerUid} check-in...`);
+            const syncResponse = await fetch('https://us-central1-crucible-helper.cloudfunctions.net/syncMasterLogs', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                incremental: true,
+                spreadsheetId: config.google_sheets.pc_db_spreadsheet_id,
+                sheetName: config.google_sheets.pc_db_master_logs_sheet_name
+              })
+            });
+
+            if (syncResponse.ok) {
+              const syncResult = await syncResponse.json();
+              console.log(`Incremental sync completed for player ${playerUid}:`, syncResult);
+            } else {
+              console.error(`Incremental sync failed for player ${playerUid}:`, await syncResponse.text());
+            }
+          } catch (syncError) {
+            console.error(`Error triggering incremental sync for player ${playerUid}:`, syncError);
+            // Don't fail the check-in if sync fails, but log the error
+          }
+
+        } catch (sheetsError) {
+          console.error(`Error writing to Master Logs for player ${playerUid}:`, sheetsError);
+          // Don't fail the check-in if Google Sheets fails, but log the error
+        }
+
+        results.push({
+          playerUid: playerUid,
+          success: true
+        });
+
+      } catch (error) {
+        console.error(`Error checking in player ${playerUid}:`, error);
+        errors.push({
+          playerUid: playerUid,
+          error: error.message
+        });
+      }
+    }
+
+    return res.status(200).json({
+      ok: true,
+      results: results,
+      errors: errors,
+      summary: {
+        total: playerUids.length,
+        successful: results.length,
+        failed: errors.length
+      }
+    });
+
+  } catch (error) {
+    console.error('Error in mass check-in:', error);
+    res.status(500).json({
+      ok: false,
+      error: 'server_error',
+      message: error.message
+    });
+  }
+});
+
 // Verify Master Log "Attending Event" entries for an event's checked-in players and optionally resubmit
 exports.verifyEventAttending = onRequest(async (req, res) => {
   // Enable CORS
@@ -11355,6 +12705,110 @@ exports.regenerateAllQRCodes = onRequest({ secrets: [GAME_SECRET] }, async (req,
       ok: false,
       error: 'server_error',
       message: error.message
+    });
+  }
+});
+
+// Regenerate Character JSON from Master Logs via Google Apps Script
+exports.regenerateCharacterFromMasterLogs = onRequest(async (req, res) => {
+  // Enable CORS
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+
+  // Handle preflight requests
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return;
+  }
+
+  try {
+    // Verify authentication
+    if (!req.headers.authorization) {
+      return res.status(401).json({ ok: false, error: 'Missing authorization header' });
+    }
+
+    const idToken = req.headers.authorization.split(' ')[1];
+    const decodedToken = await getAuth().verifyIdToken(idToken);
+    const authenticatedUid = decodedToken.uid;
+
+    // Get parameters
+    const characterNumber = (req.query.characterNumber || req.body?.characterNumber || '').toString();
+    const playerUid = (req.query.playerUid || req.body?.playerUid || '').toString();
+
+    if (!characterNumber) {
+      return res.status(400).json({ 
+        ok: false, 
+        error: 'missing_character_number',
+        message: 'Character number is required' 
+      });
+    }
+
+    // Authorization: user can regenerate their own character OR super admin can regenerate any character
+    const isAdmin = await isSuperAdmin(authenticatedUid);
+    const targetUid = playerUid || authenticatedUid;
+    const isOwner = (authenticatedUid === targetUid);
+
+    if (!isOwner && !isAdmin) {
+      return res.status(403).json({ 
+        ok: false, 
+        error: 'insufficient_permissions',
+        message: 'You can only regenerate your own character unless you are a super admin' 
+      });
+    }
+
+    console.log(`🔄 Regenerating character ${characterNumber} from Master Logs via Apps Script`);
+
+    // Get the Apps Script URL from config
+    const appsScriptUrl = config.google_sheets?.apps_script_url;
+    if (!appsScriptUrl) {
+      throw new Error('Apps Script URL not configured in config.json');
+    }
+
+    // Call the Google Apps Script to regenerate and upload character JSON
+    const response = await axios.post(appsScriptUrl, {
+      action: 'regenerateCharacter',
+      characterNumber: characterNumber
+    }, {
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      timeout: 120000 // 120 second timeout (Apps Script can take a while)
+    });
+
+    console.log(`📥 Apps Script response:`, response.data);
+
+    if (response.data.ok === false || response.data.error) {
+      throw new Error(response.data.message || response.data.error || 'Apps Script returned error');
+    }
+
+    console.log(`✅ Character ${characterNumber} regenerated from Master Logs`);
+
+    return res.status(200).json({
+      ok: true,
+      message: 'Character regenerated successfully from Master Logs',
+      characterNumber: characterNumber,
+      generatedAt: response.data.generatedAt || new Date().toISOString()
+    });
+
+  } catch (error) {
+    console.error('Error in regenerateCharacterFromMasterLogs:', error);
+    
+    let errorMessage = error.message;
+    let statusCode = 500;
+
+    // Handle axios errors
+    if (error.response) {
+      statusCode = error.response.status || 500;
+      errorMessage = error.response.data?.message || error.response.data || error.message;
+    } else if (error.code === 'ECONNABORTED') {
+      errorMessage = 'Request to Apps Script timed out';
+    }
+
+    return res.status(statusCode).json({
+      ok: false,
+      error: 'regeneration_failed',
+      message: errorMessage
     });
   }
 });

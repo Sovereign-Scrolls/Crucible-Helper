@@ -369,12 +369,16 @@ class _DeathTimerPageState extends State<DeathTimerPage> with TickerProviderStat
                             size: 28,
                           ),
                           SizedBox(width: 8),
-                          Text(
-                            'Stage 1: Bleeding Out',
-                            style: TextStyle(
-                              fontSize: 24,
-                              fontWeight: FontWeight.bold,
-                              color: Colors.white,
+                          Flexible(
+                            child: Text(
+                              'Stage 1: Bleeding Out',
+                              style: TextStyle(
+                                fontSize: 24,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.white,
+                              ),
+                              textAlign: TextAlign.center,
+                              overflow: TextOverflow.ellipsis,
                             ),
                           ),
                         ],
@@ -448,12 +452,16 @@ class _DeathTimerPageState extends State<DeathTimerPage> with TickerProviderStat
                             size: 28,
                           ),
                           SizedBox(width: 8),
-                          Text(
-                            'Stage 2: Unconscious/Dying',
-                            style: TextStyle(
-                              fontSize: 24,
-                              fontWeight: FontWeight.bold,
-                              color: Colors.white,
+                          Flexible(
+                            child: Text(
+                              'Stage 2: Unconscious/Dying',
+                              style: TextStyle(
+                                fontSize: 24,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.white,
+                              ),
+                              textAlign: TextAlign.center,
+                              overflow: TextOverflow.ellipsis,
                             ),
                           ),
                         ],
@@ -499,55 +507,131 @@ class _DeathTimerPageState extends State<DeathTimerPage> with TickerProviderStat
             
             SizedBox(height: 24),
             
-            // Control buttons
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-              children: [
-                ElevatedButton.icon(
-                  onPressed: timerData.state == TimerState.ready || timerData.state == TimerState.paused
-                      ? () => _startTimer(TimerType.death)
-                      : null,
-                  icon: Icon(Icons.play_arrow),
-                  label: Text('Start'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.red[600],
-                    foregroundColor: Colors.white,
-                    padding: EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-                  ),
-                ),
-                ElevatedButton.icon(
-                  onPressed: timerData.state == TimerState.running
-                      ? () => _pauseTimer(TimerType.death)
-                      : null,
-                  icon: Icon(Icons.pause),
-                  label: Text('Pause'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.orange[600],
-                    foregroundColor: Colors.white,
-                    padding: EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-                  ),
-                ),
-                ElevatedButton.icon(
-                  onPressed: () => _healCharacter(),
-                  icon: Icon(Icons.healing),
-                  label: Text('Heal'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.green[600],
-                    foregroundColor: Colors.white,
-                    padding: EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-                  ),
-                ),
-                ElevatedButton.icon(
-                  onPressed: () => _resetTimer(TimerType.death),
-                  icon: Icon(Icons.refresh),
-                  label: Text('Reset'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.grey[600],
-                    foregroundColor: Colors.white,
-                    padding: EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-                  ),
-                ),
-              ],
+            // Control buttons - responsive
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final isNarrow = constraints.maxWidth < 600;
+                return Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                  children: [
+                    Flexible(
+                      child: Tooltip(
+                        message: 'Start Timer',
+                        child: ElevatedButton(
+                          onPressed: timerData.state == TimerState.ready || timerData.state == TimerState.paused
+                              ? () => _startTimer(TimerType.death)
+                              : null,
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.red[600],
+                            foregroundColor: Colors.white,
+                            padding: EdgeInsets.symmetric(
+                              horizontal: isNarrow ? 12 : 24, 
+                              vertical: 12
+                            ),
+                            minimumSize: Size(isNarrow ? 48 : 80, 48),
+                          ),
+                          child: isNarrow 
+                              ? Icon(Icons.play_arrow)
+                              : Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(Icons.play_arrow),
+                                    SizedBox(width: 8),
+                                    Text('Start'),
+                                  ],
+                                ),
+                        ),
+                      ),
+                    ),
+                    SizedBox(width: 8),
+                    Flexible(
+                      child: Tooltip(
+                        message: 'Pause Timer',
+                        child: ElevatedButton(
+                          onPressed: timerData.state == TimerState.running
+                              ? () => _pauseTimer(TimerType.death)
+                              : null,
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.orange[600],
+                            foregroundColor: Colors.white,
+                            padding: EdgeInsets.symmetric(
+                              horizontal: isNarrow ? 12 : 24, 
+                              vertical: 12
+                            ),
+                            minimumSize: Size(isNarrow ? 48 : 80, 48),
+                          ),
+                          child: isNarrow 
+                              ? Icon(Icons.pause)
+                              : Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(Icons.pause),
+                                    SizedBox(width: 8),
+                                    Text('Pause'),
+                                  ],
+                                ),
+                        ),
+                      ),
+                    ),
+                    SizedBox(width: 8),
+                    Flexible(
+                      child: Tooltip(
+                        message: 'Heal Character',
+                        child: ElevatedButton(
+                          onPressed: () => _healCharacter(),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.green[600],
+                            foregroundColor: Colors.white,
+                            padding: EdgeInsets.symmetric(
+                              horizontal: isNarrow ? 12 : 24, 
+                              vertical: 12
+                            ),
+                            minimumSize: Size(isNarrow ? 48 : 80, 48),
+                          ),
+                          child: isNarrow 
+                              ? Icon(Icons.healing)
+                              : Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(Icons.healing),
+                                    SizedBox(width: 8),
+                                    Text('Heal'),
+                                  ],
+                                ),
+                        ),
+                      ),
+                    ),
+                    SizedBox(width: 8),
+                    Flexible(
+                      child: Tooltip(
+                        message: 'Reset Timer',
+                        child: ElevatedButton(
+                          onPressed: () => _resetTimer(TimerType.death),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.grey[600],
+                            foregroundColor: Colors.white,
+                            padding: EdgeInsets.symmetric(
+                              horizontal: isNarrow ? 12 : 24, 
+                              vertical: 12
+                            ),
+                            minimumSize: Size(isNarrow ? 48 : 80, 48),
+                          ),
+                          child: isNarrow 
+                              ? Icon(Icons.refresh)
+                              : Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(Icons.refresh),
+                                    SizedBox(width: 8),
+                                    Text('Reset'),
+                                  ],
+                                ),
+                        ),
+                      ),
+                    ),
+                  ],
+                );
+              },
             ),
           ],
         ),
@@ -599,12 +683,16 @@ class _DeathTimerPageState extends State<DeathTimerPage> with TickerProviderStat
                             size: 28,
                           ),
                           SizedBox(width: 8),
-                          Text(
-                            '1 Minute Timer (Repeating)',
-                            style: TextStyle(
-                              fontSize: 24,
-                              fontWeight: FontWeight.bold,
-                              color: Colors.white,
+                          Flexible(
+                            child: Text(
+                              '1 Minute Timer (Repeating)',
+                              style: TextStyle(
+                                fontSize: 24,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.white,
+                              ),
+                              textAlign: TextAlign.center,
+                              overflow: TextOverflow.ellipsis,
                             ),
                           ),
                         ],
@@ -687,12 +775,16 @@ class _DeathTimerPageState extends State<DeathTimerPage> with TickerProviderStat
                             size: 28,
                           ),
                           SizedBox(width: 8),
-                          Text(
-                            '5 Minute Total Timer',
-                            style: TextStyle(
-                              fontSize: 24,
-                              fontWeight: FontWeight.bold,
-                              color: Colors.white,
+                          Flexible(
+                            child: Text(
+                              '5 Minute Total Timer',
+                              style: TextStyle(
+                                fontSize: 24,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.white,
+                              ),
+                              textAlign: TextAlign.center,
+                              overflow: TextOverflow.ellipsis,
                             ),
                           ),
                         ],
@@ -735,45 +827,103 @@ class _DeathTimerPageState extends State<DeathTimerPage> with TickerProviderStat
             
             SizedBox(height: 24),
             
-            // Control buttons
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-              children: [
-                ElevatedButton.icon(
-                  onPressed: timerData.state == TimerState.ready || timerData.state == TimerState.paused
-                      ? () => _startTimer(TimerType.regeneration)
-                      : null,
-                  icon: Icon(Icons.play_arrow),
-                  label: Text('Start'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.cyan[600],
-                    foregroundColor: Colors.white,
-                    padding: EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-                  ),
-                ),
-                ElevatedButton.icon(
-                  onPressed: timerData.state == TimerState.running
-                      ? () => _pauseTimer(TimerType.regeneration)
-                      : null,
-                  icon: Icon(Icons.pause),
-                  label: Text('Pause'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.orange[600],
-                    foregroundColor: Colors.white,
-                    padding: EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-                  ),
-                ),
-                ElevatedButton.icon(
-                  onPressed: () => _resetTimer(TimerType.regeneration),
-                  icon: Icon(Icons.refresh),
-                  label: Text('Reset'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.grey[600],
-                    foregroundColor: Colors.white,
-                    padding: EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-                  ),
-                ),
-              ],
+            // Control buttons - responsive
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final isNarrow = constraints.maxWidth < 600;
+                return Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                  children: [
+                    Flexible(
+                      child: Tooltip(
+                        message: 'Start Timer',
+                        child: ElevatedButton(
+                          onPressed: timerData.state == TimerState.ready || timerData.state == TimerState.paused
+                              ? () => _startTimer(TimerType.regeneration)
+                              : null,
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.cyan[600],
+                            foregroundColor: Colors.white,
+                            padding: EdgeInsets.symmetric(
+                              horizontal: isNarrow ? 12 : 24, 
+                              vertical: 12
+                            ),
+                            minimumSize: Size(isNarrow ? 48 : 80, 48),
+                          ),
+                          child: isNarrow 
+                              ? Icon(Icons.play_arrow)
+                              : Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(Icons.play_arrow),
+                                    SizedBox(width: 8),
+                                    Text('Start'),
+                                  ],
+                                ),
+                        ),
+                      ),
+                    ),
+                    SizedBox(width: 8),
+                    Flexible(
+                      child: Tooltip(
+                        message: 'Pause Timer',
+                        child: ElevatedButton(
+                          onPressed: timerData.state == TimerState.running
+                              ? () => _pauseTimer(TimerType.regeneration)
+                              : null,
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.orange[600],
+                            foregroundColor: Colors.white,
+                            padding: EdgeInsets.symmetric(
+                              horizontal: isNarrow ? 12 : 24, 
+                              vertical: 12
+                            ),
+                            minimumSize: Size(isNarrow ? 48 : 80, 48),
+                          ),
+                          child: isNarrow 
+                              ? Icon(Icons.pause)
+                              : Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(Icons.pause),
+                                    SizedBox(width: 8),
+                                    Text('Pause'),
+                                  ],
+                                ),
+                        ),
+                      ),
+                    ),
+                    SizedBox(width: 8),
+                    Flexible(
+                      child: Tooltip(
+                        message: 'Reset Timer',
+                        child: ElevatedButton(
+                          onPressed: () => _resetTimer(TimerType.regeneration),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.grey[600],
+                            foregroundColor: Colors.white,
+                            padding: EdgeInsets.symmetric(
+                              horizontal: isNarrow ? 12 : 24, 
+                              vertical: 12
+                            ),
+                            minimumSize: Size(isNarrow ? 48 : 80, 48),
+                          ),
+                          child: isNarrow 
+                              ? Icon(Icons.refresh)
+                              : Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(Icons.refresh),
+                                    SizedBox(width: 8),
+                                    Text('Reset'),
+                                  ],
+                                ),
+                        ),
+                      ),
+                    ),
+                  ],
+                );
+              },
             ),
           ],
         ),
@@ -838,45 +988,103 @@ class _DeathTimerPageState extends State<DeathTimerPage> with TickerProviderStat
             
             SizedBox(height: 40),
             
-            // Control buttons
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-              children: [
-                ElevatedButton.icon(
-                  onPressed: timerData.state == TimerState.ready || timerData.state == TimerState.paused
-                      ? () => _startTimer(timerData.type)
-                      : null,
-                  icon: Icon(Icons.play_arrow),
-                  label: Text('Start'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: timerData.stateColor,
-                    foregroundColor: Colors.white,
-                    padding: EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-                  ),
-                ),
-                ElevatedButton.icon(
-                  onPressed: timerData.state == TimerState.running
-                      ? () => _pauseTimer(timerData.type)
-                      : null,
-                  icon: Icon(Icons.pause),
-                  label: Text('Pause'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.orange[600],
-                    foregroundColor: Colors.white,
-                    padding: EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-                  ),
-                ),
-                ElevatedButton.icon(
-                  onPressed: () => _resetTimer(timerData.type),
-                  icon: Icon(Icons.refresh),
-                  label: Text('Reset'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.grey[600],
-                    foregroundColor: Colors.white,
-                    padding: EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-                  ),
-                ),
-              ],
+            // Control buttons - responsive
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final isNarrow = constraints.maxWidth < 600;
+                return Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                  children: [
+                    Flexible(
+                      child: Tooltip(
+                        message: 'Start Timer',
+                        child: ElevatedButton(
+                          onPressed: timerData.state == TimerState.ready || timerData.state == TimerState.paused
+                              ? () => _startTimer(timerData.type)
+                              : null,
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: timerData.stateColor,
+                            foregroundColor: Colors.white,
+                            padding: EdgeInsets.symmetric(
+                              horizontal: isNarrow ? 12 : 24, 
+                              vertical: 12
+                            ),
+                            minimumSize: Size(isNarrow ? 48 : 80, 48),
+                          ),
+                          child: isNarrow 
+                              ? Icon(Icons.play_arrow)
+                              : Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(Icons.play_arrow),
+                                    SizedBox(width: 8),
+                                    Text('Start'),
+                                  ],
+                                ),
+                        ),
+                      ),
+                    ),
+                    SizedBox(width: 8),
+                    Flexible(
+                      child: Tooltip(
+                        message: 'Pause Timer',
+                        child: ElevatedButton(
+                          onPressed: timerData.state == TimerState.running
+                              ? () => _pauseTimer(timerData.type)
+                              : null,
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.orange[600],
+                            foregroundColor: Colors.white,
+                            padding: EdgeInsets.symmetric(
+                              horizontal: isNarrow ? 12 : 24, 
+                              vertical: 12
+                            ),
+                            minimumSize: Size(isNarrow ? 48 : 80, 48),
+                          ),
+                          child: isNarrow 
+                              ? Icon(Icons.pause)
+                              : Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(Icons.pause),
+                                    SizedBox(width: 8),
+                                    Text('Pause'),
+                                  ],
+                                ),
+                        ),
+                      ),
+                    ),
+                    SizedBox(width: 8),
+                    Flexible(
+                      child: Tooltip(
+                        message: 'Reset Timer',
+                        child: ElevatedButton(
+                          onPressed: () => _resetTimer(timerData.type),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.grey[600],
+                            foregroundColor: Colors.white,
+                            padding: EdgeInsets.symmetric(
+                              horizontal: isNarrow ? 12 : 24, 
+                              vertical: 12
+                            ),
+                            minimumSize: Size(isNarrow ? 48 : 80, 48),
+                          ),
+                          child: isNarrow 
+                              ? Icon(Icons.refresh)
+                              : Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(Icons.refresh),
+                                    SizedBox(width: 8),
+                                    Text('Reset'),
+                                  ],
+                                ),
+                        ),
+                      ),
+                    ),
+                  ],
+                );
+              },
             ),
           ],
         ),
